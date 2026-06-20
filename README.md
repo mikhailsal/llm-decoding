@@ -176,6 +176,38 @@ get tokenized as the EOS id -- the binding's `tokenize()` BPE-encodes the
 literal characters; the real EOS id only appears when the model itself
 chooses it.
 
+### Recipe: track P(EOS) across a fixed context
+
+Because EOS often detokenizes to empty/unprintable text, `--watch ' Paris'`
+can't reach it -- there's no string to type. Use one of:
+
+```bash
+# Pull every EOS id from capabilities and add a column per id.
+dsbx inspect --watch-eos 'The weather today is surprisingly dry.'
+
+# Or pin a specific id (any reserved/control token, not just EOS):
+dsbx inspect --watch-id 248044 --watch-id 151643 'A short test.'
+
+# Mix freely with text watches:
+dsbx inspect --watch ' Paris' --watch-eos --watch-id 1234 'France's capital is'
+```
+
+What you get:
+
+- One extra column per watched id, header reads e.g. `watch EOS:248044`
+  or `watch id=1234 ' Paris'` (the piece is appended for sanity).
+- Each row shows the **exact** logprob+rank for that id at that position
+  -- even on full-vocab backends, even if the id falls outside the
+  top-k for that step (`watch_ids` queries the distribution directly).
+- Duplicates across `--watch` / `--watch-id` / `--watch-eos` are deduped
+  by id, so the same column doesn't appear twice.
+- Backends without EOS info (HTTP llama.cpp, cloud providers) print a
+  yellow warning and the `--watch-eos` column is simply omitted.
+
+Inside a `dsbx session` the same flags work after the `inspect` keyword:
+`inspect --watch-eos "<prompt>"`, with the model staying loaded between
+queries so you can scan many prompts cheaply.
+
 ### Examples
 
 ```bash

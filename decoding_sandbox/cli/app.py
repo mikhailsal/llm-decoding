@@ -21,6 +21,7 @@ import argparse
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from rich.console import Console
 from rich.table import Table
@@ -184,9 +185,38 @@ def cmd_probe(args: argparse.Namespace, cfg: Config) -> int:
     )
 
 
-def _resolve_watch(backend, watch: list[str]) -> list[tuple[str, int]]:
-    """Map each watch string to a single token id (warn if multi-token)."""
-    resolved: list[tuple[str, int]] = []
+@dataclass(frozen=True)
+class WatchTarget:
+    """One column in ``inspect``'s "watch" view: a labeled token id.
+
+    Three legal sources, distinguished by the ``label`` prefix:
+
+    * ``"text:<repr>"`` -- the user passed ``--watch TEXT`` and we resolved
+      the first token id of ``TEXT``. ``repr`` is included so the column
+      header shows the user-visible string with quotes.
+    * ``"id=<N>[ <piece>]"`` -- the user passed ``--watch-id N``. The
+      piece text is appended if non-empty, so the header reads
+      ``id=42 ' the'`` instead of just ``id=42``.
+    * ``"EOS:<N>"`` -- the user passed ``--watch-eos`` and we expanded it
+      to every id in ``backend.capabilities.eos_token_ids``.
+
+    The renderer uses the label literally in the column header, so the
+    distinction is preserved end-to-end without any other branching.
+    """
+
+    label: str
+    token_id: int
+
+
+def _resolve_watch(backend, watch: list[str]) -> list[WatchTarget]:
+    """Resolve each ``--watch TEXT`` string to a single token id.
+
+    Warns and skips empty or multi-token tokenizations -- a multi-token
+    watch is impossible to track at the per-position level (which id would
+    we read?). The user's exact input is preserved in the label so the
+    column header is recognizable.
+    """
+    resolved: list[WatchTarget] = []
     for w in watch:
         ids = backend.tokenize(w)
         if not ids:
@@ -197,8 +227,80 @@ def _resolve_watch(backend, watch: list[str]) -> list[tuple[str, int]]:
                 f"[yellow]watch {w!r}: {len(ids)} tokens; watching first "
                 f"({backend.piece(ids[0])!r}). Try a leading space.[/yellow]"
             )
-        resolved.append((w, ids[0]))
+        resolved.append(WatchTarget(label=f"text:{w!r}", token_id=int(ids[0])))
     return resolved
+
+
+def _resolve_watch_ids(backend, ids: list[int]) -> list[WatchTarget]:
+    """Wrap each raw id as a WatchTarget with a descriptive label.
+
+    The piece text (when non-empty) is appended so users can see at a
+    glance which token they pinned -- helpful for sanity-checking, e.g.
+    ``--watch-id 1234`` reading ``id=1234 ' Paris'`` confirms the right
+    one.
+    """
+    from decoding_sandbox.cli import render as _render
+
+    out: list[WatchTarget] = []
+    for raw in ids:
+        try:
+            tid = int(raw)
+        except (TypeError, ValueError):
+            console.print(f"[yellow]watch-id {raw!r}: not an integer, skipped[/yellow]")
+            continue
+        piece = backend.piece(tid) if hasattr(backend, "piece") else ""
+        suffix = f" {_render.token_repr(piece, 12, is_special=True)}" if piece else ""
+        out.append(WatchTarget(label=f"id={tid}{suffix}", token_id=tid))
+    return out
+
+
+def _resolve_watch_eos(backend) -> list[WatchTarget]:
+    """Expand ``--watch-eos`` to one WatchTarget per advertised EOS id.
+
+    Backends that don't expose EOS (HTTP llama.cpp, cloud providers) yield
+    a friendly warning and an empty result -- the user asked for something
+    the backend can't give them, and silent "nothing happens" would be a
+    debugging pitfall.
+    """
+    eos_ids = list(backend.capabilities.eos_token_ids)
+    if not eos_ids:
+        console.print(
+            "[yellow]--watch-eos: this backend does not expose EOS ids "
+            "(Capabilities.eos_token_ids is empty); skipped.[/yellow]"
+        )
+        return []
+    return [WatchTarget(label=f"EOS:{tid}", token_id=int(tid)) for tid in eos_ids]
+
+
+def _collect_watch_targets(
+    backend,
+    *,
+    texts: list[str],
+    ids: list[int],
+    eos: bool,
+) -> list[WatchTarget]:
+    """Merge text/id/eos watches into one ordered, deduped list.
+
+    Order is preserved (texts first, then ids, then EOS expansions) so
+    column ordering in the table matches the user's flag order on the CLI.
+    Dedup is by ``token_id``: if the same id arrives via two different
+    flags (e.g. ``--watch ' Paris' --watch-id 1234`` and they happen to
+    collide), the first wins, keeping its label.
+    """
+    merged: list[WatchTarget] = []
+    seen: set[int] = set()
+    sources = [
+        _resolve_watch(backend, texts),
+        _resolve_watch_ids(backend, ids),
+        _resolve_watch_eos(backend) if eos else [],
+    ]
+    for batch in sources:
+        for target in batch:
+            if target.token_id in seen:
+                continue
+            seen.add(target.token_id)
+            merged.append(target)
+    return merged
 
 
 def _resolve_stop_ids(backend, stop: list[str]) -> list[tuple[str, int]]:
@@ -324,7 +426,12 @@ def cmd_inspect(
         if show_banner:
             _print_backend_banner(backend)
 
-        watch = _resolve_watch(backend, args.watch or [])
+        watch = _collect_watch_targets(
+            backend,
+            texts=list(args.watch or []),
+            ids=list(getattr(args, "watch_id", []) or []),
+            eos=bool(getattr(args, "watch_eos", False)),
+        )
         caps = backend.capabilities
         prompt_tokens = backend.tokenize(args.prompt)
         generated_only_inspect = (
@@ -340,7 +447,9 @@ def cmd_inspect(
             with _maybe_phase(timing, "next-token distribution", tokens=tok_count):
                 step = backend.next_distribution(prompt_tokens, top_k=args.top_k)
             step.context_text = args.prompt
-            step.watched = {wid: backend.lookup_watch(step, wid) for _, wid in watch}
+            step.watched = {
+                t.token_id: backend.lookup_watch(step, t.token_id) for t in watch
+            }
             steps = [step]
             title = f"Next-token inspection: {args.prompt!r}"
         else:
@@ -349,7 +458,7 @@ def cmd_inspect(
                 steps = backend.score_prompt(
                     args.prompt,
                     top_k=args.top_k,
-                    watch_ids=[i for _, i in watch],
+                    watch_ids=[t.token_id for t in watch],
                 )
             title = f"Context inspection: {args.prompt!r}"
 
@@ -359,8 +468,8 @@ def cmd_inspect(
         table.add_column("p(next)", justify="right")
         table.add_column("rank", justify="right")
         table.add_column("confidence (top-1)")
-        for w, _ in watch:
-            table.add_column(f"watch {w!r}")
+        for target in watch:
+            table.add_column(f"watch {target.label}")
 
         for st in steps:
             ctx = render.token_repr(st.context_text or "", 14)
@@ -384,8 +493,8 @@ def cmd_inspect(
                 else "-"
             )
             row = [str(st.position), f"{ctx} -> {nxt}", p_next, rank, conf]
-            for _, wid in watch:
-                row.append(render.watch_cell(st.watched.get(wid)))
+            for target in watch:
+                row.append(render.watch_cell(st.watched.get(target.token_id)))
             table.add_row(*row)
 
         console.print(table)
@@ -813,6 +922,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument(
         "--watch", action="append", default=[],
         help="Token text to highlight at every position (repeatable). Use a leading space, e.g. --watch ' Paris'.",
+    )
+    p_inspect.add_argument(
+        "--watch-id", action="append", type=int, default=[], metavar="N",
+        help=(
+            "Watch a specific token id (repeatable). Bypasses the text -> id "
+            "round-trip, so it works for reserved/control tokens whose "
+            "detokenized piece is empty or unprintable (EOS/BOS/PAD/<|...|>)."
+        ),
+    )
+    p_inspect.add_argument(
+        "--watch-eos", action="store_true", default=False,
+        help=(
+            "Convenience: expand to one watch column per id in "
+            "backend.capabilities.eos_token_ids. Use this to track how the "
+            "model's probability for EOS evolves across a fixed context."
+        ),
     )
     p_inspect.add_argument(
         "--candidates", type=int, default=0, metavar="N",

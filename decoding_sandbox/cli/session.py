@@ -96,6 +96,8 @@ def _build_session_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("--model", default=None)
     p_inspect.add_argument("--top-k", type=int, default=8)
     p_inspect.add_argument("--watch", action="append", default=[])
+    p_inspect.add_argument("--watch-id", action="append", type=int, default=[])
+    p_inspect.add_argument("--watch-eos", action="store_true", default=False)
     p_inspect.add_argument("--candidates", type=int, default=0)
     p_inspect.add_argument("--no-timing", action="store_true")
     _add_preflight_flag(p_inspect)
@@ -146,7 +148,8 @@ def _build_session_parser() -> argparse.ArgumentParser:
 
 HELP_TEXT = """\
 session commands:
-  inspect "<text>" [--watch ' Paris'] [--top-k N] [--candidates N]
+  inspect "<text>" [--watch ' Paris'] [--watch-id N] [--watch-eos]
+                   [--top-k N] [--candidates N]
   generate "<text>" [--sampler greedy|temperature|top_k|top_p|min_p|typical|custom]
                     [--temperature T] [--top-p P] [--min-p P] [--typical-p P]
                     [--sampler-top-k K] [--max-tokens N] [--seed N]

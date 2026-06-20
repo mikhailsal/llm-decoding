@@ -435,3 +435,195 @@ def test_main_smoke_doctor_with_skip_preflight(monkeypatch, captured_console) ->
 def test_main_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit):
         app.main([])
+
+
+# --------------------------------------------------------------------------- #
+# Watch target resolution (--watch / --watch-id / --watch-eos)
+# --------------------------------------------------------------------------- #
+def test_resolve_watch_text_uses_first_id_and_quoted_label() -> None:
+    """The text-mode watch tokenizes and labels via the user's repr.
+    The column header in the table is built off this label, so its
+    quoted form is part of the public contract here."""
+    backend = FakeBackend(
+        tokens={" Paris": [42]},
+        pieces={42: " Paris"},
+    )
+    [t] = app._resolve_watch(backend, [" Paris"])
+    assert t.token_id == 42
+    assert t.label.startswith("text:")
+    assert "' Paris'" in t.label  # repr quoting preserved
+
+
+def test_resolve_watch_skips_empty_tokenization(captured_console) -> None:
+    """Tokens that yield no ids get a warning and are dropped (otherwise we'd
+    have a column we cannot populate)."""
+    backend = FakeBackend(tokens={"x": []})
+    out = app._resolve_watch(backend, ["x"])
+    assert out == []
+    assert "tokenizes to nothing" in captured_console.getvalue()
+
+
+def test_resolve_watch_id_includes_piece_in_label() -> None:
+    backend = FakeBackend(pieces={1234: " Paris"})
+    [t] = app._resolve_watch_ids(backend, [1234])
+    assert t.token_id == 1234
+    assert t.label.startswith("id=1234")
+    assert "Paris" in t.label  # the piece is appended for context
+
+
+def test_resolve_watch_id_handles_empty_piece() -> None:
+    """A control token whose piece is empty still gets a clean label
+    (the renderer's <special> marker takes over for the suffix)."""
+    backend = FakeBackend(pieces={9999: ""})
+    [t] = app._resolve_watch_ids(backend, [9999])
+    assert t.label == "id=9999"
+
+
+def test_resolve_watch_id_rejects_non_integer(captured_console) -> None:
+    backend = FakeBackend()
+    out = app._resolve_watch_ids(backend, ["nope"])  # type: ignore[arg-type]
+    assert out == []
+    assert "not an integer" in captured_console.getvalue()
+
+
+def test_resolve_watch_eos_expands_from_capabilities() -> None:
+    """--watch-eos pulls ids straight from capabilities so we don't depend on
+    the text round-trip; each id becomes its own WatchTarget."""
+    backend = FakeBackend(
+        pieces={250: "", 251: ""},
+        eos_token_ids=(250, 251),
+    )
+    out = app._resolve_watch_eos(backend)
+    assert [t.token_id for t in out] == [250, 251]
+    assert all(t.label.startswith("EOS:") for t in out)
+
+
+def test_resolve_watch_eos_warns_when_unavailable(captured_console) -> None:
+    """The HTTP llama.cpp / cloud-provider case: capabilities.eos_token_ids
+    is empty, so --watch-eos must surface that explicitly instead of
+    silently producing nothing."""
+    backend = FakeBackend()  # default eos_token_ids=()
+    assert app._resolve_watch_eos(backend) == []
+    assert "does not expose EOS ids" in captured_console.getvalue()
+
+
+def test_collect_watch_targets_dedups_across_sources() -> None:
+    """When the same id arrives from --watch ' Paris' AND --watch-id 42,
+    we keep one column (the text label wins, since it came first)."""
+    backend = FakeBackend(
+        tokens={" Paris": [42]},
+        pieces={42: " Paris"},
+    )
+    out = app._collect_watch_targets(
+        backend, texts=[" Paris"], ids=[42], eos=False
+    )
+    assert len(out) == 1
+    assert out[0].label.startswith("text:")
+    assert out[0].token_id == 42
+
+
+def test_collect_watch_targets_preserves_source_order() -> None:
+    """Columns line up with the user's mental model: texts first, then ids,
+    then EOS expansion."""
+    backend = FakeBackend(
+        tokens={"a": [1], "b": [2]},
+        pieces={1: "a", 2: "b", 9: "", 250: ""},
+        eos_token_ids=(250,),
+    )
+    out = app._collect_watch_targets(
+        backend, texts=["a", "b"], ids=[9], eos=True
+    )
+    assert [t.token_id for t in out] == [1, 2, 9, 250]
+
+
+def test_collect_watch_targets_combines_text_id_and_eos() -> None:
+    """The motivating real-world recipe: track ' Paris' AND EOS at every
+    position in a fixed context."""
+    backend = FakeBackend(
+        tokens={" Paris": [42]},
+        pieces={42: " Paris", 250: ""},
+        eos_token_ids=(250,),
+    )
+    out = app._collect_watch_targets(
+        backend, texts=[" Paris"], ids=[], eos=True
+    )
+    assert [t.token_id for t in out] == [42, 250]
+    assert out[0].label.startswith("text:")
+    assert out[1].label == "EOS:250"
+
+
+# --------------------------------------------------------------------------- #
+# Argument parser: the new --watch-id / --watch-eos flags
+# --------------------------------------------------------------------------- #
+def test_parser_inspect_collects_repeated_watch_id_flags() -> None:
+    parser = app.build_parser()
+    args = parser.parse_args(
+        ["inspect", "hi", "--watch-id", "10", "--watch-id", "20"]
+    )
+    assert args.watch_id == [10, 20]
+
+
+def test_parser_inspect_rejects_non_int_watch_id() -> None:
+    parser = app.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["inspect", "hi", "--watch-id", "abc"])
+
+
+def test_parser_inspect_watch_eos_defaults_false() -> None:
+    parser = app.build_parser()
+    args = parser.parse_args(["inspect", "hi"])
+    assert args.watch_eos is False
+
+
+def test_parser_inspect_watch_eos_flag_sets_true() -> None:
+    parser = app.build_parser()
+    args = parser.parse_args(["inspect", "hi", "--watch-eos"])
+    assert args.watch_eos is True
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end: --watch-eos renders an EOS column populated by score_prompt
+# --------------------------------------------------------------------------- #
+def test_inspect_watch_eos_renders_column_with_per_position_prob(
+    monkeypatch, captured_console
+) -> None:
+    """The full path: --watch-eos collects the EOS id from capabilities,
+    score_prompt threads it through watch_ids, the table renders a column
+    labeled ``watch EOS:<id>`` and each row has a percentage for it."""
+    backend = FakeBackend(
+        tokens={"hi": [1, 2]},
+        pieces={1: "h", 2: "i", 250: ""},
+        eos_token_ids=(250,),
+    )
+    # FakeBackend.score_prompt isn't overridden, so emulate it directly via
+    # a thin override on this instance.
+    def fake_score(prompt, top_k, watch_ids=None):
+        watch_ids = watch_ids or []
+        watched = {
+            wid: TokenCandidate(wid, backend.piece(wid), math.log(0.05), 7)
+            for wid in watch_ids
+        }
+        return [
+            StepResult(
+                position=1, candidates=[cand(2, "i", 0.9, 0)], is_full_vocab=True,
+                chosen=cand(2, "i", 0.9, 0), context_text="h", watched=watched,
+            )
+        ]
+    backend.score_prompt = fake_score  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
+    )
+
+    rc = app.cmd_inspect(
+        argparse.Namespace(
+            backend="fake", model=None, prompt="hi", top_k=2,
+            watch=[], watch_id=[], watch_eos=True,
+            candidates=0, skip_preflight=True,
+        ),
+        _cfg_no_preflight(),
+    )
+
+    rendered = captured_console.getvalue()
+    assert rc == 0
+    assert "EOS:250" in rendered  # the new column header
+    assert "5.00%" in rendered    # the per-position probability we faked
