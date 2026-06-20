@@ -120,6 +120,57 @@ def test_build_backend_hf_respects_overrides_from_config(monkeypatch) -> None:
     assert captured["cpu_mem"] == "30GiB"
 
 
+def test_build_backend_llamacpp_py_routes_with_normalized_name(monkeypatch) -> None:
+    """Both ``llamacpp-py`` and ``llamacpp_py`` map to LlamaCppPyBackend, and
+    every config field is forwarded to the constructor."""
+    cfg = load_config(load_secrets=False)
+    cfg.raw["local"]["llamacpp_py"]["model_path"] = "/tmp/explicit.gguf"
+    cfg.raw["local"]["llamacpp_py"]["n_gpu_layers"] = 30
+    cfg.raw["local"]["llamacpp_py"]["n_ctx"] = 2048
+    cfg.raw["local"]["llamacpp_py"]["logits_all"] = True
+
+    import decoding_sandbox.backends.llamacpp_py as lp_mod
+
+    captured: dict = {}
+
+    class _Stub:
+        def __init__(
+            self,
+            *,
+            model_path,
+            model_glob,
+            model_search_dirs,
+            n_gpu_layers,
+            n_ctx,
+            logits_all,
+            verbose,
+        ):
+            captured.update(
+                model_path=model_path,
+                n_gpu_layers=n_gpu_layers,
+                n_ctx=n_ctx,
+                logits_all=logits_all,
+                verbose=verbose,
+                model_glob=model_glob,
+                model_search_dirs=model_search_dirs,
+            )
+
+    monkeypatch.setattr(lp_mod, "LlamaCppPyBackend", _Stub)
+
+    for alias in ("llamacpp-py", "llamacpp_py", "llamacpp-python", "llama-py"):
+        captured.clear()
+        factory_mod.build_backend(alias, cfg)
+        assert captured["model_path"] == "/tmp/explicit.gguf"
+        assert captured["n_gpu_layers"] == 30
+        assert captured["n_ctx"] == 2048
+        assert captured["logits_all"] is True
+
+    # CLI --model overrides model_path.
+    captured.clear()
+    factory_mod.build_backend("llamacpp-py", cfg, model="/tmp/other.gguf")
+    assert captured["model_path"] == "/tmp/other.gguf"
+
+
 def test_build_backend_routes_provider_to_openai_compat(monkeypatch) -> None:
     """Any name matching a provider should construct OpenAICompatBackend."""
     cfg = load_config(load_secrets=False)

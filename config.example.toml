@@ -35,6 +35,26 @@ base_url = "http://127.0.0.1:8080"
 # Label only; the actual model is whatever llama-server was launched with.
 model = "Qwen3.5-9B-Base-Q4_K_M"
 
+[local.llamacpp_py]
+# IN-PROCESS llama.cpp via the `llama-cpp-python` binding. Same GGUF as the
+# HTTP backend, but with `logits_all=true` we expose the FULL [seq, vocab]
+# tensor -- the true white-box engine for the 9B base, which the HF backend
+# can't load on the 6 GB Pascal (bitsandbytes/accelerate meta-tensor bug on
+# the hybrid arch). Build with CUDA on dsbx-host:
+#   CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61 \
+#               -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12" \
+#       pip install llama-cpp-python --no-binary=:all:
+# If `model_path` is unset, the backend searches `model_search_dirs` for the
+# first file matching `model_glob` (the GGUF already downloaded by the
+# HTTP backend's setup script).
+# model_path = "/path/to/Qwen3.5-9B-Base-Q4_K_M.gguf"
+model_glob = "**/Qwen3.5-9B-Base-Q4_K_M.gguf"
+model_search_dirs = ["~/.cache/dsbx/huggingface", "~/.cache/huggingface"]
+n_gpu_layers = 20
+n_ctx = 4096
+logits_all = true
+verbose = false
+
 [local.hf]
 # HuggingFace transformers white-box engine (full-vocab logits).
 #

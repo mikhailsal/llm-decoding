@@ -149,6 +149,21 @@ def _report_local_engines() -> None:
     except Exception:  # noqa: BLE001
         table.add_row("bitsandbytes", "[yellow]not installed[/yellow]")
 
+    try:
+        import llama_cpp  # type: ignore
+
+        ver = getattr(llama_cpp, "__version__", "?")
+        # Probing CUDA support without loading a model is hard; just report the
+        # binding version. The build flags went through CMAKE_ARGS at install.
+        table.add_row(
+            "llama-cpp-python", f"[green]{ver}[/green] (for the llamacpp-py backend)"
+        )
+    except Exception:  # noqa: BLE001
+        table.add_row(
+            "llama-cpp-python",
+            "[yellow]not installed[/yellow] (needed for llamacpp-py)",
+        )
+
     console.print(table)
 
 
@@ -229,11 +244,22 @@ def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
             "is within the returned top-k (others read '<top-k').[/dim]"
         )
     if not caps.full_vocab and not caps.prompt_logprobs:
-        console.print(
-            "[yellow]note: this backend has no native whole-context logprobs; "
-            "each position is re-evaluated per prefix (slow, and chat-only providers "
-            "are approximate).[/yellow]"
-        )
+        # llama.cpp HTTP reuses its KV cache between calls (``cache_prompt=True``)
+        # so the per-prefix loop only does ~1 token of forward pass per
+        # position after the first -- it's not actually slow. Cloud chat-only
+        # providers have no cache and pay full inference cost per prefix.
+        if backend.__class__.__name__ == "LlamaCppBackend":
+            console.print(
+                "[dim]note: this backend exposes top-k only and derives "
+                "whole-context one position at a time (cheap with cache_prompt). "
+                "For FULL vocab on the same GGUF, use --backend llamacpp-py.[/dim]"
+            )
+        else:
+            console.print(
+                "[yellow]note: this backend has no native whole-context "
+                "logprobs; each prompt position is re-evaluated separately, "
+                "which is genuinely slow for chat-only cloud providers.[/yellow]"
+            )
 
     watch = _resolve_watch(backend, args.watch or [])
     generated_only_inspect = (
@@ -471,8 +497,11 @@ def _print_candidates(steps, max_positions: int, top_k: int) -> None:
 
 
 _BACKEND_HELP = (
-    "Backend name: built-ins are 'hf' and 'llamacpp'; any provider configured "
-    "in config.toml (e.g. fireworks, nim, openrouter, lmstudio) also works. "
+    "Backend name: built-ins are 'hf' (HF transformers full-vocab), "
+    "'llamacpp' (HTTP top-k via llama-server), and 'llamacpp-py' "
+    "(in-process llama-cpp-python with FULL vocab via logits_all=True -- "
+    "white-box for GGUFs HF can't load); any provider configured in "
+    "config.toml (e.g. fireworks, nim, openrouter, lmstudio) also works. "
     "Default: config run.backend."
 )
 

@@ -39,6 +39,23 @@ _DEFAULTS: dict[str, Any] = {
             "base_url": "http://127.0.0.1:8080",
             "model": "Qwen3.5-9B-Base-Q4_K_M",
         },
+        "llamacpp_py": {
+            # In-process llama.cpp via llama-cpp-python. Same GGUF as the HTTP
+            # backend, but with `logits_all=True` so we expose the FULL [seq,
+            # vocab] tensor (true white-box on Qwen3.5-9B, which HF can't load
+            # on the 6 GB Pascal). model_path is auto-discovered from the HF
+            # cache if left null.
+            "model_path": None,
+            "model_glob": "**/Qwen3.5-9B-Base-Q4_K_M.gguf",
+            "model_search_dirs": [
+                "~/.cache/dsbx/huggingface",
+                "~/.cache/huggingface",
+            ],
+            "n_gpu_layers": 20,
+            "n_ctx": 4096,
+            "logits_all": True,
+            "verbose": False,
+        },
         "hf": {
             # 9B base doesn't load in 4-bit on the 6 GB Pascal (bnb/accelerate
             # meta-tensor bug on the hybrid arch); white-box uses a dense base,

@@ -15,13 +15,18 @@ vocabulary; a softmax turns those into a probability distribution. "Decoding" is
 just repeatedly choosing the next token from that distribution. What you can see
 depends on the backend:
 
-- **Whole-context logits (every prompt token):** complete only with local
-  **HuggingFace transformers** (full vocabulary). Available top-k via
+- **Whole-context logits (every prompt token):** complete with local
+  **HuggingFace transformers** *and* the in-process
+  **`llamacpp-py`** backend (full vocabulary). Available top-k via
   **Fireworks** `echo`.
 - **Full-vocabulary distribution + custom samplers + true manual stepping +
-  speculative:** **transformers** (the "white box").
+  speculative:** **transformers** *or* **`llamacpp-py`** (both expose the
+  whole `[seq, vocab]` logits tensor). HF runs PyTorch, `llamacpp-py` runs the
+  llama.cpp engine in-process on the same Q4 GGUF.
+- **Top-k only (no full vocab):** **`llamacpp`** HTTP backend (top-k = N
+  candidates per position) and cloud chat-only providers.
 - **Cloud generated-token top-k:** Fireworks (<=5), NVIDIA NIM (<=20),
-  OpenRouter (<=20).
+  OpenRouter (<=20), LM Studio (<=10).
 
 ### HuggingFace `transformers`, briefly
 
@@ -30,8 +35,19 @@ depends on the backend:
 distribution at **every** position, prompt included. From that single tensor you
 get whole-context inspection (softmax over the vocab axis), custom decoders
 (operate directly on logits), manual decoding (keep `past_key_values`, append any
-chosen token id, step again), and speculative decoding (assisted generation). It
-is the only backend that exposes the entire vocabulary instead of a top-k slice.
+chosen token id, step again), and speculative decoding (assisted generation).
+
+### `llamacpp-py`, briefly
+
+The in-process `llama-cpp-python` binding compiled against the same
+sm_61 CUDA build as `llama-server`. Initialized with `logits_all=True`, it
+exposes the equivalent of HF's `outputs.logits` -- a `[seq, vocab]`
+matrix via `Llama.scores` -- for **GGUF models that HF can't load** (e.g.
+Qwen3.5-9B-Base on the 6 GB P40 due to the bitsandbytes + accelerate
+meta-tensor bug on its hybrid arch). Same Q4 GGUF on disk as `llamacpp`
+(HTTP) -- no extra download -- and the same partial GPU offload via
+`n_gpu_layers`. KV-cache is reused when subsequent calls extend the
+previous context (manual stepping stays cheap).
 
 ## Provider logprob support (live-verified, June 2026)
 
@@ -93,7 +109,8 @@ dsbx doctor                     # should now show torch cuda=True on the P40
 - `dsbx doctor` -- environment, API keys, disk free-space preflight, local engines.
 - `dsbx probe` -- live provider logprob capability check.
 - `dsbx inspect "<text>"` -- per-token confidence + watch-token highlighting
-  (whole-context). `--backend hf|llamacpp|fireworks|nim|openrouter|lmstudio`,
+  (whole-context).
+  `--backend hf|llamacpp|llamacpp-py|fireworks|nim|openrouter|lmstudio`,
   `--watch ' Paris'`, `--top-k`, `--candidates N`.
 - `dsbx generate "<text>"` -- decode with a sampler, showing per-step changes vs
   greedy. `--sampler greedy|temperature|top_k|top_p|min_p|typical|custom`,
@@ -107,8 +124,11 @@ dsbx doctor                     # should now show torch cuda=True on the P40
 ### Examples
 
 ```bash
-# Whole-context inspection on the local 9B base via llama.cpp
+# Whole-context inspection on the local 9B base via llama.cpp (top-k)
 dsbx inspect "The capital of France is Paris" --backend llamacpp --watch " Paris"
+
+# FULL VOCAB inspection of the 9B GGUF in-process (white-box; same Q4 weights)
+dsbx inspect "The capital of France is Paris" --backend llamacpp-py --watch " London"
 
 # Full-vocab inspection (exact prob/rank for ANY token) via HF
 dsbx inspect "The capital of France is Paris" --backend hf --watch " London"
@@ -133,7 +153,10 @@ dsbx spec "The capital of France is" --gamma 4
 decoding_sandbox/
   core/        config, storage, provider_probe, types, backend, factory,
                samplers, engine, manual, speculative  (no UI deps)
-  backends/    hf (full vocab) / llamacpp (top-k) / openai_compat (cloud)
+  backends/    hf (full vocab, PyTorch) /
+               llamacpp (top-k via HTTP) /
+               llamacpp-py (full vocab via in-process llama-cpp-python) /
+               openai_compat (cloud)
   cli/         argparse front-end, rich rendering, manual TUI
 scripts/       sync_to_wind.sh, setup_wind.sh, build_llamacpp_wind.sh,
                run_llama_server_wind.sh, hf_smoke.py, test_manual.py
@@ -148,7 +171,11 @@ examples/      custom_sampler.py
 - **HF transformers** white-box engine works with a dense base (full vocab
   151936, whole-context teacher forcing). The 9B base does **not** load in 4-bit
   on the 6 GB Pascal (bitsandbytes+accelerate meta-tensor bug on the hybrid arch),
-  so the 9B base is served by llama.cpp and HF uses a dense base.
+  so the 9B base is served by `llamacpp`/`llamacpp-py` and HF uses a dense base.
+- **`llamacpp-py`** (in-process `llama-cpp-python` with `logits_all=True`)
+  closes the gap: the 9B Q4 GGUF runs on the same sm_61 build and exposes the
+  FULL `[seq, vocab]` logits tensor, so `inspect`/`generate`/`manual`/`spec`
+  get the same white-box features HF gives for smaller models.
 - **Cloud**: Fireworks chat top_logprobs + whole-context echo (frontier models);
   NIM and OpenRouter generated-token logprobs (OpenRouter needs
   `require_parameters`); Gemini AI Studio deferred (logprobs gated off).
@@ -159,7 +186,9 @@ All planned waves (0-5) are implemented. Foundations/environment, backend
 abstraction + `inspect`, samplers + `generate` (with `--stop`), the manual TUI,
 cloud backends (Fireworks `echo` whole-context + chat-only NIM/OpenRouter/LM
 Studio), and speculative decoding via the `Speculator` Protocol +
-`HFSpeculator` (HF assisted-generation style; a `LlamaCppSpeculator` matching
-the same Protocol is the natural next addition). All heavy commands run the
-`storage.preflight_or_raise` disk check first (bypass with `--skip-preflight`).
-Next up: a thin FastAPI + browser UI over the same `core/`.
+`HFSpeculator`. Post-plan addition: the **`llamacpp-py`** in-process backend
+(full vocab via `Llama.scores` with `logits_all=True`), which gives the 9B
+Qwen3.5 base the same white-box experience as HF does for smaller models. All
+heavy commands run the `storage.preflight_or_raise` disk check first (bypass
+with `--skip-preflight`). Next up: a thin FastAPI + browser UI over the same
+`core/`, and a `LlamaCppSpeculator` mirroring the existing `HFSpeculator`.

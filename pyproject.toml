@@ -31,6 +31,16 @@ local = [
     "accelerate>=0.34",
     "bitsandbytes>=0.43",
     "sentencepiece>=0.2",
+    # In-process llama.cpp for the white-box llamacpp-py backend (full-vocab
+    # logits via Llama.scores). On dsbx-host, install with CUDA via:
+    #   CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61
+    #               -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12" \
+    #     pip install llama-cpp-python --no-binary=:all:
+    # or use abetlen's prebuilt CUDA wheels:
+    #   pip install llama-cpp-python \
+    #     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+    "numpy>=1.26",
+    "llama-cpp-python>=0.3.2",
 ]
 dev = [
     "pytest>=8.0",
