@@ -1,0 +1,35 @@
+# Secrets / local config -- NEVER commit API keys
+config.toml
+.env
+.env.local
+*.secret
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Local data / model caches (should live on ~/.cache/dsbx on dsbx-host, never committed)
+models/
+cache/
+*.gguf
+*.safetensors
+*.bin
+
+# Saved decoding transcripts / scratch output
+sessions/
+out/
+scratch/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

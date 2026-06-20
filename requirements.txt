@@ -1,0 +1,10 @@
+# Core runtime deps (CLI + cloud backends). Works on the client and on dsbx-host.
+# For local-model engines on dsbx-host, also install the "local" extra and torch:
+#   pip install -e ".[local]"
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+rich>=13.7
+prompt_toolkit>=3.0
+httpx>=0.27
+openai>=1.40
+huggingface_hub>=0.24
+tomli>=2.0; python_version < "3.11"

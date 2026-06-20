@@ -1,0 +1,91 @@
+# Decoding Sandbox -- example configuration.
+#
+# Copy this to `config.toml` (gitignored) and adjust. Anything you omit falls
+# back to these defaults. API keys are NEVER stored here -- only the NAME of the
+# environment variable that holds each key (see [providers.*].api_key_env).
+#
+# Keys currently live in ~/.config/dsbx/secrets.env. Point `secrets_env_file`
+# at it (or export the vars yourself) so the CLI can read them.
+
+# Optional dotenv-style file the CLI will load before reading api_key_env vars.
+secrets_env_file = "~/.config/dsbx/secrets.env"
+
+[run]
+# Default backend used when --backend is not passed.
+# One of: hf | llamacpp | fireworks | nim | openrouter
+backend = "llamacpp"
+
+[storage]
+# Where bulk caches go. On dsbx-host this is the large local SSD (L:), which has room
+# and is NOT R: (unreliable) or S: (HDD). On the client these are ignored
+# unless the paths exist.
+hf_home = "~/.cache/dsbx/huggingface"
+pip_cache = "~/.cache/dsbx/pip"
+# Preflight aborts before heavy work if free space on any check path drops
+# below this many GB (protects C: where the Linux .img lives).
+min_free_gb = 5.0
+# Paths whose free space is checked by `dsbx doctor` / preflight.
+check_paths = ["/", "~/.cache/dsbx", "~"]
+
+# ---- Local engines (run on dsbx-host) -------------------------------------------
+
+[local.llamacpp]
+# llama-server endpoint (built with CUDA on dsbx-host, see scripts/setup_wind.sh).
+base_url = "http://127.0.0.1:8080"
+# Label only; the actual model is whatever llama-server was launched with.
+model = "Qwen3.5-9B-Base-Q4_K_M"
+
+[local.hf]
+# HuggingFace transformers white-box engine (full-vocab logits).
+#
+# NOTE: the 9B base (Qwen/Qwen3.5-9B-Base) does NOT load cleanly in 4-bit on the
+# 6 GB Pascal P40 -- its hybrid/multimodal arch + bitsandbytes CPU offload hits
+# accelerate meta-tensor bugs (verified). So the white-box engine defaults to a
+# dense base that fits fully in VRAM, and the 9B base is served by llama.cpp.
+# You can still try the 9B here with --model Qwen/Qwen3.5-9B-Base (slow, may fail).
+model = "Qwen/Qwen3-1.7B-Base"
+load_in_4bit = true
+device_map = "auto"
+# Fallback if the chosen model fails to load.
+fallback_model = "Qwen/Qwen3-1.7B-Base"
+
+# ---- Cloud providers (logprob-capable, live-verified) ----------------------
+
+[providers.fireworks]
+base_url = "https://api.fireworks.ai/inference/v1"
+api_key_env = "FIREWORKS_API_KEY"
+default_model = "accounts/fireworks/models/gpt-oss-120b"
+# Fireworks supports top_logprobs <= 5 and whole-context prompt logprobs (echo).
+max_top_logprobs = 5
+supports_prompt_logprobs = true
+has_completions = true
+
+[providers.nim]
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_env = "NVIDIA_API_KEY"
+default_model = "meta/llama-3.1-8b-instruct"
+max_top_logprobs = 20
+supports_prompt_logprobs = false
+has_completions = false
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+default_model = "meta-llama/llama-3.1-8b-instruct"
+max_top_logprobs = 20
+supports_prompt_logprobs = false
+# Required so OpenRouter only routes to providers that actually honor logprobs.
+require_parameters = true
+has_completions = false
+
+[providers.lmstudio]
+# LM Studio's local OpenAI-compatible server (Windows). Start it in LM Studio.
+base_url = "http://127.0.0.1:1234/v1"
+api_key_env = "LMSTUDIO_API_KEY"
+default_model = "local-model"
+max_top_logprobs = 10
+supports_prompt_logprobs = false
+has_completions = true
+
+# Gemini AI Studio is intentionally absent: logprobs is disabled there
+# (capability gate, verified live). Use Vertex AI + billing if ever needed.
