@@ -229,14 +229,22 @@ class LlamaCppPyBackend(Backend):
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None
     ) -> list[StepResult]:
+        """Whole-context inspection including the trailing "next" prediction.
+
+        For an N-token prompt this returns N StepResults. The first N-1 rows
+        score each prompt token against the actual next one; the final row
+        is the distribution *after* the last prompt token, with
+        ``chosen=None``. The same Llama.scores tensor already holds that
+        row, so the only extra work is one more numpy argpartition.
+        """
         np = self._numpy
         watch_ids = watch_ids or []
         ids = self.tokenize(prompt)
-        if len(ids) < 2:
+        if not ids:
             return []
         logp = self._logsoftmax_all(ids)  # [seq, vocab]
         results: list[StepResult] = []
-        for i in range(len(ids) - 1):
+        for i in range(len(ids)):
             dist = logp[i]
             k = max(1, min(top_k, dist.shape[-1]))
             idx_part = np.argpartition(-dist, k - 1)[:k]
@@ -250,7 +258,11 @@ class LlamaCppPyBackend(Backend):
                 )
                 for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
             ]
-            chosen = self._exact_candidate(dist, ids[i + 1])
+            chosen = (
+                self._exact_candidate(dist, ids[i + 1])
+                if i + 1 < len(ids)
+                else None
+            )
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}
             results.append(
                 StepResult(

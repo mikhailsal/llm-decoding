@@ -18,40 +18,80 @@ from tests.fakes import FakeBackend, cand
 # Backend.score_prompt generic fallback
 # --------------------------------------------------------------------------- #
 def test_score_prompt_marks_actual_token_unknown_when_outside_top_k() -> None:
+    """The base Backend.score_prompt returns one row per prompt token
+    (N steps for an N-token prompt). The first N-1 score the actual next
+    token; the last is the trailing "predict next" row with chosen=None.
+    """
     backend = FakeBackend(
         tokens={"AB": [1, 2]},
         pieces={1: "A", 2: "B", 3: "C", 4: "D"},
-        distributions={(1,): [cand(3, "C", 0.7, 0), cand(4, "D", 0.2, 1)]},
+        distributions={
+            (1,): [cand(3, "C", 0.7, 0), cand(4, "D", 0.2, 1)],
+            (1, 2): [cand(3, "C", 0.5, 0), cand(4, "D", 0.3, 1)],
+        },
         full_vocab=False,
         prompt_logprobs=False,
     )
 
-    [step] = backend.score_prompt("AB", top_k=2, watch_ids=[4])
+    scored, trailing = backend.score_prompt("AB", top_k=2, watch_ids=[4])
 
-    assert step.position == 1
-    assert step.context_text == "A"
-    assert step.chosen is not None
-    assert step.chosen.token_id == 2
-    assert step.chosen.rank == -1
-    assert math.isnan(step.chosen.logprob)
-    assert step.watched[4].text == "D"
-    assert step.watched[4].rank == 1
+    assert scored.position == 1
+    assert scored.context_text == "A"
+    assert scored.chosen is not None
+    assert scored.chosen.token_id == 2
+    assert scored.chosen.rank == -1
+    assert math.isnan(scored.chosen.logprob)
+    assert scored.watched[4].text == "D"
+    assert scored.watched[4].rank == 1
+
+    assert trailing.position == 2
+    assert trailing.context_text == "B"
+    assert trailing.chosen is None  # no actual next token to verify
+    assert trailing.watched[4].rank == 1  # still resolved from top-k
 
 
 def test_score_prompt_watch_records_top_k_member_with_correct_rank() -> None:
-    """Watch tokens that *are* within the top-k must report their rank/prob."""
+    """Watch tokens that *are* within the top-k must report their rank/prob
+    on every row, including the trailing prediction."""
     backend = FakeBackend(
         tokens={"AB": [1, 2]},
         pieces={1: "A", 2: "B", 3: "C", 4: "D"},
-        distributions={(1,): [cand(3, "C", 0.7, 0), cand(4, "D", 0.2, 1)]},
+        distributions={
+            (1,): [cand(3, "C", 0.7, 0), cand(4, "D", 0.2, 1)],
+            (1, 2): [cand(3, "C", 0.6, 0), cand(4, "D", 0.3, 1)],
+        },
         full_vocab=False,
         prompt_logprobs=False,
     )
 
-    [step] = backend.score_prompt("AB", top_k=2, watch_ids=[3])
+    steps = backend.score_prompt("AB", top_k=2, watch_ids=[3])
 
-    assert step.watched[3].rank == 0
-    assert not math.isnan(step.watched[3].logprob)
+    assert len(steps) == 2
+    for st in steps:
+        assert st.watched[3].rank == 0
+        assert not math.isnan(st.watched[3].logprob)
+
+
+def test_score_prompt_trailing_step_has_chosen_none() -> None:
+    """The trailing step's chosen=None is part of the public contract: it
+    distinguishes "predicting" from "scoring against ground truth"."""
+    backend = FakeBackend(
+        tokens={"AB": [1, 2]},
+        pieces={1: "A", 2: "B", 3: "C"},
+        distributions={
+            (1,): [cand(2, "B", 0.9, 0)],
+            (1, 2): [cand(3, "C", 0.8, 0)],
+        },
+    )
+
+    steps = backend.score_prompt("AB", top_k=1)
+
+    assert [s.chosen is None for s in steps] == [False, True]
+    # The trailing row still carries the model's top-1 prediction so
+    # callers can render confidence / inspect P(<some-id>) at that
+    # position.
+    assert steps[-1].top is not None
+    assert steps[-1].top.token_id == 3
 
 
 def test_lookup_watch_returns_nan_candidate_for_missing_token() -> None:

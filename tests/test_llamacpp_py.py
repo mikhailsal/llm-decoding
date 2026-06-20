@@ -254,26 +254,41 @@ def test_next_distribution_clamps_top_k_to_vocab_size(monkeypatch, tmp_path) -> 
 def test_score_prompt_records_actual_token_at_each_position(
     monkeypatch, tmp_path
 ) -> None:
+    """For an N-token prompt the new contract is N steps:
+    N-1 scored rows plus a trailing "predict next" row with chosen=None.
+    """
     b = _backend(monkeypatch, tmp_path)
     steps = b.score_prompt("abc", top_k=4, watch_ids=[5, 9])
 
-    # Three positions in "abc" but score_prompt skips the first (no preceding
-    # context to condition on) -> two steps.
-    assert len(steps) == 2
-    for st in steps:
+    assert len(steps) == 3  # was 2 before the trailing-prediction fix
+    scored, trailing = steps[:-1], steps[-1]
+    for st in scored:
         assert st.is_full_vocab is True
         assert st.chosen is not None
         assert st.chosen.rank >= 0  # exact rank, never -1 for full vocab
         assert set(st.watched) == {5, 9}
         for w in st.watched.values():
             assert not math.isnan(w.logprob)
+    assert trailing.chosen is None
+    assert trailing.position == 3  # one past the last token (1-indexed)
+    assert set(trailing.watched) == {5, 9}
+    for w in trailing.watched.values():
+        # Exact, full-vocab read -- the whole point of the fix is that
+        # P(EOS) after the prompt finally has a real value.
+        assert not math.isnan(w.logprob)
 
 
-def test_score_prompt_returns_empty_for_single_token_prompt(
+def test_score_prompt_includes_trailing_step_for_single_token_prompt(
     monkeypatch, tmp_path
 ) -> None:
+    """A 1-token prompt has no scored rows (nothing to score against) but
+    still has a trailing prediction. Empty list would silently drop the
+    only interesting position for a 1-token prompt."""
     b = _backend(monkeypatch, tmp_path)
-    assert b.score_prompt("a", top_k=4) == []
+    [trailing] = b.score_prompt("a", top_k=4, watch_ids=[5])
+    assert trailing.chosen is None
+    assert trailing.position == 1
+    assert not math.isnan(trailing.watched[5].logprob)
 
 
 def test_score_prompt_raises_when_logits_all_false(monkeypatch, tmp_path) -> None:

@@ -48,22 +48,39 @@ class Backend(ABC):
 
         Generic implementation: re-evaluate the next-token distribution at each
         prefix and record the probability the model gave to the *actual* next
-        token. O(n) backend calls; HF overrides this with a single pass.
+        token. O(n) backend calls; HF and llamacpp-py override this with a
+        single forward pass.
+
+        For an N-token prompt this returns N StepResults. The first N-1 rows
+        carry an actual ``chosen`` token (the prompt's real next token). The
+        final row -- the distribution conditioned on the full prompt -- has
+        ``chosen=None`` and answers "what does the model predict comes
+        next?". Watched ids are looked up on this row too, so e.g. P(EOS)
+        after the period in "...dry." finally has a place to live.
         """
         ids = self.tokenize(prompt)
         watch_ids = watch_ids or []
         results: list[StepResult] = []
-        for i in range(1, len(ids)):
+        for i in range(1, len(ids) + 1):
             ctx = ids[:i]
             step = self.next_distribution(ctx, top_k)
-            actual = ids[i]
-            chosen = step.find(actual)
-            if chosen is None:
-                # Actual token fell outside the returned top-k (only possible for
-                # non-full-vocab backends). Mark its prob as unknown.
-                chosen = TokenCandidate(
-                    token_id=actual, text=self.piece(actual), logprob=math.nan, rank=-1
-                )
+            if i < len(ids):
+                actual = ids[i]
+                chosen = step.find(actual)
+                if chosen is None:
+                    # Actual token fell outside the returned top-k (only
+                    # possible for non-full-vocab backends). Mark its prob as
+                    # unknown.
+                    chosen = TokenCandidate(
+                        token_id=actual,
+                        text=self.piece(actual),
+                        logprob=math.nan,
+                        rank=-1,
+                    )
+            else:
+                # Trailing prediction step: no actual next token to verify
+                # against. The renderer reads chosen=None as "?" markers.
+                chosen = None
             step.position = i
             step.chosen = chosen
             step.context_text = self.piece(ids[i - 1])

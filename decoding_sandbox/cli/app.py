@@ -473,18 +473,27 @@ def cmd_inspect(
 
         for st in steps:
             ctx = render.token_repr(st.context_text or "", 14)
-            if st.chosen is not None:
+            is_trailing = st.chosen is None
+            if not is_trailing:
                 nxt = render.token_repr(
                     st.chosen.text, 14, is_special=st.chosen.is_special
                 )
+                p_next = render.fmt_prob(st.chosen.prob)
+                rank = (
+                    f"#{st.chosen.rank}"
+                    if st.chosen.rank >= 0
+                    else "[dim]?[/dim]"
+                )
+                pos_cell = str(st.position)
             else:
-                nxt = "?"
-            p_next = render.fmt_prob(st.chosen.prob) if st.chosen else "?"
-            rank = (
-                f"#{st.chosen.rank}"
-                if (st.chosen and st.chosen.rank >= 0)
-                else "[dim]?[/dim]"
-            )
+                # The trailing "predict next" row: there is no actual next
+                # token to score against, but the watched columns and the
+                # top-1 confidence are real predictions worth seeing. Mark
+                # the row visibly so it isn't mistaken for a scored step.
+                nxt = "[dim]?[/dim]"
+                p_next = "[dim]?[/dim]"
+                rank = "[dim]?[/dim]"
+                pos_cell = f"{st.position} [dim](next)[/dim]"
             top = st.top
             conf = (
                 f"{render.fmt_prob(st.confidence)} "
@@ -492,7 +501,7 @@ def cmd_inspect(
                 if top
                 else "-"
             )
-            row = [str(st.position), f"{ctx} -> {nxt}", p_next, rank, conf]
+            row = [pos_cell, f"{ctx} -> {nxt}", p_next, rank, conf]
             for target in watch:
                 row.append(render.watch_cell(st.watched.get(target.token_id)))
             table.add_row(*row)

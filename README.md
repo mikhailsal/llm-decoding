@@ -199,6 +199,12 @@ What you get:
 - Each row shows the **exact** logprob+rank for that id at that position
   -- even on full-vocab backends, even if the id falls outside the
   top-k for that step (`watch_ids` queries the distribution directly).
+- The inspection table includes a trailing **predict-next** row,
+  visibly marked ``N (next)`` in the position column, that shows what
+  the model would emit *after* the entire prompt. For the example
+  prompt ending in a period, this is precisely where you see how
+  strongly the model "wants to finish": the EOS column on the ``(next)``
+  row is the answer.
 - Duplicates across `--watch` / `--watch-id` / `--watch-eos` are deduped
   by id, so the same column doesn't appear twice.
 - Backends without EOS info (HTTP llama.cpp, cloud providers) print a

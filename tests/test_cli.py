@@ -584,6 +584,54 @@ def test_parser_inspect_watch_eos_flag_sets_true() -> None:
 # --------------------------------------------------------------------------- #
 # End-to-end: --watch-eos renders an EOS column populated by score_prompt
 # --------------------------------------------------------------------------- #
+def test_inspect_renders_trailing_predict_next_row(
+    monkeypatch, captured_console
+) -> None:
+    """The new contract: an N-token prompt yields N rows in the rendered
+    table, the last of which is visibly labelled as the "predict next"
+    row and carries an exact watched probability."""
+    backend = FakeBackend(
+        tokens={"AB": [1, 2]},
+        pieces={1: "A", 2: "B", 9: ""},  # id 9 is an EOS-like empty piece
+        distributions={
+            (1,): [cand(2, "B", 0.9, 0)],
+            (1, 2): [cand(3, "C", 0.8, 0)],
+        },
+        eos_token_ids=(9,),
+    )
+    # Patch the base score_prompt to surface a watched probability on the
+    # trailing row (the FakeBackend default ranks unknowns as -1/NaN).
+    real_score = backend.score_prompt
+
+    def patched(prompt, top_k, watch_ids=None):
+        results = real_score(prompt, top_k, watch_ids=watch_ids)
+        for st in results:
+            for wid in watch_ids or []:
+                st.watched[wid] = TokenCandidate(
+                    wid, backend.piece(wid), math.log(0.03), 17, is_special=True
+                )
+        return results
+
+    backend.score_prompt = patched  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
+    )
+
+    rc = app.cmd_inspect(
+        argparse.Namespace(
+            backend="fake", model=None, prompt="AB", top_k=1,
+            watch=[], watch_id=[], watch_eos=True,
+            candidates=0, skip_preflight=True,
+        ),
+        _cfg_no_preflight(),
+    )
+
+    rendered = captured_console.getvalue()
+    assert rc == 0
+    assert "(next)" in rendered  # the visible "this is the predict-next row" marker
+    assert "3.00%" in rendered   # watched EOS probability is rendered on every row
+
+
 def test_inspect_watch_eos_renders_column_with_per_position_prob(
     monkeypatch, captured_console
 ) -> None:

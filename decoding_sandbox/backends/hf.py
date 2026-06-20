@@ -164,15 +164,27 @@ class HFBackend(Backend):
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None
     ) -> list[StepResult]:
+        """Whole-context inspection, including the trailing "what comes next?".
+
+        For an N-token prompt this returns N StepResults. The first N-1
+        rows compare each logit row against the *actual* next token in the
+        prompt (``chosen != None``). The final row -- the distribution
+        conditioned on the whole prompt -- has ``chosen=None`` since there
+        is no ground-truth next token; that's the row that answers "did
+        the model want to stop here?". The same forward pass produces all
+        N rows for free, so this is no slower than the old behaviour.
+        """
         torch = self._torch
         watch_ids = watch_ids or []
         ids = self.tokenize(prompt)
+        if not ids:
+            return []
         input_ids = torch.tensor([ids], device=self.model.device)
         with torch.no_grad():
             logits = self.model(input_ids).logits[0]  # [seq, vocab]
         logp = torch.log_softmax(logits.float(), dim=-1)
         results: list[StepResult] = []
-        for i in range(len(ids) - 1):
+        for i in range(len(ids)):
             dist = logp[i]
             k = min(top_k, dist.shape[-1])
             vals, idx = torch.topk(dist, k)
@@ -183,7 +195,11 @@ class HFBackend(Backend):
                 )
                 for rank, (v, j) in enumerate(zip(vals.tolist(), idx.tolist()))
             ]
-            chosen = self._exact_candidate(dist, ids[i + 1])
+            chosen = (
+                self._exact_candidate(dist, ids[i + 1])
+                if i + 1 < len(ids)
+                else None
+            )
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}
             results.append(
                 StepResult(
