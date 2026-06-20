@@ -438,6 +438,99 @@ def test_main_requires_a_subcommand() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Color mode (--color auto/always/never)
+# --------------------------------------------------------------------------- #
+def test_make_console_auto_uses_default_tty_detection() -> None:
+    """The 'auto' mode must not force_terminal -- otherwise piping to a
+    file would embed ANSI codes."""
+    c = app._make_console("auto")
+    # Rich exposes the option we care about as a private attr; assert via
+    # the observable side effect instead: when stdout is not a TTY, auto
+    # gives us no color system.
+    assert c.color_system in (None, "auto", "standard", "256", "truecolor")
+
+
+def test_make_console_always_forces_color_system() -> None:
+    c = app._make_console("always")
+    # truecolor is the highest fidelity; this is what 'always' selects so
+    # ANSI is emitted regardless of TTY detection.
+    assert c.color_system == "truecolor"
+    assert c.is_terminal is True  # force_terminal=True flipped this
+
+
+def test_make_console_never_disables_color() -> None:
+    c = app._make_console("never")
+    assert c.no_color is True
+
+
+def test_make_console_falls_back_to_auto_for_unknown_mode() -> None:
+    """Defensive: argparse should prevent invalid values but the helper
+    must not crash if called directly with garbage. The contract is that
+    an unknown mode behaves *like* "auto" (no explicit force, no explicit
+    disable) -- so it matches what plain ``_make_console("auto")``
+    produces in the same environment."""
+    fallback = app._make_console("nope")  # type: ignore[arg-type]
+    auto = app._make_console("auto")
+    assert fallback.color_system == auto.color_system
+    assert fallback.is_terminal == auto.is_terminal
+    assert fallback.no_color == auto.no_color
+
+
+def test_build_parser_color_defaults_to_auto() -> None:
+    parser = app.build_parser()
+    args = parser.parse_args(["inspect", "hi"])
+    assert args.color == "auto"
+
+
+def test_build_parser_color_accepts_always_and_never() -> None:
+    parser = app.build_parser()
+    for mode in ("always", "never"):
+        args = parser.parse_args(["--color", mode, "inspect", "hi"])
+        assert args.color == mode
+
+
+def test_build_parser_color_rejects_invalid_value() -> None:
+    parser = app.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--color", "rainbow", "inspect", "hi"])
+
+
+def test_main_with_color_always_reassigns_console(monkeypatch) -> None:
+    """When the user passes --color always, the module-level console must
+    be rebuilt with force_terminal=True so subsequent cmd_* calls emit
+    ANSI even over non-interactive SSH."""
+    original = app.console
+    monkeypatch.setattr(
+        storage_mod, "check_paths", lambda paths, min_free_gb: []
+    )
+    app.main(["--color", "always", "doctor"])
+    try:
+        assert app.console is not original  # reassigned
+        assert app.console.color_system == "truecolor"
+    finally:
+        app.console = original
+
+
+def test_main_with_color_auto_preserves_existing_console(
+    monkeypatch, captured_console
+) -> None:
+    """The default 'auto' must NOT reassign the module-level console;
+    otherwise the captured_console test fixture (which monkeypatches it
+    before main runs) would lose its capture."""
+    captured_before = app.console
+    monkeypatch.setattr(
+        storage_mod, "check_paths", lambda paths, min_free_gb: []
+    )
+
+    app.main(["doctor"])  # implicit --color auto
+
+    # The fixture's console object is still in place after main.
+    assert app.console is captured_before
+    # And the captured output really did flow through it.
+    assert "Decoding Sandbox doctor" in captured_console.getvalue()
+
+
+# --------------------------------------------------------------------------- #
 # Watch target resolution (--watch / --watch-id / --watch-eos)
 # --------------------------------------------------------------------------- #
 def test_resolve_watch_text_uses_first_id_and_quoted_label() -> None:

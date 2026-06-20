@@ -131,6 +131,28 @@ Every heavy command prints a one-line timing summary
 for any phase where the divisor is meaningful. Suppress with `--no-timing`
 (or `:timing off` in a session).
 
+### Colors over SSH
+
+By default `dsbx` uses the standard `rich` TTY detection: ANSI escape codes
+are emitted when stdout is a terminal and stripped otherwise. That's the
+right choice when piping to a file, but it strips every confidence-level
+color and special-token highlight when you run
+
+```bash
+ssh dsbx-host 'dsbx inspect ...'
+```
+
+(non-interactive SSH -- stdout isn't a TTY on the remote side). Use one
+of these to keep colors:
+
+- `dsbx --color always inspect ...` -- explicit per-invocation override.
+- `FORCE_COLOR=1 dsbx inspect ...` -- standard env var, respected by
+  rich.
+- `ssh -t dsbx-host 'dsbx inspect ...'` -- request a remote PTY; the
+  terminal then looks like a TTY to rich and `--color auto` works.
+
+`--color never` (or `NO_COLOR=1`) disables colors even on a TTY.
+
 ### Token rendering
 
 Tokens that look identical in a column actually differ by leading/trailing

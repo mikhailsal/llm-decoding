@@ -32,7 +32,39 @@ from decoding_sandbox.core import storage
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.config import Config, load_config
 
-console = Console()
+
+def _make_console(mode: str = "auto") -> Console:
+    """Build a rich Console honoring an explicit color mode.
+
+    Rich's default ``Console()`` calls ``sys.stdout.isatty()`` and disables
+    ANSI when it's False -- the right thing for a real pipe-to-file, but
+    the wrong thing for the common ``ssh dsbx-host 'dsbx inspect ...'``
+    workflow: the user wants colour in their terminal, but stdout isn't a
+    TTY on the remote side, so rich silently strips every ``[green]...``
+    tag and the whole confidence/special-token visual encoding disappears.
+
+    Three modes (matches ``ls``/``grep``/``git`` conventions):
+
+    * ``"auto"``  -- rich's default detection. Colour when stdout is a
+      TTY, plain otherwise. ``FORCE_COLOR=1`` / ``NO_COLOR=1`` env vars
+      still apply via rich's own logic.
+    * ``"always"`` -- force ANSI emission regardless of TTY detection.
+      Useful over non-interactive SSH or when capturing for paste into a
+      colour-capable terminal.
+    * ``"never"``  -- disable colour even when stdout is a TTY (some
+      legacy log scrapers can't strip ANSI).
+    """
+    mode = (mode or "auto").lower()
+    if mode == "always":
+        return Console(force_terminal=True, color_system="truecolor")
+    if mode == "never":
+        return Console(no_color=True)
+    if mode != "auto":  # defensive -- argparse choices should prevent this
+        mode = "auto"
+    return Console()
+
+
+console = _make_console("auto")
 
 # Providers that legitimately do not need an API key (e.g. local OpenAI-compat
 # servers). Doctor shows "no key needed" instead of red "missing" for these.
@@ -906,6 +938,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", help="Path to a config.toml (overrides discovery).")
     parser.add_argument("--version", action="version", version=f"dsbx {__version__}")
+    parser.add_argument(
+        "--color",
+        choices=["auto", "always", "never"],
+        default="auto",
+        help=(
+            "Color rendering mode. 'auto' (default) emits ANSI when stdout "
+            "is a terminal, plain otherwise -- which strips all rich "
+            "highlighting under non-interactive SSH ('ssh dsbx-host dsbx ...'). "
+            "Use 'always' to force colour over SSH (you can also set "
+            "FORCE_COLOR=1); use 'never' to disable colour even on a TTY."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_doctor = sub.add_parser("doctor", help="Check environment, keys, and disk space.")
@@ -1027,6 +1071,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Rebuild the module-level console only when the user explicitly opted
+    # in to a non-auto colour mode. "auto" is rich's normal TTY detection,
+    # which is already what's in place from module load -- and which the
+    # captured_console test fixture monkeypatches before invoking main(),
+    # so reassigning unconditionally would defeat the patch.
+    color_mode = getattr(args, "color", "auto")
+    if color_mode != "auto":
+        global console
+        console = _make_console(color_mode)
     cfg = load_config(args.config)
     try:
         return args.func(args, cfg)

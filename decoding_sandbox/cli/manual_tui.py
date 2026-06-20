@@ -170,8 +170,15 @@ def run_manual(
     When ``own_backend=False`` (e.g. called from the long-lived ``session``
     REPL), the backend is left open on return so the parent can keep using
     it. Otherwise the backend is closed at the end as before.
+
+    The rich Console is borrowed from ``app.console`` so the user's
+    ``--color always/never/auto`` choice (set in ``main``) flows through
+    -- otherwise the manual TUI would always default to rich's TTY
+    auto-detection regardless of the CLI flag.
     """
-    console = Console()
+    from decoding_sandbox.cli.app import console as _app_console
+
+    console = _app_console
     session = ManualSession(backend, prompt, top_k=top_k)
     ps: PromptSession = PromptSession()
     console.print(HELP)
