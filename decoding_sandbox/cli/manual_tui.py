@@ -162,7 +162,15 @@ def _print_result(console: Console, result: CommandResult) -> None:
         console.print("[yellow]unknown command (type ? for help)[/yellow]")
 
 
-def run_manual(backend: Backend, prompt: str, top_k: int = 12) -> int:
+def run_manual(
+    backend: Backend, prompt: str, top_k: int = 12, *, own_backend: bool = True
+) -> int:
+    """Run the interactive manual-decoding TUI.
+
+    When ``own_backend=False`` (e.g. called from the long-lived ``session``
+    REPL), the backend is left open on return so the parent can keep using
+    it. Otherwise the backend is closed at the end as before.
+    """
     console = Console()
     session = ManualSession(backend, prompt, top_k=top_k)
     ps: PromptSession = PromptSession()
@@ -180,5 +188,6 @@ def run_manual(backend: Backend, prompt: str, top_k: int = 12) -> int:
             break
 
     console.print(f"\n[bold]final:[/bold] {session.prompt}[green]{session.generated_text()}[/green]")
-    backend.close()
+    if own_backend:
+        backend.close()
     return 0

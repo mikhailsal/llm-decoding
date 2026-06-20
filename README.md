@@ -120,6 +120,16 @@ dsbx doctor                     # should now show torch cuda=True on the P40
   any token, undo, save/load transcript).
 - `dsbx spec "<text>"` -- speculative decoding (HF draft+target) with
   accept/reject visualization and a tokens-per-target-pass speedup metric.
+- `dsbx session` -- long-lived REPL that **keeps the model loaded across
+  commands**. The 30+s GGUF load for the 9B happens once; every subsequent
+  `inspect`/`generate`/`manual` in the session runs immediately. Meta
+  commands: `:caps`, `:backend NAME [MODEL]` (swaps the loaded model),
+  `:timing on|off`, `:history`, `:help`, `:quit`.
+
+Every heavy command prints a one-line timing summary
+(`timing: prompt eval ... | decode ... | total ...`), with tokens-per-second
+for any phase where the divisor is meaningful. Suppress with `--no-timing`
+(or `:timing off` in a session).
 
 ### Examples
 
@@ -145,6 +155,15 @@ dsbx generate "Once upon a time" --backend hf \
 
 # Speculative decoding (HF)
 dsbx spec "The capital of France is" --gamma 4
+
+# Persistent REPL: pay the 9B GGUF load once, then iterate cheaply
+dsbx session --backend llamacpp-py
+# inside the session prompt (`dsbx> `):
+#   inspect "The weather today is surprisingly dry." --watch ' dry'
+#   generate "Once upon a time" --sampler top_p --top-p 0.9 --max-tokens 30
+#   :backend hf   # swap to HF transformers; closes the 9B, loads the dense base
+#   :caps         # show the new backend's capabilities
+#   :quit
 ```
 
 ## Layout

@@ -7,9 +7,12 @@ Subcommands (all backed by ``decoding_sandbox.core``):
 - ``generate``: decode with a chosen/custom sampler, per-step diff vs greedy
 - ``manual``  : interactive token-by-token TUI (prompt_toolkit)
 - ``spec``    : speculative decoding with accept/reject visualization
+- ``session`` : long-lived REPL that keeps the model loaded across commands
 
 Every heavy command runs ``storage.preflight_or_raise`` first; pass
-``--skip-preflight`` to bypass.
+``--skip-preflight`` to bypass. Every heavy command also prints a one-line
+timing summary (``timing: prompt eval ... | total ...``); suppress with
+``--no-timing`` (or ``:timing off`` inside ``session``).
 """
 
 from __future__ import annotations
@@ -17,12 +20,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import contextmanager
 
 from rich.console import Console
 from rich.table import Table
 
 from decoding_sandbox import __version__
+from decoding_sandbox.cli.timing import Timing
 from decoding_sandbox.core import storage
+from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.config import Config, load_config
 
 console = Console()
@@ -219,194 +225,325 @@ def _resolve_stop_ids(backend, stop: list[str]) -> list[tuple[str, int]]:
     return resolved
 
 
-def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
-    from decoding_sandbox.cli import render
+def _build_backend_with_load_timing(
+    name: str, cfg: Config, *, model: str | None, timing: Timing | None
+) -> Backend:
+    """Build a backend and (optionally) record its load time as a phase."""
     from decoding_sandbox.core.factory import build_backend
 
-    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
-    if rc is not None:
-        return rc
-
-    name = args.backend or cfg.default_backend
     console.print(f"[dim]building backend '{name}'...[/dim]")
-    backend = build_backend(name, cfg, model=args.model)
+    if timing is None:
+        return build_backend(name, cfg, model=model)
+    with timing.phase("backend load"):
+        return build_backend(name, cfg, model=model)
+
+
+def _print_backend_banner(backend: Backend, *, out: Console | None = None) -> None:
+    """Print the capability banner that ``inspect`` historically led with.
+
+    Also surfaces the same backend-specific notes (no native whole-context,
+    top-k only, llamacpp HTTP nudge to llamacpp-py). ``out`` defaults to the
+    module-level rich console; the session REPL passes its own buffered
+    console so meta commands write where the caller expects.
+    """
+    out = out or console
     caps = backend.capabilities
-    console.print(
+    out.print(
         f"backend: [cyan]{caps.name}[/cyan]  "
         f"full_vocab={caps.full_vocab}  prompt_logprobs={caps.prompt_logprobs}  "
         f"max_top_logprobs={caps.max_top_logprobs}"
     )
     if caps.notes:
-        console.print(f"[dim]{caps.notes}[/dim]")
+        out.print(f"[dim]{caps.notes}[/dim]")
     if not caps.full_vocab:
-        console.print(
+        out.print(
             "[dim]note: top-k backend -- a token's probability is shown only if it "
             "is within the returned top-k (others read '<top-k').[/dim]"
         )
     if not caps.full_vocab and not caps.prompt_logprobs:
-        # llama.cpp HTTP reuses its KV cache between calls (``cache_prompt=True``)
-        # so the per-prefix loop only does ~1 token of forward pass per
-        # position after the first -- it's not actually slow. Cloud chat-only
-        # providers have no cache and pay full inference cost per prefix.
         if backend.__class__.__name__ == "LlamaCppBackend":
-            console.print(
+            out.print(
                 "[dim]note: this backend exposes top-k only and derives "
                 "whole-context one position at a time (cheap with cache_prompt). "
                 "For FULL vocab on the same GGUF, use --backend llamacpp-py.[/dim]"
             )
         else:
-            console.print(
+            out.print(
                 "[yellow]note: this backend has no native whole-context "
                 "logprobs; each prompt position is re-evaluated separately, "
                 "which is genuinely slow for chat-only cloud providers.[/yellow]"
             )
 
-    watch = _resolve_watch(backend, args.watch or [])
-    generated_only_inspect = (
-        backend.__class__.__name__ == "OpenAICompatBackend" and not caps.prompt_logprobs
-    )
-    if generated_only_inspect:
-        console.print(
-            "[yellow]note: this backend cannot score prompt tokens; showing the "
-            "next-token distribution after the prompt instead.[/yellow]"
+
+def cmd_inspect(
+    args: argparse.Namespace,
+    cfg: Config,
+    *,
+    backend: Backend | None = None,
+    show_banner: bool = True,
+) -> int:
+    """Per-token confidence inspection of ``args.prompt``.
+
+    If ``backend`` is provided (e.g. by the long-lived ``session`` REPL), it
+    is reused and not closed; otherwise this function owns the backend it
+    builds and closes it at the end.
+    """
+    from decoding_sandbox.cli import render
+
+    own_backend = backend is None
+    if own_backend:
+        rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+        if rc is not None:
+            return rc
+
+    timing = None if getattr(args, "no_timing", False) else Timing()
+    try:
+        if own_backend:
+            name = args.backend or cfg.default_backend
+            backend = _build_backend_with_load_timing(
+                name, cfg, model=args.model, timing=timing
+            )
+        if show_banner:
+            _print_backend_banner(backend)
+
+        watch = _resolve_watch(backend, args.watch or [])
+        caps = backend.capabilities
+        prompt_tokens = backend.tokenize(args.prompt)
+        generated_only_inspect = (
+            backend.__class__.__name__ == "OpenAICompatBackend"
+            and not caps.prompt_logprobs
         )
-        step = backend.next_distribution(backend.tokenize(args.prompt), top_k=args.top_k)
-        step.context_text = args.prompt
-        step.watched = {wid: backend.lookup_watch(step, wid) for _, wid in watch}
-        steps = [step]
-        title = f"Next-token inspection: {args.prompt!r}"
-    else:
-        steps = backend.score_prompt(args.prompt, top_k=args.top_k, watch_ids=[i for _, i in watch])
-        title = f"Context inspection: {args.prompt!r}"
+        if generated_only_inspect:
+            console.print(
+                "[yellow]note: this backend cannot score prompt tokens; showing the "
+                "next-token distribution after the prompt instead.[/yellow]"
+            )
+            tok_count = 1
+            with _maybe_phase(timing, "next-token distribution", tokens=tok_count):
+                step = backend.next_distribution(prompt_tokens, top_k=args.top_k)
+            step.context_text = args.prompt
+            step.watched = {wid: backend.lookup_watch(step, wid) for _, wid in watch}
+            steps = [step]
+            title = f"Next-token inspection: {args.prompt!r}"
+        else:
+            tok_count = len(prompt_tokens)
+            with _maybe_phase(timing, "score_prompt", tokens=tok_count):
+                steps = backend.score_prompt(
+                    args.prompt,
+                    top_k=args.top_k,
+                    watch_ids=[i for _, i in watch],
+                )
+            title = f"Context inspection: {args.prompt!r}"
 
-    table = Table(title=title)
-    table.add_column("pos", justify="right")
-    table.add_column("context -> next")
-    table.add_column("p(next)", justify="right")
-    table.add_column("rank", justify="right")
-    table.add_column("confidence (top-1)")
-    for w, _ in watch:
-        table.add_column(f"watch {w!r}")
+        table = Table(title=title)
+        table.add_column("pos", justify="right")
+        table.add_column("context -> next")
+        table.add_column("p(next)", justify="right")
+        table.add_column("rank", justify="right")
+        table.add_column("confidence (top-1)")
+        for w, _ in watch:
+            table.add_column(f"watch {w!r}")
 
-    for st in steps:
-        ctx = render.token_repr(st.context_text or "", 14)
-        nxt = render.token_repr(st.chosen.text, 14) if st.chosen else "?"
-        p_next = render.fmt_prob(st.chosen.prob) if st.chosen else "?"
-        rank = f"#{st.chosen.rank}" if (st.chosen and st.chosen.rank >= 0) else "[dim]?[/dim]"
-        top = st.top
-        conf = (
-            f"{render.fmt_prob(st.confidence)} {render.token_repr(top.text, 12)!s}"
-            if top else "-"
-        )
-        row = [str(st.position), f"{ctx} -> {nxt}", p_next, rank, conf]
-        for _, wid in watch:
-            row.append(render.watch_cell(st.watched.get(wid)))
-        table.add_row(*row)
+        for st in steps:
+            ctx = render.token_repr(st.context_text or "", 14)
+            nxt = render.token_repr(st.chosen.text, 14) if st.chosen else "?"
+            p_next = render.fmt_prob(st.chosen.prob) if st.chosen else "?"
+            rank = (
+                f"#{st.chosen.rank}"
+                if (st.chosen and st.chosen.rank >= 0)
+                else "[dim]?[/dim]"
+            )
+            top = st.top
+            conf = (
+                f"{render.fmt_prob(st.confidence)} {render.token_repr(top.text, 12)!s}"
+                if top
+                else "-"
+            )
+            row = [str(st.position), f"{ctx} -> {nxt}", p_next, rank, conf]
+            for _, wid in watch:
+                row.append(render.watch_cell(st.watched.get(wid)))
+            table.add_row(*row)
 
-    console.print(table)
+        console.print(table)
 
-    if args.candidates:
-        _print_candidates(steps, args.candidates, args.top_k)
+        if args.candidates:
+            _print_candidates(steps, args.candidates, args.top_k)
 
-    backend.close()
-    return 0
+        if timing is not None:
+            console.print(timing.render())
+        return 0
+    finally:
+        if own_backend and backend is not None:
+            backend.close()
 
 
-def cmd_generate(args: argparse.Namespace, cfg: Config) -> int:
+@contextmanager
+def _null_phase():
+    """No-op context manager used when timing is disabled."""
+    yield
+
+
+def _maybe_phase(timing: Timing | None, name: str, *, tokens: int | None = None):
+    """Return ``timing.phase(...)`` or a no-op context manager when None."""
+    if timing is not None:
+        return timing.phase(name, tokens=tokens)
+    return _null_phase()
+
+
+def cmd_generate(
+    args: argparse.Namespace,
+    cfg: Config,
+    *,
+    backend: Backend | None = None,
+    show_banner: bool = True,
+) -> int:
     import random
 
     from decoding_sandbox.cli import render
     from decoding_sandbox.core import samplers
     from decoding_sandbox.core.engine import generate
-    from decoding_sandbox.core.factory import build_backend
 
-    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
-    if rc is not None:
-        return rc
+    own_backend = backend is None
+    if own_backend:
+        rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+        if rc is not None:
+            return rc
 
-    name = args.backend or cfg.default_backend
-    console.print(f"[dim]building backend '{name}'...[/dim]")
-    backend = build_backend(name, cfg, model=args.model)
-    console.print(f"backend: [cyan]{backend.capabilities.name}[/cyan]")
-
-    # Build the sampler (built-in or custom plug-in).
-    if args.sampler == "custom":
-        if not args.custom_file:
-            console.print("[red]--sampler custom requires --custom-file path.py[:func][/red]")
-            return 2
-        sampler = samplers.load_custom(args.custom_file)
-        sampler_name = f"custom({args.custom_file})"
-    else:
-        params = dict(
-            temperature=args.temperature,
-            top_k=args.sampler_top_k,
-            top_p=args.top_p,
-            min_p=args.min_p,
-            typical_p=args.typical_p,
-        )
-        params = {k: v for k, v in params.items() if v is not None}
-        sampler = samplers.make_sampler(args.sampler, **params)
-        sampler_name = args.sampler
-
-    rng = random.Random(args.seed)
-    stop_ids = _resolve_stop_ids(backend, args.stop or [])
-    console.print(
-        f"sampler: [magenta]{sampler_name}[/magenta]  seed={args.seed}  "
-        f"max_tokens={args.max_tokens}"
-        + (f"  stop={[s for s, _ in stop_ids]}" if stop_ids else "")
-        + "\n"
-    )
-
-    table = Table(title=f"generate {args.prompt!r}")
-    table.add_column("step", justify="right")
-    table.add_column("chosen")
-    table.add_column("p(chosen)", justify="right")
-    table.add_column("vs greedy")
-    table.add_column("kept", justify="right")
-    table.add_column("sampler")
-    table.add_column("top candidates")
-
-    chosen_ids: list[int] = []
-    for gs in generate(
-        backend, args.prompt, sampler,
-        max_tokens=args.max_tokens, top_k=args.top_k, rng=rng,
-        stop_ids=[tid for _, tid in stop_ids],
-    ):
-        d = gs.decision
-        chosen_cand = gs.chosen_candidate()
-        p_chosen = render.fmt_prob(chosen_cand.prob) if chosen_cand else "[dim]?[/dim]"
-        if d.changed_greedy:
-            greedy_text = next(
-                (c.text for c in gs.step_result.candidates if c.token_id == d.greedy_token_id),
-                "?",
+    timing = None if getattr(args, "no_timing", False) else Timing()
+    try:
+        if own_backend:
+            name = args.backend or cfg.default_backend
+            backend = _build_backend_with_load_timing(
+                name, cfg, model=args.model, timing=timing
             )
-            vs = f"[yellow]!= {render.token_repr(greedy_text, 10)}[/yellow]"
+        if show_banner:
+            console.print(f"backend: [cyan]{backend.capabilities.name}[/cyan]")
+
+        # Sampler construction (built-in or custom plug-in).
+        if args.sampler == "custom":
+            if not args.custom_file:
+                console.print(
+                    "[red]--sampler custom requires --custom-file path.py[:func][/red]"
+                )
+                return 2
+            sampler = samplers.load_custom(args.custom_file)
+            sampler_name = f"custom({args.custom_file})"
         else:
-            vs = "[green]= greedy[/green]"
-        tops = "  ".join(
-            f"{render.token_repr(c.text, 8)}={render.fmt_prob(c.prob)}"
-            for c in gs.step_result.candidates[:5]
+            params = dict(
+                temperature=args.temperature,
+                top_k=args.sampler_top_k,
+                top_p=args.top_p,
+                min_p=args.min_p,
+                typical_p=args.typical_p,
+            )
+            params = {k: v for k, v in params.items() if v is not None}
+            sampler = samplers.make_sampler(args.sampler, **params)
+            sampler_name = args.sampler
+
+        rng = random.Random(args.seed)
+        stop_ids = _resolve_stop_ids(backend, args.stop or [])
+        console.print(
+            f"sampler: [magenta]{sampler_name}[/magenta]  seed={args.seed}  "
+            f"max_tokens={args.max_tokens}"
+            + (f"  stop={[s for s, _ in stop_ids]}" if stop_ids else "")
+            + "\n"
         )
-        table.add_row(
-            str(gs.step),
-            render.token_repr(d.token_text, 14),
-            p_chosen,
-            vs,
-            str(len(d.kept)),
-            render.token_repr(d.note, 22),
-            tops,
-        )
-        chosen_ids.append(d.token_id)
 
-    console.print(table)
-    completion = backend.detokenize(chosen_ids)
-    console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
-    console.print(f"[bold]completion:[/bold][green]{completion}[/green]")
-    backend.close()
-    return 0
+        table = Table(title=f"generate {args.prompt!r}")
+        table.add_column("step", justify="right")
+        table.add_column("chosen")
+        table.add_column("p(chosen)", justify="right")
+        table.add_column("vs greedy")
+        table.add_column("kept", justify="right")
+        table.add_column("sampler")
+        table.add_column("top candidates")
+
+        # Two phases users care about:
+        #   1) prompt eval + first token  -- latency until streaming starts
+        #   2) subsequent decode          -- per-new-token cost
+        # The split happens at the first ``gs`` yielded by ``generate``.
+        import time as _time
+
+        chosen_ids: list[int] = []
+        loop_start = _time.perf_counter()
+        first_token_at: float | None = None
+
+        for gs in generate(
+            backend, args.prompt, sampler,
+            max_tokens=args.max_tokens, top_k=args.top_k, rng=rng,
+            stop_ids=[tid for _, tid in stop_ids],
+        ):
+            if first_token_at is None:
+                first_token_at = _time.perf_counter()
+            d = gs.decision
+            chosen_cand = gs.chosen_candidate()
+            p_chosen = (
+                render.fmt_prob(chosen_cand.prob)
+                if chosen_cand
+                else "[dim]?[/dim]"
+            )
+            if d.changed_greedy:
+                greedy_text = next(
+                    (c.text for c in gs.step_result.candidates
+                     if c.token_id == d.greedy_token_id),
+                    "?",
+                )
+                vs = f"[yellow]!= {render.token_repr(greedy_text, 10)}[/yellow]"
+            else:
+                vs = "[green]= greedy[/green]"
+            tops = "  ".join(
+                f"{render.token_repr(c.text, 8)}={render.fmt_prob(c.prob)}"
+                for c in gs.step_result.candidates[:5]
+            )
+            table.add_row(
+                str(gs.step),
+                render.token_repr(d.token_text, 14),
+                p_chosen,
+                vs,
+                str(len(d.kept)),
+                render.token_repr(d.note, 22),
+                tops,
+            )
+            chosen_ids.append(d.token_id)
+
+        if timing is not None and first_token_at is not None:
+            timing.record(
+                "prompt eval + first token",
+                first_token_at - loop_start,
+                tokens=1,
+            )
+            timing.record(
+                "decode",
+                _time.perf_counter() - first_token_at,
+                tokens=max(0, len(chosen_ids) - 1),
+            )
+
+        console.print(table)
+        completion = backend.detokenize(chosen_ids)
+        console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
+        console.print(f"[bold]completion:[/bold][green]{completion}[/green]")
+        if timing is not None:
+            console.print(timing.render())
+        return 0
+    finally:
+        if own_backend and backend is not None:
+            backend.close()
 
 
-def cmd_spec(args: argparse.Namespace, cfg: Config) -> int:
+def cmd_spec(
+    args: argparse.Namespace,
+    cfg: Config,
+    *,
+    backend: Backend | None = None,  # accepted for signature symmetry; unused
+    show_banner: bool = True,
+) -> int:
+    """Speculative decoding owns its own target + draft pair, even from
+    inside ``session`` -- the session backend isn't necessarily the same as
+    the speculative target. ``backend`` is accepted to keep the dispatcher's
+    call signature uniform, but it's ignored.
+    """
+    del backend  # see docstring
+
     from decoding_sandbox.cli import render
     from decoding_sandbox.core.factory import build_backend
     from decoding_sandbox.core.speculative import speculative_generate
@@ -415,71 +552,142 @@ def cmd_spec(args: argparse.Namespace, cfg: Config) -> int:
     if rc is not None:
         return rc
 
-    console.print(f"[dim]loading target '{args.target_model}'...[/dim]")
-    target = build_backend("hf", cfg, model=args.target_model)
-    console.print(f"[dim]loading draft '{args.draft_model}'...[/dim]")
-    draft = build_backend("hf", cfg, model=args.draft_model)
-    console.print(
-        f"target: [cyan]{target.capabilities.name}[/cyan]  "
-        f"draft: [magenta]{draft.capabilities.name}[/magenta]  gamma={args.gamma}\n"
-    )
+    timing = None if getattr(args, "no_timing", False) else Timing()
+    with _maybe_phase(timing, "target load"):
+        console.print(f"[dim]loading target '{args.target_model}'...[/dim]")
+        target = build_backend("hf", cfg, model=args.target_model)
+    with _maybe_phase(timing, "draft load"):
+        console.print(f"[dim]loading draft '{args.draft_model}'...[/dim]")
+        draft = build_backend("hf", cfg, model=args.draft_model)
+    try:
+        if show_banner:
+            console.print(
+                f"target: [cyan]{target.capabilities.name}[/cyan]  "
+                f"draft: [magenta]{draft.capabilities.name}[/magenta]  "
+                f"gamma={args.gamma}\n"
+            )
 
-    table = Table(title=f"speculative decode {args.prompt!r}")
-    table.add_column("round", justify="right")
-    table.add_column("draft proposed (green=accepted, red=rejected)")
-    table.add_column("acc/total", justify="right")
-    table.add_column("correction/bonus")
+        table = Table(title=f"speculative decode {args.prompt!r}")
+        table.add_column("round", justify="right")
+        table.add_column("draft proposed (green=accepted, red=rejected)")
+        table.add_column("acc/total", justify="right")
+        table.add_column("correction/bonus")
 
-    total_proposed = total_accepted = rounds = total_emitted = 0
-    all_ids: list[int] = []
-    for rnd in speculative_generate(
-        target, draft, args.prompt, gamma=args.gamma, max_tokens=args.max_tokens
-    ):
-        parts = []
-        for i, c in enumerate(rnd.proposed):
-            color = "green" if i < rnd.accepted else "red strike"
-            parts.append(f"[{color}]{render.token_repr(c.text, 10)}[/]")
-        corr = render.token_repr(rnd.correction.text, 12) if rnd.correction else "-"
-        table.add_row(
-            str(rnd.step),
-            " ".join(parts) or "[dim](none)[/dim]",
-            f"{rnd.accepted}/{len(rnd.proposed)}",
-            f"[cyan]{corr}[/cyan]",
+        total_proposed = total_accepted = rounds = total_emitted = 0
+        all_ids: list[int] = []
+        with _maybe_phase(timing, "speculative loop"):
+            for rnd in speculative_generate(
+                target, draft, args.prompt,
+                gamma=args.gamma, max_tokens=args.max_tokens,
+            ):
+                parts = []
+                for i, c in enumerate(rnd.proposed):
+                    color = "green" if i < rnd.accepted else "red strike"
+                    parts.append(f"[{color}]{render.token_repr(c.text, 10)}[/]")
+                corr = (
+                    render.token_repr(rnd.correction.text, 12)
+                    if rnd.correction else "-"
+                )
+                table.add_row(
+                    str(rnd.step),
+                    " ".join(parts) or "[dim](none)[/dim]",
+                    f"{rnd.accepted}/{len(rnd.proposed)}",
+                    f"[cyan]{corr}[/cyan]",
+                )
+                total_proposed += len(rnd.proposed)
+                total_accepted += rnd.accepted
+                total_emitted += len(rnd.emitted_ids)
+                rounds += 1
+                all_ids.extend(rnd.emitted_ids)
+
+        if timing is not None:
+            timing.set_tokens("speculative loop", total_emitted)
+        console.print(table)
+        accept_rate = (total_accepted / total_proposed) if total_proposed else 0.0
+        speedup = (total_emitted / rounds) if rounds else 0.0
+        console.print(
+            f"\nrounds={rounds}  tokens={total_emitted}  "
+            f"draft acceptance={accept_rate:.1%}  "
+            f"tokens/target-pass=[bold]{speedup:.2f}[/bold] "
+            f"(plain greedy = 1.00; higher is faster)"
         )
-        total_proposed += len(rnd.proposed)
-        total_accepted += rnd.accepted
-        total_emitted += len(rnd.emitted_ids)
-        rounds += 1
-        all_ids.extend(rnd.emitted_ids)
-
-    console.print(table)
-    accept_rate = (total_accepted / total_proposed) if total_proposed else 0.0
-    speedup = (total_emitted / rounds) if rounds else 0.0
-    console.print(
-        f"\nrounds={rounds}  tokens={total_emitted}  "
-        f"draft acceptance={accept_rate:.1%}  "
-        f"tokens/target-pass=[bold]{speedup:.2f}[/bold] "
-        f"(plain greedy = 1.00; higher is faster)"
-    )
-    console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
-    console.print(f"[bold]completion:[/bold][green]{target.detokenize(all_ids)}[/green]")
-    target.close()
-    draft.close()
-    return 0
+        console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
+        console.print(
+            f"[bold]completion:[/bold][green]{target.detokenize(all_ids)}[/green]"
+        )
+        if timing is not None:
+            console.print(timing.render())
+        return 0
+    finally:
+        target.close()
+        draft.close()
 
 
-def cmd_manual(args: argparse.Namespace, cfg: Config) -> int:
+def cmd_manual(
+    args: argparse.Namespace,
+    cfg: Config,
+    *,
+    backend: Backend | None = None,
+    show_banner: bool = True,
+) -> int:
+    del show_banner  # the manual TUI prints its own header
     from decoding_sandbox.cli.manual_tui import run_manual
-    from decoding_sandbox.core.factory import build_backend
+
+    own_backend = backend is None
+    if own_backend:
+        rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+        if rc is not None:
+            return rc
+        name = args.backend or cfg.default_backend
+        backend = _build_backend_with_load_timing(
+            name, cfg, model=args.model, timing=None
+        )
+    return run_manual(
+        backend, args.prompt, top_k=args.top_k, own_backend=own_backend
+    )
+
+
+def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
+    """Long-lived REPL that keeps a backend loaded across commands.
+
+    The heavy load (e.g. 30s+ for the 9B GGUF) happens once at startup; every
+    subsequent ``inspect``/``generate``/``manual`` runs in-process and skips
+    the load. The session also runs the disk preflight once up front (the
+    in-REPL commands inherit ``skip_preflight=True`` from the session parser).
+    """
+    from decoding_sandbox.cli.session import (
+        SessionState,
+        run_session,
+    )
 
     rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
     if rc is not None:
         return rc
 
     name = args.backend or cfg.default_backend
-    console.print(f"[dim]building backend '{name}'...[/dim]")
-    backend = build_backend(name, cfg, model=args.model)
-    return run_manual(backend, args.prompt, top_k=args.top_k)
+    timing = None if getattr(args, "no_timing", False) else Timing()
+    backend = _build_backend_with_load_timing(
+        name, cfg, model=args.model, timing=timing
+    )
+    _print_backend_banner(backend)
+    if timing is not None:
+        console.print(timing.render(prefix="startup"))
+
+    state = SessionState(
+        cfg=cfg,
+        backend=backend,
+        backend_name=name,
+        backend_model=args.model,
+        console=console,
+        timing_enabled=not getattr(args, "no_timing", False),
+    )
+    try:
+        return run_session(state)
+    finally:
+        try:
+            state.backend.close()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _print_candidates(steps, max_positions: int, top_k: int) -> None:
@@ -511,6 +719,17 @@ def _add_preflight_flag(p: argparse.ArgumentParser) -> None:
         "--skip-preflight",
         action="store_true",
         help="Skip the disk free-space check before running this command.",
+    )
+
+
+def _add_timing_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--no-timing",
+        action="store_true",
+        help=(
+            "Suppress the one-line timing summary printed after the command "
+            "(prompt eval / decode / total wall time + tokens-per-second)."
+        ),
     )
 
 
@@ -552,6 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also print the full top-k candidate list for the first N positions.",
     )
     _add_preflight_flag(p_inspect)
+    _add_timing_flag(p_inspect)
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_gen = sub.add_parser("generate", help="Decode with a chosen/custom sampler, step by step.")
@@ -583,6 +803,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_preflight_flag(p_gen)
+    _add_timing_flag(p_gen)
     p_gen.set_defaults(func=cmd_generate)
 
     p_manual = sub.add_parser("manual", help="Interactive token-by-token decoding (TUI).")
@@ -602,7 +823,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_spec.add_argument("--gamma", type=int, default=4, help="Draft tokens proposed per round.")
     p_spec.add_argument("--max-tokens", type=int, default=24)
     _add_preflight_flag(p_spec)
+    _add_timing_flag(p_spec)
     p_spec.set_defaults(func=cmd_spec)
+
+    p_session = sub.add_parser(
+        "session",
+        help=(
+            "Long-lived REPL that keeps the model loaded across commands. "
+            "Amortizes the slow GGUF/HF load over many inspects/generates."
+        ),
+    )
+    p_session.add_argument("--backend", default=None, help=_BACKEND_HELP)
+    p_session.add_argument("--model", default=None, help="Override the model id.")
+    _add_preflight_flag(p_session)
+    _add_timing_flag(p_session)
+    p_session.set_defaults(func=cmd_session)
 
     return parser
 
