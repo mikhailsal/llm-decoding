@@ -62,7 +62,8 @@ def speculative_generate(
 
         draft_ids = [c.token_id for c in proposed]
         accepted, correction = target.verify_greedy(tokens, draft_ids)
-        emitted = draft_ids[:accepted] + ([correction.token_id] if correction else [])
+        remaining = max_tokens - produced
+        emitted = (draft_ids[:accepted] + ([correction.token_id] if correction else []))[:remaining]
         tokens.extend(emitted)
         produced += len(emitted)
         yield SpecRound(step, proposed, accepted, correction, emitted)

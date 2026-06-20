@@ -175,9 +175,24 @@ def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
         )
 
     watch = _resolve_watch(backend, args.watch or [])
-    steps = backend.score_prompt(args.prompt, top_k=args.top_k, watch_ids=[i for _, i in watch])
+    generated_only_inspect = (
+        backend.__class__.__name__ == "OpenAICompatBackend" and not caps.prompt_logprobs
+    )
+    if generated_only_inspect:
+        console.print(
+            "[yellow]note: this backend cannot score prompt tokens; showing the "
+            "next-token distribution after the prompt instead.[/yellow]"
+        )
+        step = backend.next_distribution(backend.tokenize(args.prompt), top_k=args.top_k)
+        step.context_text = args.prompt
+        step.watched = {wid: backend._lookup_watch(step, wid) for _, wid in watch}
+        steps = [step]
+        title = f"Next-token inspection: {args.prompt!r}"
+    else:
+        steps = backend.score_prompt(args.prompt, top_k=args.top_k, watch_ids=[i for _, i in watch])
+        title = f"Context inspection: {args.prompt!r}"
 
-    table = Table(title=f"Context inspection: {args.prompt!r}")
+    table = Table(title=title)
     table.add_column("pos", justify="right")
     table.add_column("context -> next")
     table.add_column("p(next)", justify="right")

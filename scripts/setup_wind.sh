@@ -13,6 +13,9 @@ CACHE_ROOT="${CACHE_ROOT:-~/.cache/dsbx}"
 HF_DIR="${CACHE_ROOT}/huggingface"
 PIP_DIR="${CACHE_ROOT}/pip"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu124}"
+GGUF_REPO="${GGUF_REPO:-Jessylg27/Qwen3.5-9B-Base-GGUF}"
+GGUF_FILE="${GGUF_FILE:-Qwen3.5-9B-Base-Q4_K_M.gguf}"
+DOWNLOAD_GGUF="${DOWNLOAD_GGUF:-1}"
 
 echo "==> Cache root: ${CACHE_ROOT}"
 if [ ! -d "$(dirname "${CACHE_ROOT}")" ]; then
@@ -48,6 +51,22 @@ pip install torch --index-url "${TORCH_INDEX}"
 
 echo "==> Installing local-model extra (transformers/accelerate/bitsandbytes)"
 pip install -e ".[local]"
+
+if [ "${DOWNLOAD_GGUF}" = "1" ]; then
+  echo "==> Downloading ${GGUF_REPO}/${GGUF_FILE} into HF cache"
+  python - <<PY
+from huggingface_hub import hf_hub_download
+
+path = hf_hub_download(
+    repo_id="${GGUF_REPO}",
+    filename="${GGUF_FILE}",
+    cache_dir="${HF_DIR}",
+)
+print(path)
+PY
+else
+  echo "==> Skipping GGUF download (DOWNLOAD_GGUF=${DOWNLOAD_GGUF})"
+fi
 
 echo
 echo "==> Verifying CUDA on the P40"
