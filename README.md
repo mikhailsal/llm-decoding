@@ -40,6 +40,7 @@ is the only backend that exposes the entire vocabulary instead of a top-k slice.
 | **Fireworks** | yes (top_logprobs <= 5) | **yes** (`/completions` `echo`) | frontier models (gpt-oss-120b, glm-5, kimi, deepseek) |
 | **NVIDIA NIM** | yes (top_logprobs <= 20) | no (no `/completions`) | hosts Qwen3.5 MoE siblings |
 | **OpenRouter** | yes (needs `provider.require_parameters`) | no | routes to a capable provider |
+| **LM Studio** | yes (top_logprobs <= 10) | no (chat-only by default) | local OpenAI-compatible server, no key needed |
 | **Gemini AI Studio** | no (capability gate) | no | use Vertex AI + billing if ever needed |
 | Ollama 0.7.0 | no | no | not used |
 
@@ -96,7 +97,8 @@ dsbx doctor                     # should now show torch cuda=True on the P40
   `--watch ' Paris'`, `--top-k`, `--candidates N`.
 - `dsbx generate "<text>"` -- decode with a sampler, showing per-step changes vs
   greedy. `--sampler greedy|temperature|top_k|top_p|min_p|typical|custom`,
-  `--temperature`, `--top-p`, `--min-p`, `--typical-p`, `--custom-file f.py:fn`.
+  `--temperature`, `--top-p`, `--min-p`, `--typical-p`, `--custom-file f.py:fn`,
+  `--stop ' END'` (repeatable single-token early-stop).
 - `dsbx manual "<text>"` -- interactive token-by-token TUI (pick by rank, force
   any token, undo, save/load transcript).
 - `dsbx spec "<text>"` -- speculative decoding (HF draft+target) with
@@ -153,7 +155,11 @@ examples/      custom_sampler.py
 
 ## Status
 
-All planned waves (0-5) are implemented and verified: foundations/environment,
-backend abstraction + inspect, samplers + generate, manual TUI, cloud backends,
-and speculative decoding. Next up (future): a thin FastAPI + browser UI over the
-same `core/`.
+All planned waves (0-5) are implemented. Foundations/environment, backend
+abstraction + `inspect`, samplers + `generate` (with `--stop`), the manual TUI,
+cloud backends (Fireworks `echo` whole-context + chat-only NIM/OpenRouter/LM
+Studio), and speculative decoding via the `Speculator` Protocol +
+`HFSpeculator` (HF assisted-generation style; a `LlamaCppSpeculator` matching
+the same Protocol is the natural next addition). All heavy commands run the
+`storage.preflight_or_raise` disk check first (bypass with `--skip-preflight`).
+Next up: a thin FastAPI + browser UI over the same `core/`.

@@ -47,6 +47,10 @@ _DEFAULTS: dict[str, Any] = {
             "load_in_4bit": True,
             "device_map": "auto",
             "fallback_model": "Qwen/Qwen3-1.7B-Base",
+            # Memory caps for `device_map="auto"` (passed as `max_memory`). Tuned
+            # for the 6 GB P40 on dsbx-host; override per machine in config.toml.
+            "gpu_mem": "4500MiB",
+            "cpu_mem": "13GiB",
         },
     },
     "providers": {

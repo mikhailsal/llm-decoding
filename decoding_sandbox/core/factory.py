@@ -22,6 +22,8 @@ def build_backend(name: str, cfg: Config, model: str | None = None) -> Backend:
             model or hf.get("model", "Qwen/Qwen3-1.7B-Base"),
             fallback_model=hf.get("fallback_model"),
             load_in_4bit=bool(hf.get("load_in_4bit", True)),
+            gpu_mem=str(hf.get("gpu_mem", "4500MiB")),
+            cpu_mem=str(hf.get("cpu_mem", "13GiB")),
         )
     if name in ("llamacpp", "llama"):
         from decoding_sandbox.backends.llamacpp import LlamaCppBackend

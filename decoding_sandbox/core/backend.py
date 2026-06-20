@@ -67,11 +67,17 @@ class Backend(ABC):
             step.position = i
             step.chosen = chosen
             step.context_text = self.piece(ids[i - 1])
-            step.watched = {wid: self._lookup_watch(step, wid) for wid in watch_ids}
+            step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
             results.append(step)
         return results
 
-    def _lookup_watch(self, step: StepResult, token_id: int) -> TokenCandidate:
+    def lookup_watch(self, step: StepResult, token_id: int) -> TokenCandidate:
+        """Resolve a watch token's candidate from a step (or mark as <top-k).
+
+        Public so UI code can populate ``step.watched`` after building a
+        StepResult outside of the standard ``score_prompt`` loop (e.g. the
+        chat-only "next-token" fallback in ``cmd_inspect``).
+        """
         found = step.find(token_id)
         if found is not None:
             return found

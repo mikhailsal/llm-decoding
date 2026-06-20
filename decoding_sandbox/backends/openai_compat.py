@@ -121,11 +121,22 @@ class OpenAICompatBackend(Backend):
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None
     ) -> list[StepResult]:
-        """Whole-context inspection. Uses /completions echo where supported."""
+        """Whole-context inspection. Uses /completions echo where supported.
+
+        Chat-only providers (NIM, OpenRouter, LM Studio chat) cannot score
+        prompt tokens server-side, and cloud tokenization isn't reproducible
+        locally, so we refuse rather than silently return an empty list (the
+        generic per-prefix fallback in ``Backend.score_prompt`` is meaningless
+        here because ``tokenize`` interns the whole text as a single id).
+        Callers should branch on ``capabilities.prompt_logprobs`` first.
+        """
         if not self.provider.supports_prompt_logprobs:
-            # No native prompt logprobs -> fall back to the generic per-prefix loop
-            # (works for /completions providers; chat-only is approximate).
-            return super().score_prompt(prompt, top_k, watch_ids)
+            raise NotImplementedError(
+                f"{self.provider.name!r} has no prompt-logprob support; "
+                "this backend cannot do whole-context inspection. Check "
+                "capabilities.prompt_logprobs and fall back to "
+                "next_distribution() on the prompt instead."
+            )
 
         watch_ids = watch_ids or []
         top = max(1, min(top_k, self.provider.max_top_logprobs))
@@ -163,7 +174,7 @@ class OpenAICompatBackend(Backend):
                 chosen=chosen,
                 context_text=tokens[i - 1],
             )
-            step.watched = {wid: self._lookup_watch(step, wid) for wid in watch_ids}
+            step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
             results.append(step)
         return results
 

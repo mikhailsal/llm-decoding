@@ -3,9 +3,17 @@
 Renders the current text and the next-token candidate table, then reads a
 command each step. It wraps the backend-agnostic ManualSession, so all logic
 (pick/force/undo/save/load) is shared and testable; this file is only I/O.
+
+The command dispatcher is factored out as ``dispatch_command`` so it can be
+unit-tested without a real terminal: it returns a small tagged dataclass
+(``CommandResult``) describing what happened, which the TUI converts to rich
+output. New commands go in ``dispatch_command`` and stay testable.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
 
 from prompt_toolkit import PromptSession
 from rich.console import Console
@@ -26,6 +34,80 @@ commands:
   ?            show this help
   q            quit
 """
+
+# Tagged outcome of a single command, used by both the live TUI and tests.
+Tag = Literal[
+    "quit", "help", "pick", "pick_error", "undo", "undo_empty",
+    "force", "force_blocked", "set_top_k", "bad_top_k", "save", "load",
+    "unknown",
+]
+
+
+@dataclass
+class CommandResult:
+    tag: Tag
+    message: str = ""
+
+    @property
+    def should_quit(self) -> bool:
+        return self.tag == "quit"
+
+
+def dispatch_command(session: ManualSession, raw: str) -> CommandResult:
+    """Apply one user command to ``session`` and return what happened.
+
+    Pure I/O-free entry point so unit tests can exercise the full grammar
+    without standing up a PromptSession or a rich Console.
+    """
+    raw = raw.strip()
+
+    if raw in ("q", "quit", "exit"):
+        return CommandResult("quit")
+    if raw in ("?", "help"):
+        return CommandResult("help", HELP)
+
+    if raw == "" or raw.isdigit():
+        rank = int(raw) if raw else 0
+        try:
+            c = session.pick(rank)
+        except IndexError as exc:
+            return CommandResult("pick_error", str(exc))
+        return CommandResult("pick", c.text)
+
+    if raw == "u":
+        tid = session.undo()
+        if tid is None:
+            return CommandResult("undo_empty")
+        return CommandResult("undo", str(tid))
+
+    if raw.startswith("f "):
+        if not session.backend.capabilities.can_force_token:
+            return CommandResult(
+                "force_blocked",
+                f"backend {session.backend.capabilities.name!r} cannot force "
+                "arbitrary tokens (capabilities.can_force_token=False).",
+            )
+        appended = session.force_text(raw[2:])
+        return CommandResult("force", " ".join(a.text for a in appended))
+
+    if raw.startswith("k "):
+        try:
+            session.top_k = max(1, int(raw[2:]))
+        except ValueError:
+            return CommandResult("bad_top_k", "usage: k <n>")
+        return CommandResult("set_top_k", str(session.top_k))
+
+    if raw.startswith("s "):
+        path = raw[2:].strip()
+        session.save(path)
+        return CommandResult("save", path)
+
+    if raw.startswith("l "):
+        path = raw[2:].strip()
+        session.load(path)
+        return CommandResult("load", path)
+
+    return CommandResult("unknown")
 
 
 def _render(console: Console, session: ManualSession) -> None:
@@ -52,6 +134,34 @@ def _render(console: Console, session: ManualSession) -> None:
     console.print(table)
 
 
+def _print_result(console: Console, result: CommandResult) -> None:
+    tag = result.tag
+    if tag == "help":
+        console.print(result.message)
+    elif tag == "pick":
+        console.print(f"  picked [green]{render.token_repr(result.message)}[/green]")
+    elif tag == "pick_error":
+        console.print(f"[red]{result.message}[/red]")
+    elif tag == "undo":
+        console.print("  undone")
+    elif tag == "undo_empty":
+        console.print("[yellow]nothing to undo[/yellow]")
+    elif tag == "force":
+        console.print(f"  forced {render.token_repr(result.message)}")
+    elif tag == "force_blocked":
+        console.print(f"[yellow]{result.message} pick by rank instead.[/yellow]")
+    elif tag == "set_top_k":
+        console.print(f"  top_k={result.message}")
+    elif tag == "bad_top_k":
+        console.print(f"[red]{result.message}[/red]")
+    elif tag == "save":
+        console.print(f"  saved -> {result.message}")
+    elif tag == "load":
+        console.print(f"  loaded <- {result.message}")
+    elif tag == "unknown":
+        console.print("[yellow]unknown command (type ? for help)[/yellow]")
+
+
 def run_manual(backend: Backend, prompt: str, top_k: int = 12) -> int:
     console = Console()
     session = ManualSession(backend, prompt, top_k=top_k)
@@ -60,48 +170,14 @@ def run_manual(backend: Backend, prompt: str, top_k: int = 12) -> int:
     while True:
         _render(console, session)
         try:
-            raw = ps.prompt("decode> ").strip()
+            raw = ps.prompt("decode> ")
         except (EOFError, KeyboardInterrupt):
             break
 
-        if raw in ("q", "quit", "exit"):
+        result = dispatch_command(session, raw)
+        _print_result(console, result)
+        if result.should_quit:
             break
-        if raw in ("?", "help"):
-            console.print(HELP)
-            continue
-        if raw == "" or raw.isdigit():
-            rank = int(raw) if raw else 0
-            try:
-                c = session.pick(rank)
-                console.print(f"  picked [green]{render.token_repr(c.text)}[/green]")
-            except IndexError as exc:
-                console.print(f"[red]{exc}[/red]")
-            continue
-        if raw == "u":
-            tid = session.undo()
-            console.print("  undone" if tid is not None else "[yellow]nothing to undo[/yellow]")
-            continue
-        if raw.startswith("f "):
-            appended = session.force_text(raw[2:])
-            console.print(
-                "  forced " + " ".join(render.token_repr(a.text) for a in appended)
-            )
-            continue
-        if raw.startswith("k "):
-            try:
-                session.top_k = max(1, int(raw[2:]))
-            except ValueError:
-                console.print("[red]usage: k <n>[/red]")
-            continue
-        if raw.startswith("s "):
-            session.save(raw[2:].strip())
-            console.print(f"  saved -> {raw[2:].strip()}")
-            continue
-        if raw.startswith("l "):
-            session.load(raw[2:].strip())
-            console.print(f"  loaded <- {raw[2:].strip()}")
-            continue
-        console.print("[yellow]unknown command (type ? for help)[/yellow]")
 
     console.print(f"\n[bold]final:[/bold] {session.prompt}[green]{session.generated_text()}[/green]")
     backend.close()

@@ -48,6 +48,11 @@ load_in_4bit = true
 device_map = "auto"
 # Fallback if the chosen model fails to load.
 fallback_model = "Qwen/Qwen3-1.7B-Base"
+# `device_map="auto"` memory caps passed as `max_memory`. Tuned for the 6 GB
+# P40 on dsbx-host (4500MiB GPU + 13 GiB CPU offload). Bump GPU if you have more
+# VRAM and want to avoid CPU offload.
+gpu_mem = "4500MiB"
+cpu_mem = "13GiB"
 
 # ---- Cloud providers (logprob-capable, live-verified) ----------------------
 

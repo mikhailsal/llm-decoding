@@ -1,8 +1,15 @@
 """CLI command dispatch.
 
-Wave 0 implements `doctor` (environment + storage preflight) and `probe`
-(provider logprob capability check). The decoding modes (`inspect`, `generate`,
-`manual`) are wired as stubs and implemented in later waves.
+Subcommands (all backed by ``decoding_sandbox.core``):
+- ``doctor``  : environment + provider keys + disk free-space report
+- ``probe``   : live provider logprob capability check
+- ``inspect`` : per-token confidence + watch-token highlighting
+- ``generate``: decode with a chosen/custom sampler, per-step diff vs greedy
+- ``manual``  : interactive token-by-token TUI (prompt_toolkit)
+- ``spec``    : speculative decoding with accept/reject visualization
+
+Every heavy command runs ``storage.preflight_or_raise`` first; pass
+``--skip-preflight`` to bypass.
 """
 
 from __future__ import annotations
@@ -20,13 +27,39 @@ from decoding_sandbox.core.config import Config, load_config
 
 console = Console()
 
+# Providers that legitimately do not need an API key (e.g. local OpenAI-compat
+# servers). Doctor shows "no key needed" instead of red "missing" for these.
+_NO_KEY_PROVIDERS = frozenset({"lmstudio"})
 
-def _mask(secret: str | None) -> str:
+
+def _mask(secret: str | None, *, no_key_ok: bool = False) -> str:
     if not secret:
+        if no_key_ok:
+            return "[dim]no key needed[/dim]"
         return "[red]missing[/red]"
     if len(secret) <= 8:
         return "[green]set[/green] (****)"
     return f"[green]set[/green] ({secret[:4]}...{secret[-3:]})"
+
+
+def _run_preflight(cfg: Config, *, skip: bool) -> int | None:
+    """Abort the current command if disk free space is below the floor.
+
+    Returns ``None`` on success, or an exit code (>0) on failure. ``skip=True``
+    short-circuits to ``None`` so users can override the check if they know
+    what they're doing.
+    """
+    if skip:
+        return None
+    try:
+        storage.preflight_or_raise(cfg.storage.check_paths, cfg.storage.min_free_gb)
+    except storage.StoragePreflightError as exc:
+        console.print(f"[red]preflight failed:[/red] {exc}")
+        console.print(
+            "[dim]pass --skip-preflight to bypass this check.[/dim]"
+        )
+        return 3
+    return None
 
 
 def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
@@ -52,7 +85,7 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         ptable.add_row(
             name,
             prov.api_key_env,
-            _mask(prov.api_key()),
+            _mask(prov.api_key(), no_key_ok=name in _NO_KEY_PROVIDERS),
             "yes" if prov.supports_prompt_logprobs else "no",
             str(prov.max_top_logprobs),
         )
@@ -147,9 +180,37 @@ def _resolve_watch(backend, watch: list[str]) -> list[tuple[str, int]]:
     return resolved
 
 
+def _resolve_stop_ids(backend, stop: list[str]) -> list[tuple[str, int]]:
+    """Map each stop string to a single token id (skip + warn if multi-token).
+
+    Generation halts the moment any chosen token matches one of these ids. A
+    multi-token stop string is impossible to detect at the per-token level, so
+    we warn and ignore it -- the user should prefer a single-token stop (e.g.
+    a newline or a specific punctuation token).
+    """
+    resolved: list[tuple[str, int]] = []
+    for s in stop:
+        ids = backend.tokenize(s)
+        if not ids:
+            console.print(f"[yellow]stop {s!r}: tokenizes to nothing, skipped[/yellow]")
+            continue
+        if len(ids) > 1:
+            console.print(
+                f"[yellow]stop {s!r}: {len(ids)} tokens; cannot match per-step, "
+                f"skipped. Try a single-token stop like '\\n'.[/yellow]"
+            )
+            continue
+        resolved.append((s, ids[0]))
+    return resolved
+
+
 def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
     from decoding_sandbox.cli import render
     from decoding_sandbox.core.factory import build_backend
+
+    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+    if rc is not None:
+        return rc
 
     name = args.backend or cfg.default_backend
     console.print(f"[dim]building backend '{name}'...[/dim]")
@@ -185,7 +246,7 @@ def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
         )
         step = backend.next_distribution(backend.tokenize(args.prompt), top_k=args.top_k)
         step.context_text = args.prompt
-        step.watched = {wid: backend._lookup_watch(step, wid) for _, wid in watch}
+        step.watched = {wid: backend.lookup_watch(step, wid) for _, wid in watch}
         steps = [step]
         title = f"Next-token inspection: {args.prompt!r}"
     else:
@@ -233,6 +294,10 @@ def cmd_generate(args: argparse.Namespace, cfg: Config) -> int:
     from decoding_sandbox.core.engine import generate
     from decoding_sandbox.core.factory import build_backend
 
+    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+    if rc is not None:
+        return rc
+
     name = args.backend or cfg.default_backend
     console.print(f"[dim]building backend '{name}'...[/dim]")
     backend = build_backend(name, cfg, model=args.model)
@@ -258,9 +323,12 @@ def cmd_generate(args: argparse.Namespace, cfg: Config) -> int:
         sampler_name = args.sampler
 
     rng = random.Random(args.seed)
+    stop_ids = _resolve_stop_ids(backend, args.stop or [])
     console.print(
         f"sampler: [magenta]{sampler_name}[/magenta]  seed={args.seed}  "
-        f"max_tokens={args.max_tokens}\n"
+        f"max_tokens={args.max_tokens}"
+        + (f"  stop={[s for s, _ in stop_ids]}" if stop_ids else "")
+        + "\n"
     )
 
     table = Table(title=f"generate {args.prompt!r}")
@@ -276,6 +344,7 @@ def cmd_generate(args: argparse.Namespace, cfg: Config) -> int:
     for gs in generate(
         backend, args.prompt, sampler,
         max_tokens=args.max_tokens, top_k=args.top_k, rng=rng,
+        stop_ids=[tid for _, tid in stop_ids],
     ):
         d = gs.decision
         chosen_cand = gs.chosen_candidate()
@@ -315,6 +384,10 @@ def cmd_spec(args: argparse.Namespace, cfg: Config) -> int:
     from decoding_sandbox.cli import render
     from decoding_sandbox.core.factory import build_backend
     from decoding_sandbox.core.speculative import speculative_generate
+
+    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+    if rc is not None:
+        return rc
 
     console.print(f"[dim]loading target '{args.target_model}'...[/dim]")
     target = build_backend("hf", cfg, model=args.target_model)
@@ -373,6 +446,10 @@ def cmd_manual(args: argparse.Namespace, cfg: Config) -> int:
     from decoding_sandbox.cli.manual_tui import run_manual
     from decoding_sandbox.core.factory import build_backend
 
+    rc = _run_preflight(cfg, skip=getattr(args, "skip_preflight", False))
+    if rc is not None:
+        return rc
+
     name = args.backend or cfg.default_backend
     console.print(f"[dim]building backend '{name}'...[/dim]")
     backend = build_backend(name, cfg, model=args.model)
@@ -391,6 +468,21 @@ def _print_candidates(steps, max_positions: int, top_k: int) -> None:
             for c in st.candidates
         )
         console.print(line)
+
+
+_BACKEND_HELP = (
+    "Backend name: built-ins are 'hf' and 'llamacpp'; any provider configured "
+    "in config.toml (e.g. fireworks, nim, openrouter, lmstudio) also works. "
+    "Default: config run.backend."
+)
+
+
+def _add_preflight_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip the disk free-space check before running this command.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -419,9 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", help="Per-token confidence + watch-token highlighting for a prompt."
     )
     p_inspect.add_argument("prompt", help="Text to inspect.")
-    p_inspect.add_argument(
-        "--backend", default=None, help="hf | llamacpp (default: config run.backend)."
-    )
+    p_inspect.add_argument("--backend", default=None, help=_BACKEND_HELP)
     p_inspect.add_argument("--model", default=None, help="Override the model id.")
     p_inspect.add_argument("--top-k", type=int, default=8, help="Candidates per position.")
     p_inspect.add_argument(
@@ -432,11 +522,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--candidates", type=int, default=0, metavar="N",
         help="Also print the full top-k candidate list for the first N positions.",
     )
+    _add_preflight_flag(p_inspect)
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_gen = sub.add_parser("generate", help="Decode with a chosen/custom sampler, step by step.")
     p_gen.add_argument("prompt", help="Text to continue.")
-    p_gen.add_argument("--backend", default=None, help="hf | llamacpp.")
+    p_gen.add_argument("--backend", default=None, help=_BACKEND_HELP)
     p_gen.add_argument("--model", default=None, help="Override the model id.")
     p_gen.add_argument(
         "--sampler", default="greedy",
@@ -455,13 +546,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--top-k", type=int, default=50,
         help="How many candidates to pull from the backend per step (sampler input).",
     )
+    p_gen.add_argument(
+        "--stop", action="append", default=[],
+        help=(
+            "Stop generation as soon as this single-token string is chosen "
+            "(repeatable). Multi-token strings are warned-about and ignored."
+        ),
+    )
+    _add_preflight_flag(p_gen)
     p_gen.set_defaults(func=cmd_generate)
 
     p_manual = sub.add_parser("manual", help="Interactive token-by-token decoding (TUI).")
     p_manual.add_argument("prompt", help="Starting text.")
-    p_manual.add_argument("--backend", default=None, help="hf | llamacpp.")
+    p_manual.add_argument("--backend", default=None, help=_BACKEND_HELP)
     p_manual.add_argument("--model", default=None, help="Override the model id.")
     p_manual.add_argument("--top-k", type=int, default=12, help="Candidates shown per step.")
+    _add_preflight_flag(p_manual)
     p_manual.set_defaults(func=cmd_manual)
 
     p_spec = sub.add_parser(
@@ -472,6 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_spec.add_argument("--draft-model", default="Qwen/Qwen3-0.6B-Base")
     p_spec.add_argument("--gamma", type=int, default=4, help="Draft tokens proposed per round.")
     p_spec.add_argument("--max-tokens", type=int, default=24)
+    _add_preflight_flag(p_spec)
     p_spec.set_defaults(func=cmd_spec)
 
     return parser
