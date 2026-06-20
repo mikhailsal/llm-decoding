@@ -14,12 +14,22 @@ from dataclasses import dataclass, field
 
 @dataclass
 class TokenCandidate:
-    """One candidate token in a distribution at a single position."""
+    """One candidate token in a distribution at a single position.
+
+    ``is_special`` is set by backends that can tell (HF via
+    ``tokenizer.all_special_ids``, llama-cpp-py via ``Llama.token_eos()`` +
+    the ``<|...|>`` heuristic). The renderer uses it to colour the token
+    distinctively so the user can immediately see EOS/BOS/PAD without
+    eyeballing strings like ``<|endoftext|>``. Backends that don't expose
+    this info leave it ``False`` -- the renderer falls back to a pattern
+    check on the text.
+    """
 
     token_id: int
     text: str
     logprob: float
     rank: int  # 0 = most likely
+    is_special: bool = False
 
     @property
     def prob(self) -> float:
@@ -66,7 +76,15 @@ class StepResult:
 
 @dataclass
 class Capabilities:
-    """What a backend can do, so the UI can adapt instead of guessing."""
+    """What a backend can do, so the UI can adapt instead of guessing.
+
+    ``eos_token_ids`` lists every token id the backend believes terminates a
+    generation. Set non-empty by backends that expose it (HF reads
+    ``model.config.eos_token_id``, llama-cpp-py reads ``Llama.token_eos()``).
+    The ``generate`` engine treats any chosen token id in this set as an
+    implicit stop, so a base model that wants to emit ``<|endoftext|>``
+    actually halts instead of running until ``--max-tokens``.
+    """
 
     name: str
     full_vocab: bool  # exact distribution over the entire vocabulary
@@ -74,6 +92,7 @@ class Capabilities:
     max_top_logprobs: int  # how many candidates per position it can return
     can_force_token: bool = False  # supports manual/forced token decoding
     notes: str = ""
+    eos_token_ids: tuple[int, ...] = ()
 
 
 __all__ = ["TokenCandidate", "StepResult", "Capabilities", "field"]

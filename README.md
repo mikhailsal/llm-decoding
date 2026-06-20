@@ -131,6 +131,51 @@ Every heavy command prints a one-line timing summary
 for any phase where the divisor is meaningful. Suppress with `--no-timing`
 (or `:timing off` in a session).
 
+### Token rendering
+
+Tokens that look identical in a column actually differ by leading/trailing
+whitespace -- ``"I"``, ``" I"`` and ``"I "`` are three different ids. The
+renderer surfaces this with explicit markers:
+
+- Leading / trailing spaces -> `·` (one per space), so ` I` reads as `·I`
+  and `I ` reads as `I·`. Internal spaces in prose stay untouched.
+- Newline -> `↵`, tab -> `→`, other control bytes -> `\xNN`.
+- Empty token -> `<empty>` (dim).
+- Special tokens (EOS/BOS/PAD/`<|im_start|>`/`<|endoftext|>`, anything the
+  tokenizer marks special or any text matching `<|...|>`) render in magenta
+  bold.
+
+### EOS and stopping
+
+Each backend reports its end-of-text token ids in
+`Capabilities.eos_token_ids`:
+
+- **HF transformers**: read from `model.config.eos_token_id` and
+  `tokenizer.eos_token_id` (both, deduped -- modern models like Qwen list
+  several for chat templates).
+- **`llamacpp-py`**: read from `Llama.token_eos()` plus `Llama.token_eot()`
+  when the binding exposes it (Qwen-style chat templates).
+- **`llamacpp` HTTP** and **OpenAI-compat providers**: the server API
+  doesn't expose this, so EOS detection is unavailable.
+
+`dsbx generate` honors EOS by default: the moment the sampler picks an
+EOS id, the loop stops and the footer reads
+`stopped on EOS: model emitted <|endoftext|> (id=...)`. The footer also
+reports `stopped on --stop token: ...` and
+`reached --max-tokens=... (model did not emit EOS).` so it's always clear
+*why* generation halted. Set `respect_eos=False` at the engine level (or
+extend the CLI later) to probe what the model would emit past EOS.
+
+`dsbx inspect` (and `:caps` inside a session) prints the configured EOS
+ids in the banner, e.g.
+`EOS ids: 248044=<special>` -- the magenta marker means the token's
+printable form is empty (a true control token), so when *that* id shows
+up at a generation step the model is actually emitting EOS rather than a
+visible string. Typing `<|endoftext|>` literally in your prompt does not
+get tokenized as the EOS id -- the binding's `tokenize()` BPE-encodes the
+literal characters; the real EOS id only appears when the model itself
+chooses it.
+
 ### Examples
 
 ```bash
@@ -202,12 +247,26 @@ examples/      custom_sampler.py
 ## Status
 
 All planned waves (0-5) are implemented. Foundations/environment, backend
-abstraction + `inspect`, samplers + `generate` (with `--stop`), the manual TUI,
-cloud backends (Fireworks `echo` whole-context + chat-only NIM/OpenRouter/LM
-Studio), and speculative decoding via the `Speculator` Protocol +
-`HFSpeculator`. Post-plan addition: the **`llamacpp-py`** in-process backend
-(full vocab via `Llama.scores` with `logits_all=True`), which gives the 9B
-Qwen3.5 base the same white-box experience as HF does for smaller models. All
-heavy commands run the `storage.preflight_or_raise` disk check first (bypass
-with `--skip-preflight`). Next up: a thin FastAPI + browser UI over the same
-`core/`, and a `LlamaCppSpeculator` mirroring the existing `HFSpeculator`.
+abstraction + `inspect`, samplers + `generate` (with `--stop` *and* native
+EOS handling), the manual TUI, cloud backends (Fireworks `echo` whole-context
++ chat-only NIM/OpenRouter/LM Studio), and speculative decoding via the
+`Speculator` Protocol + `HFSpeculator`. Post-plan additions:
+
+- **`llamacpp-py`** in-process backend (full vocab via `Llama.scores` with
+  `logits_all=True`), which gives the 9B Qwen3.5 base the same white-box
+  experience as HF does for smaller models.
+- **`dsbx session`** REPL that keeps the loaded backend alive across
+  multiple commands; one-time 30 s model load is amortized.
+- **Per-command timing/TPS summary** on every heavy path.
+- **Visible-whitespace token rendering** (`·` for leading/trailing spaces,
+  `↵` newline, `→` tab, `<empty>` / `<special>`) and magenta highlighting
+  for special tokens, so ``"I"`` / ``" I"`` / ``"I "`` never collapse in a
+  column.
+- **EOS surfaced in capabilities** (`Capabilities.eos_token_ids`,
+  populated by HF and `llamacpp-py`); `generate` stops when the model
+  emits an EOS id and the footer prints `stopped on EOS: ... (id=...)`.
+
+All heavy commands run the `storage.preflight_or_raise` disk check first
+(bypass with `--skip-preflight`). Next up: a thin FastAPI + browser UI over
+the same `core/`, and a `LlamaCppSpeculator` mirroring the existing
+`HFSpeculator`.

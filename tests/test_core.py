@@ -205,6 +205,84 @@ def test_generate_chosen_candidate_helper_returns_kept_member() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Engine: EOS handling
+# --------------------------------------------------------------------------- #
+def test_generate_stops_when_model_emits_eos() -> None:
+    """A token id matching backend.capabilities.eos_token_ids halts the loop
+    even before --max-tokens, and the yielded step records stop_reason='eos'."""
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 2: "X", 99: "<|endoftext|>"},
+        distributions={
+            (1,): [cand(2, "X", 0.9, 0)],
+            (1, 2): [cand(99, "<|endoftext|>", 0.95, 0)],
+        },
+        eos_token_ids=(99,),
+    )
+
+    steps = list(generate(backend, "P", Sampler("greedy"), max_tokens=10))
+
+    assert [s.decision.token_id for s in steps] == [2, 99]
+    assert steps[-1].stop_reason == "eos"
+
+
+def test_generate_continues_past_eos_when_respect_eos_false() -> None:
+    """Probing mode: ignore EOS and keep going up to max_tokens."""
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 99: "<|endoftext|>", 7: "Y"},
+        distributions={
+            (1,): [cand(99, "<|endoftext|>", 0.95, 0)],
+            (1, 99): [cand(7, "Y", 0.9, 0)],
+        },
+        eos_token_ids=(99,),
+    )
+
+    steps = list(
+        generate(
+            backend, "P", Sampler("greedy"),
+            max_tokens=2, respect_eos=False,
+        )
+    )
+
+    assert [s.decision.token_id for s in steps] == [99, 7]
+    assert steps[-1].stop_reason == "max_tokens"
+
+
+def test_generate_records_user_stop_reason() -> None:
+    """When the chosen id matches a --stop id we record stop_reason='user_stop'."""
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 2: "X"},
+        distributions={(1,): [cand(2, "X", 0.9, 0)]},
+    )
+
+    steps = list(generate(
+        backend, "P", Sampler("greedy"), max_tokens=5, stop_ids=[2]
+    ))
+
+    assert len(steps) == 1
+    assert steps[0].stop_reason == "user_stop"
+
+
+def test_generate_records_max_tokens_stop_reason() -> None:
+    """When the loop exits via max_tokens (no EOS, no user stop) the LAST step
+    is tagged stop_reason='max_tokens'; earlier steps stay None."""
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 2: "X", 3: "Y"},
+        distributions={
+            (1,): [cand(2, "X", 0.9, 0)],
+            (1, 2): [cand(3, "Y", 0.9, 0)],
+        },
+    )
+
+    steps = list(generate(backend, "P", Sampler("greedy"), max_tokens=2))
+
+    assert [s.stop_reason for s in steps] == [None, "max_tokens"]
+
+
+# --------------------------------------------------------------------------- #
 # Samplers (built-ins + custom plug-in)
 # --------------------------------------------------------------------------- #
 def _ctx() -> SamplerContext:

@@ -60,6 +60,12 @@ class HFBackend(Backend):
             kwargs["torch_dtype"] = torch.float16
         self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
         self.model.eval()
+        self._eos_ids: tuple[int, ...] = _gather_eos_ids(
+            self.model.config, self.tokenizer
+        )
+        self._special_ids: frozenset[int] = frozenset(
+            int(i) for i in (getattr(self.tokenizer, "all_special_ids", []) or [])
+        )
 
     @property
     def capabilities(self) -> Capabilities:
@@ -71,7 +77,11 @@ class HFBackend(Backend):
             max_top_logprobs=vocab,
             can_force_token=True,
             notes="exact full-vocab distribution; whole-context in one forward pass.",
+            eos_token_ids=self._eos_ids,
         )
+
+    def _is_special(self, token_id: int) -> bool:
+        return token_id in self._special_ids or token_id in self._eos_ids
 
     def tokenize(self, text: str) -> list[int]:
         return self.tokenizer(text, return_tensors=None)["input_ids"]
@@ -97,7 +107,10 @@ class HFBackend(Backend):
         k = min(top_k, logp.shape[-1])
         vals, idx = torch.topk(logp, k)
         cands = [
-            TokenCandidate(int(i), self.piece(int(i)), float(v), rank)
+            TokenCandidate(
+                int(i), self.piece(int(i)), float(v), rank,
+                is_special=self._is_special(int(i)),
+            )
             for rank, (v, i) in enumerate(zip(vals.tolist(), idx.tolist()))
         ]
         return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
@@ -105,7 +118,10 @@ class HFBackend(Backend):
     def _exact_candidate(self, dist, token_id: int) -> TokenCandidate:
         lp = float(dist[token_id].item())
         rank = int((dist > dist[token_id]).sum().item())
-        return TokenCandidate(token_id, self.piece(token_id), lp, rank)
+        return TokenCandidate(
+            token_id, self.piece(token_id), lp, rank,
+            is_special=self._is_special(token_id),
+        )
 
     def verify_greedy(
         self, context_ids: list[int], draft_ids: list[int]
@@ -132,12 +148,18 @@ class HFBackend(Backend):
                 accepted += 1
             else:
                 dist = torch.log_softmax(logits[pos].float(), dim=-1)
-                return accepted, TokenCandidate(tgt, self.piece(tgt), float(dist[tgt]), 0)
+                return accepted, TokenCandidate(
+                    tgt, self.piece(tgt), float(dist[tgt]), 0,
+                    is_special=self._is_special(tgt),
+                )
         # all accepted -> emit the bonus token from the last position
         pos = len(full) - 1
         tgt = int(torch.argmax(logits[pos]).item())
         dist = torch.log_softmax(logits[pos].float(), dim=-1)
-        return accepted, TokenCandidate(tgt, self.piece(tgt), float(dist[tgt]), 0)
+        return accepted, TokenCandidate(
+            tgt, self.piece(tgt), float(dist[tgt]), 0,
+            is_special=self._is_special(tgt),
+        )
 
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None
@@ -155,7 +177,10 @@ class HFBackend(Backend):
             k = min(top_k, dist.shape[-1])
             vals, idx = torch.topk(dist, k)
             cands = [
-                TokenCandidate(int(j), self.piece(int(j)), float(v), rank)
+                TokenCandidate(
+                    int(j), self.piece(int(j)), float(v), rank,
+                    is_special=self._is_special(int(j)),
+                )
                 for rank, (v, j) in enumerate(zip(vals.tolist(), idx.tolist()))
             ]
             chosen = self._exact_candidate(dist, ids[i + 1])
@@ -171,3 +196,35 @@ class HFBackend(Backend):
                 )
             )
         return results
+
+
+def _gather_eos_ids(model_config, tokenizer) -> tuple[int, ...]:
+    """Pull EOS ids from both the model config and the tokenizer.
+
+    A modern HF model may advertise multiple EOS ids (Qwen, Llama-3 family
+    all do this for chat templates). We coerce ``None`` / scalar / list /
+    tuple shapes into a unique tuple of ints, in stable order. If the
+    tokenizer's ``eos_token_id`` differs from the model's, we include both
+    so the generation loop catches either.
+    """
+    out: list[int] = []
+    seen: set[int] = set()
+
+    def _absorb(v):
+        if v is None:
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _absorb(x)
+            return
+        try:
+            tid = int(v)
+        except (TypeError, ValueError):
+            return
+        if tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+
+    _absorb(getattr(model_config, "eos_token_id", None))
+    _absorb(getattr(tokenizer, "eos_token_id", None))
+    return tuple(out)

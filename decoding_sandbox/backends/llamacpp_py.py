@@ -92,6 +92,11 @@ class LlamaCppPyBackend(Backend):
         # Tracks how many tokens are in the model's KV cache. We can skip
         # re-eval'ing a prefix when the new context is a strict extension.
         self._cached_ids: list[int] = []
+        # EOS ids: llama-cpp-python exposes the model's EOS via Llama.token_eos().
+        # Some GGUFs (Qwen-style chat models) also tag <|im_end|> as an EOG token
+        # (end-of-generation) -- if the binding exposes a list, take all of them;
+        # otherwise fall back to the single token_eos().
+        self._eos_ids: tuple[int, ...] = self._discover_eos_ids()
 
     # -- introspection ----------------------------------------------------- #
     @property
@@ -109,7 +114,38 @@ class LlamaCppPyBackend(Backend):
                 if self._logits_all
                 else "in-process llama.cpp; logits_all=False -> last-position only."
             ),
+            eos_token_ids=self._eos_ids,
         )
+
+    def _discover_eos_ids(self) -> tuple[int, ...]:
+        """Best-effort EOS extraction from the llama.cpp binding.
+
+        ``Llama.token_eos()`` is the canonical answer; some newer bindings
+        also expose ``Llama.token_eot()`` (end-of-turn) for chat templates.
+        Anything that raises or returns a negative id is dropped -- a
+        negative id from llama.cpp means "no EOS configured".
+        """
+        out: list[int] = []
+        for attr in ("token_eos", "token_eot"):
+            fn = getattr(self._llama, attr, None)
+            if fn is None:
+                continue
+            try:
+                tid = int(fn())
+            except Exception:  # noqa: BLE001
+                continue
+            if tid >= 0 and tid not in out:
+                out.append(tid)
+        return tuple(out)
+
+    def _is_special(self, token_id: int) -> bool:
+        if token_id in self._eos_ids:
+            return True
+        # Fallback: many GGUF tokenizers print specials as ``<|...|>``. We
+        # use the renderer's heuristic so detection lines up everywhere.
+        from decoding_sandbox.cli.render import is_special_text
+
+        return is_special_text(self.piece(token_id))
 
     # -- tokenization ------------------------------------------------------ #
     def tokenize(self, text: str) -> list[int]:
@@ -182,7 +218,10 @@ class LlamaCppPyBackend(Backend):
         idx = idx_part[order]
         vals = logp[idx]
         cands = [
-            TokenCandidate(int(j), self.piece(int(j)), float(v), rank)
+            TokenCandidate(
+                int(j), self.piece(int(j)), float(v), rank,
+                is_special=self._is_special(int(j)),
+            )
             for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
         ]
         return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
@@ -205,7 +244,10 @@ class LlamaCppPyBackend(Backend):
             idx = idx_part[order]
             vals = dist[idx]
             cands = [
-                TokenCandidate(int(j), self.piece(int(j)), float(v), rank)
+                TokenCandidate(
+                    int(j), self.piece(int(j)), float(v), rank,
+                    is_special=self._is_special(int(j)),
+                )
                 for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
             ]
             chosen = self._exact_candidate(dist, ids[i + 1])
@@ -225,7 +267,10 @@ class LlamaCppPyBackend(Backend):
     def _exact_candidate(self, dist, token_id: int) -> TokenCandidate:
         lp = float(dist[token_id])
         rank = int((dist > dist[token_id]).sum())
-        return TokenCandidate(token_id, self.piece(token_id), lp, rank)
+        return TokenCandidate(
+            token_id, self.piece(token_id), lp, rank,
+            is_special=self._is_special(token_id),
+        )
 
     # -- speculative-decoding hook (mirrors HFBackend.verify_greedy) ------- #
     def verify_greedy(
@@ -251,12 +296,14 @@ class LlamaCppPyBackend(Backend):
                 accepted += 1
             else:
                 return accepted, TokenCandidate(
-                    tgt, self.piece(tgt), float(logp[pos, tgt]), 0
+                    tgt, self.piece(tgt), float(logp[pos, tgt]), 0,
+                    is_special=self._is_special(tgt),
                 )
         pos = len(full) - 1
         tgt = int(np.argmax(logp[pos]))
         return accepted, TokenCandidate(
-            tgt, self.piece(tgt), float(logp[pos, tgt]), 0
+            tgt, self.piece(tgt), float(logp[pos, tgt]), 0,
+            is_special=self._is_special(tgt),
         )
 
     def close(self) -> None:

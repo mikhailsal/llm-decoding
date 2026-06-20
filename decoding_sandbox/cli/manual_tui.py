@@ -127,7 +127,7 @@ def _render(console: Console, session: ManualSession) -> None:
         bar = "█" * max(1, int(c.prob * 30)) if c.prob == c.prob else ""
         table.add_row(
             str(c.rank),
-            render.token_repr(c.text, 18),
+            render.token_repr(c.text, 18, is_special=c.is_special),
             render.fmt_prob(c.prob),
             f"[{render.confidence_style(c.prob)}]{bar}[/]",
         )

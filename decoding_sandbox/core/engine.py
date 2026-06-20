@@ -22,6 +22,9 @@ class GenStep:
     tokens_before: list[int]
     step_result: StepResult
     decision: SamplerDecision
+    # Filled in when the loop terminates *because of* this step. Lets callers
+    # render a "stopped on EOS" footer without re-checking the model.
+    stop_reason: str | None = None  # None | "eos" | "user_stop" | "max_tokens"
 
     def chosen_candidate(self) -> TokenCandidate | None:
         return self.step_result.find(self.decision.token_id)
@@ -36,16 +39,43 @@ def generate(
     top_k: int = 50,
     rng: random.Random | None = None,
     stop_ids: Sequence[int] = (),
+    respect_eos: bool = True,
 ) -> Iterator[GenStep]:
+    """Decode tokens until ``max_tokens``, a ``--stop`` id, or EOS.
+
+    The model's EOS ids come from ``backend.capabilities.eos_token_ids``
+    (HF reads ``model.config.eos_token_id``; llama-cpp-py reads
+    ``Llama.token_eos()``). Backends that don't expose them get the
+    historical "run to ``max_tokens``" behaviour. Set ``respect_eos=False``
+    to inspect what the model would emit *past* EOS (useful when probing
+    base-vs-instruct behaviour).
+    """
     rng = rng or random.Random()
     tokens = backend.tokenize(prompt)
+    eos_ids: frozenset[int] = (
+        frozenset(backend.capabilities.eos_token_ids) if respect_eos else frozenset()
+    )
+    user_stop_ids = frozenset(stop_ids)
     for s in range(max_tokens):
         sr = backend.next_distribution(tokens, top_k)
         if not sr.candidates:
             break
         ctx = SamplerContext(step=s, token_ids=list(tokens), rng=rng)
         decision: SamplerDecision = sampler(sr.candidates, ctx)
-        yield GenStep(step=s, tokens_before=list(tokens), step_result=sr, decision=decision)
+        stop_reason: str | None = None
+        if decision.token_id in eos_ids:
+            stop_reason = "eos"
+        elif decision.token_id in user_stop_ids:
+            stop_reason = "user_stop"
+        elif s == max_tokens - 1:
+            stop_reason = "max_tokens"
+        yield GenStep(
+            step=s,
+            tokens_before=list(tokens),
+            step_result=sr,
+            decision=decision,
+            stop_reason=stop_reason,
+        )
         tokens.append(decision.token_id)
-        if decision.token_id in stop_ids:
+        if stop_reason in ("eos", "user_stop"):
             break

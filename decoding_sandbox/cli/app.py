@@ -253,6 +253,24 @@ def _print_backend_banner(backend: Backend, *, out: Console | None = None) -> No
         f"full_vocab={caps.full_vocab}  prompt_logprobs={caps.prompt_logprobs}  "
         f"max_top_logprobs={caps.max_top_logprobs}"
     )
+    if caps.eos_token_ids:
+        # Help the user understand "how is EOS transmitted?" -- list the
+        # token ids the backend believes terminate generation, along with
+        # the pieces those ids decode to. Pieces are rendered with the
+        # full token-repr rules so special markers stay visible.
+        from decoding_sandbox.cli import render as _render
+
+        pieces: list[str] = []
+        for tid in caps.eos_token_ids:
+            text = backend.piece(tid) if hasattr(backend, "piece") else ""
+            pieces.append(
+                f"{tid}={_render.token_repr(text, 16, is_special=True)}"
+            )
+        out.print(f"[dim]EOS ids: {', '.join(pieces)}[/dim]")
+    else:
+        out.print(
+            "[dim]EOS ids: <not exposed by this backend>[/dim]"
+        )
     if caps.notes:
         out.print(f"[dim]{caps.notes}[/dim]")
     if not caps.full_vocab:
@@ -346,7 +364,12 @@ def cmd_inspect(
 
         for st in steps:
             ctx = render.token_repr(st.context_text or "", 14)
-            nxt = render.token_repr(st.chosen.text, 14) if st.chosen else "?"
+            if st.chosen is not None:
+                nxt = render.token_repr(
+                    st.chosen.text, 14, is_special=st.chosen.is_special
+                )
+            else:
+                nxt = "?"
             p_next = render.fmt_prob(st.chosen.prob) if st.chosen else "?"
             rank = (
                 f"#{st.chosen.rank}"
@@ -355,7 +378,8 @@ def cmd_inspect(
             )
             top = st.top
             conf = (
-                f"{render.fmt_prob(st.confidence)} {render.token_repr(top.text, 12)!s}"
+                f"{render.fmt_prob(st.confidence)} "
+                f"{render.token_repr(top.text, 12, is_special=top.is_special)!s}"
                 if top
                 else "-"
             )
@@ -467,6 +491,8 @@ def cmd_generate(
         chosen_ids: list[int] = []
         loop_start = _time.perf_counter()
         first_token_at: float | None = None
+        last_stop_reason: str | None = None
+        last_chosen_text: str = ""
 
         for gs in generate(
             backend, args.prompt, sampler,
@@ -477,6 +503,7 @@ def cmd_generate(
                 first_token_at = _time.perf_counter()
             d = gs.decision
             chosen_cand = gs.chosen_candidate()
+            chosen_is_special = chosen_cand.is_special if chosen_cand else False
             p_chosen = (
                 render.fmt_prob(chosen_cand.prob)
                 if chosen_cand
@@ -492,12 +519,13 @@ def cmd_generate(
             else:
                 vs = "[green]= greedy[/green]"
             tops = "  ".join(
-                f"{render.token_repr(c.text, 8)}={render.fmt_prob(c.prob)}"
+                f"{render.token_repr(c.text, 8, is_special=c.is_special)}="
+                f"{render.fmt_prob(c.prob)}"
                 for c in gs.step_result.candidates[:5]
             )
             table.add_row(
                 str(gs.step),
-                render.token_repr(d.token_text, 14),
+                render.token_repr(d.token_text, 14, is_special=chosen_is_special),
                 p_chosen,
                 vs,
                 str(len(d.kept)),
@@ -505,6 +533,8 @@ def cmd_generate(
                 tops,
             )
             chosen_ids.append(d.token_id)
+            last_stop_reason = gs.stop_reason
+            last_chosen_text = d.token_text
 
         if timing is not None and first_token_at is not None:
             timing.record(
@@ -519,6 +549,23 @@ def cmd_generate(
             )
 
         console.print(table)
+        if last_stop_reason == "eos":
+            chosen_last_id = chosen_ids[-1] if chosen_ids else -1
+            label = render.token_repr(last_chosen_text, 24, is_special=True)
+            console.print(
+                f"[magenta]stopped on EOS[/magenta]: model emitted {label} "
+                f"(id={chosen_last_id})"
+            )
+        elif last_stop_reason == "user_stop":
+            console.print(
+                f"[dim]stopped on --stop token: "
+                f"{render.token_repr(last_chosen_text, 24)}[/dim]"
+            )
+        elif last_stop_reason == "max_tokens":
+            console.print(
+                f"[dim]reached --max-tokens={args.max_tokens} "
+                "(model did not emit EOS).[/dim]"
+            )
         completion = backend.detokenize(chosen_ids)
         console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
         console.print(f"[bold]completion:[/bold][green]{completion}[/green]")
@@ -698,7 +745,8 @@ def _print_candidates(steps, max_positions: int, top_k: int) -> None:
         ctx = render.token_repr(st.context_text or "", 14)
         line = f"[cyan]pos {st.position}[/cyan] after {ctx!r}: "
         line += "  ".join(
-            f"{render.token_repr(c.text, 10)!s}={render.fmt_prob(c.prob)}"
+            f"{render.token_repr(c.text, 10, is_special=c.is_special)!s}="
+            f"{render.fmt_prob(c.prob)}"
             for c in st.candidates
         )
         console.print(line)

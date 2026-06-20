@@ -25,7 +25,14 @@ class _FakeLlama:
     Tokenizer is byte-level identity (``ord(ch)`` per char). Logits are
     deterministic but distinct per (position, token) so the resulting
     log-softmax has a clear ranking we can assert on.
+
+    Class attribute ``EOS_ID`` controls what ``token_eos()`` returns; tests
+    can override it (e.g. ``cls.EOS_ID = -1`` to simulate "no EOS exposed")
+    by subclassing or by monkeypatching before construction.
     """
+
+    EOS_ID = 250
+    EOT_ID: int | None = None  # not all bindings expose token_eot()
 
     def __init__(
         self,
@@ -51,6 +58,13 @@ class _FakeLlama:
         self._evaluated = 0
         self.eval_calls = 0
         self.reset_calls = 0
+        # token_eot is only set when the class advertises one; this matches
+        # what newer llama-cpp-python bindings do for chat templates.
+        if self.EOT_ID is not None:
+            self.token_eot = lambda: self.EOT_ID  # type: ignore[assignment]
+
+    def token_eos(self) -> int:
+        return self.EOS_ID
 
     def n_vocab(self) -> int:
         return self._vocab
@@ -377,3 +391,92 @@ def test_close_releases_inner_llama(monkeypatch, tmp_path) -> None:
     b.close()
     assert b._llama is None
     assert b._cached_ids == []
+
+
+# --------------------------------------------------------------------------- #
+# EOS discovery + is_special
+# --------------------------------------------------------------------------- #
+def test_capabilities_expose_eos_from_token_eos(monkeypatch, tmp_path) -> None:
+    b = _backend(monkeypatch, tmp_path)
+    assert b.capabilities.eos_token_ids == (250,)
+
+
+def test_capabilities_include_token_eot_when_binding_exposes_it(
+    monkeypatch, tmp_path
+) -> None:
+    """Newer llama-cpp-python builds expose ``Llama.token_eot()`` for chat
+    templates. The backend should pick that up too."""
+
+    class _LlamaWithEot(_FakeLlama):
+        EOT_ID = 251
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _LlamaWithEot
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
+        logits_all=True, verbose=False,
+    )
+    assert b.capabilities.eos_token_ids == (250, 251)
+
+
+def test_negative_eos_id_is_dropped(monkeypatch, tmp_path) -> None:
+    """A negative id from llama.cpp means "no EOS configured" -- it shouldn't
+    end up in capabilities (otherwise generate() would never stop)."""
+
+    class _NoEos(_FakeLlama):
+        EOS_ID = -1
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _NoEos
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
+        logits_all=True, verbose=False,
+    )
+    assert b.capabilities.eos_token_ids == ()
+
+
+def test_is_special_true_for_eos_token(monkeypatch, tmp_path) -> None:
+    b = _backend(monkeypatch, tmp_path)
+    step = b.next_distribution(b.tokenize("ab"), top_k=256)
+    # Find the EOS candidate; it must carry is_special=True.
+    eos = next(c for c in step.candidates if c.token_id == 250)
+    assert eos.is_special is True
+
+
+def test_is_special_true_for_braced_tokens(monkeypatch, tmp_path) -> None:
+    """Tokens whose detokenized text matches ``<|...|>`` also get is_special."""
+
+    class _LlamaWithBracedToken(_FakeLlama):
+        def detokenize(self, ids):
+            # Mark id 7 as a special braced token; everything else is identity.
+            if list(ids) == [7]:
+                return b"<|im_end|>"
+            return super().detokenize(ids)
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _LlamaWithBracedToken
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
+        logits_all=True, verbose=False,
+    )
+    step = b.next_distribution(b.tokenize("ab"), top_k=256)
+    braced = next(c for c in step.candidates if c.token_id == 7)
+    assert braced.is_special is True
+    # And id 7 specifically -- not every candidate -- is flagged.
+    others = [c.is_special for c in step.candidates if c.token_id != 7 and c.token_id != 250]
+    assert all(s is False for s in others)

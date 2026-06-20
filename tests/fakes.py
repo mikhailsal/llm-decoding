@@ -29,6 +29,7 @@ class FakeBackend(Backend):
         prompt_logprobs: bool = True,
         can_force_token: bool = True,
         name: str = "fake",
+        eos_token_ids: tuple[int, ...] = (),
     ) -> None:
         self.tokens = tokens or {}
         self.pieces = pieces or {}
@@ -37,6 +38,7 @@ class FakeBackend(Backend):
         self.prompt_logprobs = prompt_logprobs
         self.can_force_token_flag = can_force_token
         self.name = name
+        self.eos_token_ids = eos_token_ids
         self.closed = False
 
     @property
@@ -47,6 +49,7 @@ class FakeBackend(Backend):
             prompt_logprobs=self.prompt_logprobs,
             max_top_logprobs=10,
             can_force_token=self.can_force_token_flag,
+            eos_token_ids=self.eos_token_ids,
         )
 
     def tokenize(self, text: str) -> list[int]:
