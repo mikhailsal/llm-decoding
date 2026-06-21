@@ -200,3 +200,80 @@ def test_build_backend_routes_provider_to_openai_compat(monkeypatch) -> None:
     for name in ("fireworks", "nim", "openrouter", "lmstudio"):
         factory_mod.build_backend(name, cfg)
         assert seen["name"] == name
+
+
+# --------------------------------------------------------------------------- #
+# Remote backend wiring
+# --------------------------------------------------------------------------- #
+def test_build_backend_routes_remote_alias(monkeypatch) -> None:
+    """A name matching ``[remote.NAME]`` builds a RemoteBackend with the
+    block's base_url + timeout."""
+    from decoding_sandbox.core.config import RemoteConfig
+
+    cfg = load_config(load_secrets=False)
+    cfg.remotes = {
+        "dsbx-host-py": RemoteConfig("dsbx-host-py", "http://dsbx-host:8000", timeout=42.0),
+    }
+    import decoding_sandbox.backends.remote as rmod
+
+    captured: dict = {}
+
+    class _Stub:
+        def __init__(self, base_url, *, timeout=120.0):
+            captured["base_url"] = base_url
+            captured["timeout"] = timeout
+
+    monkeypatch.setattr(rmod, "RemoteBackend", _Stub)
+    factory_mod.build_backend("dsbx-host-py", cfg)
+    assert captured["base_url"] == "http://dsbx-host:8000"
+    assert captured["timeout"] == 42.0
+
+
+def test_build_backend_bare_remote_picks_single_alias(monkeypatch) -> None:
+    """``--backend remote`` with exactly one [remote.NAME] entry picks it."""
+    from decoding_sandbox.core.config import RemoteConfig
+
+    cfg = load_config(load_secrets=False)
+    cfg.remotes = {"only": RemoteConfig("only", "http://x:1")}
+    import decoding_sandbox.backends.remote as rmod
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        rmod,
+        "RemoteBackend",
+        lambda base_url, *, timeout=120.0: captured.update(base_url=base_url),
+    )
+    factory_mod.build_backend("remote", cfg)
+    assert captured["base_url"] == "http://x:1"
+
+
+def test_build_backend_bare_remote_errors_when_no_entries() -> None:
+    """``--backend remote`` with no configured aliases is a helpful error."""
+    cfg = load_config(load_secrets=False)
+    cfg.remotes = {}
+    with pytest.raises(ValueError, match="no \\[remote.NAME\\] blocks"):
+        factory_mod.build_backend("remote", cfg)
+
+
+def test_build_backend_bare_remote_errors_when_ambiguous() -> None:
+    """``--backend remote`` with multiple aliases asks the user to pick one."""
+    from decoding_sandbox.core.config import RemoteConfig
+
+    cfg = load_config(load_secrets=False)
+    cfg.remotes = {
+        "a": RemoteConfig("a", "http://a:1"),
+        "b": RemoteConfig("b", "http://b:1"),
+    }
+    with pytest.raises(ValueError, match="ambiguous"):
+        factory_mod.build_backend("remote", cfg)
+
+
+def test_build_backend_unknown_lists_remotes_in_available_message() -> None:
+    """The 'Backend not available' error should list configured remotes
+    so users discover the right name without grepping config files."""
+    from decoding_sandbox.core.config import RemoteConfig
+
+    cfg = load_config(load_secrets=False)
+    cfg.remotes = {"dsbx-host-py": RemoteConfig("dsbx-host-py", "http://x:1")}
+    with pytest.raises(ValueError, match="dsbx-host-py"):
+        factory_mod.build_backend("nope", cfg)

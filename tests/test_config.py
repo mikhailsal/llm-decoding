@@ -116,3 +116,44 @@ def test_expand_resolves_env_vars(monkeypatch) -> None:
     monkeypatch.setenv("MYVAR", "/tmp/somewhere")
     p = cfg_mod.expand("$MYVAR/foo")
     assert str(p) == "/tmp/somewhere/foo"
+
+
+# --------------------------------------------------------------------------- #
+# [remote.NAME] blocks
+# --------------------------------------------------------------------------- #
+def test_load_config_parses_remote_blocks(tmp_path, monkeypatch) -> None:
+    """Each ``[remote.NAME]`` table becomes a RemoteConfig entry; bare
+    ``remote.<name>.timeout`` overrides the default."""
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[remote.dsbx-host-py]\n'
+        'base_url = "http://192.0.2.42:8000"\n'
+        'timeout = 42.0\n'
+        '[remote.dsbx-host-hf]\n'
+        'base_url = "http://192.0.2.42:8001"\n'
+    )
+
+    cfg = cfg_mod.load_config(load_secrets=False)
+
+    assert set(cfg.remotes) == {"dsbx-host-py", "dsbx-host-hf"}
+    assert cfg.remote("dsbx-host-py").base_url == "http://192.0.2.42:8000"
+    assert cfg.remote("dsbx-host-py").timeout == pytest.approx(42.0)
+    # Default timeout when omitted.
+    assert cfg.remote("dsbx-host-hf").timeout == pytest.approx(120.0)
+
+
+def test_load_config_rejects_remote_block_without_base_url(tmp_path, monkeypatch) -> None:
+    """A ``[remote.foo]`` block missing ``base_url`` is a clear error
+    rather than silently producing an unreachable entry."""
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    (tmp_path / "config.toml").write_text("[remote.foo]\ntimeout = 30\n")
+
+    with pytest.raises(ValueError, match="base_url"):
+        cfg_mod.load_config(load_secrets=False)
+
+
+def test_remote_lookup_raises_keyerror_for_unknown_name(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    cfg = cfg_mod.load_config(load_secrets=False)
+    with pytest.raises(KeyError, match="Unknown remote"):
+        cfg.remote("nope")

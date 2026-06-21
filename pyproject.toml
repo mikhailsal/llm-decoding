@@ -42,9 +42,21 @@ local = [
     "numpy>=1.26",
     "llama-cpp-python>=0.3.2",
 ]
+# Installed wherever the dsbx HTTP server (``dsbx serve``) runs. On a
+# single-machine setup this is the same box as ``[local]``. We keep it a
+# separate extra so the client-side install on the client stays light
+# (it only needs httpx, which is already a core dep).
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # Tests for the server endpoints + RemoteBackend round-trip need
+    # FastAPI's TestClient; pull the [server] extras in for the dev env.
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]

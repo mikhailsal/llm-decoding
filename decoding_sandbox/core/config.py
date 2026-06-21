@@ -70,6 +70,17 @@ _DEFAULTS: dict[str, Any] = {
             "cpu_mem": "13GiB",
         },
     },
+    # Remote dsbx servers. Each entry is one ``dsbx serve`` instance the
+    # client can connect to via ``--backend NAME`` (or by setting
+    # ``[run].backend = NAME``). The bare ``remote`` name is also
+    # accepted as a generic alias for the first/only entry, useful for
+    # config-less smoke tests against a loopback server.
+    #
+    # Example:
+    #   [remote.dsbx-host-py]
+    #   base_url = "http://192.0.2.42:8000"
+    #   timeout = 120.0
+    "remote": {},
     "providers": {
         "fireworks": {
             "base_url": "https://api.fireworks.ai/inference/v1",
@@ -151,6 +162,22 @@ class ProviderConfig:
 
 
 @dataclass
+class RemoteConfig:
+    """One entry of the ``[remote.NAME]`` config table.
+
+    Each entry maps a friendly name (``dsbx-host-py``, ``dsbx-host-hf``) to a
+    running ``dsbx serve`` instance. The CLI's factory recognizes the
+    name as a backend, building a ``RemoteBackend`` against ``base_url``.
+    ``timeout`` is forwarded to ``httpx.Client`` -- bump it when the
+    server's first request after model load can take a while.
+    """
+
+    name: str
+    base_url: str
+    timeout: float = 120.0
+
+
+@dataclass
 class Config:
     raw: dict[str, Any]
     config_path: Path | None
@@ -158,11 +185,19 @@ class Config:
     default_backend: str
     storage: StorageConfig
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
+    remotes: dict[str, RemoteConfig] = field(default_factory=dict)
 
     def provider(self, name: str) -> ProviderConfig:
         if name not in self.providers:
             raise KeyError(f"Unknown provider '{name}'. Known: {sorted(self.providers)}")
         return self.providers[name]
+
+    def remote(self, name: str) -> RemoteConfig:
+        if name not in self.remotes:
+            raise KeyError(
+                f"Unknown remote '{name}'. Known: {sorted(self.remotes) or '(none configured)'}"
+            )
+        return self.remotes[name]
 
     def get(self, *keys: str, default: Any = None) -> Any:
         node: Any = self.raw
@@ -246,6 +281,19 @@ def load_config(
             has_completions=bool(pdata.get("has_completions", False)),
         )
 
+    remotes: dict[str, RemoteConfig] = {}
+    for name, rdata in (raw.get("remote") or {}).items():
+        if not isinstance(rdata, dict) or "base_url" not in rdata:
+            raise ValueError(
+                f"[remote.{name}] is missing required key 'base_url' "
+                "(e.g. base_url = \"http://192.0.2.42:8000\")."
+            )
+        remotes[name] = RemoteConfig(
+            name=name,
+            base_url=str(rdata["base_url"]),
+            timeout=float(rdata.get("timeout", 120.0)),
+        )
+
     return Config(
         raw=raw,
         config_path=path,
@@ -253,4 +301,5 @@ def load_config(
         default_backend=raw["run"]["backend"],
         storage=storage,
         providers=providers,
+        remotes=remotes,
     )

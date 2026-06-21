@@ -63,8 +63,14 @@ previous context (manual stepping stays cheap).
 ## Where things run
 
 - **All model compute runs on `dsbx-host`** (Ubuntu Linux on the Windows main PC,
-  NVIDIA P40 6 GB). The **client is only the editor/control box.**
-- Edit here, then `make sync` (rsync over SSH) and run on `dsbx-host`.
+  NVIDIA P40 6 GB).
+- The **client runs the TUI** (and any cloud-backend traffic, since it
+  has the VPN). It connects to `dsbx-host` over HTTP via the long-lived
+  `dsbx serve` process -- so the 9B GGUF / HF model load happens once on
+  `dsbx-host` and stays warm across every command. See
+  [Running the server on `dsbx-host`](#running-the-server-on-dsbx-host) below.
+- Edit here, then `make sync` (rsync over SSH) and (re)start the server
+  on `dsbx-host` only when its source changed.
 
 ## Storage (important)
 
@@ -78,22 +84,25 @@ The Linux ext4 disk is a sparse `.img` on `C:` (local SSD, tight on space), so
 
 ## Quickstart
 
-### On the client (editor + cloud probes)
+### On the client (the TUI lives here)
 
 ```bash
 cd ~/projects/llm-decoding
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-cp config.example.toml config.toml   # optional; defaults are fine
-dsbx doctor          # checks keys + disk space
-dsbx probe           # live provider logprob check
+pip install -e .                     # lightweight: rich, httpx, openai, ...
+cp config.example.toml config.toml   # add a [remote.dsbx-host-py] block (see below)
+dsbx doctor                          # checks keys + remote servers + disk
+dsbx probe                           # live provider logprob check
+dsbx inspect "The capital of France is" --backend dsbx-host-py
 ```
 
 API keys are read from the environment. `config.toml` points
 `secrets_env_file` at `~/.config/dsbx/secrets.env`, which holds
-`FIREWORKS_API_KEY`, `NVIDIA_API_KEY`, `OPENROUTER_API_KEY`.
+`FIREWORKS_API_KEY`, `NVIDIA_API_KEY`, `OPENROUTER_API_KEY`. Cloud
+backends (Fireworks/NIM/OpenRouter/LM Studio) talk directly to the
+provider from the client -- they don't go through the server.
 
-### On `dsbx-host` (local models)
+### On `dsbx-host` (one-time setup for the model host)
 
 ```bash
 make sync                       # push source from the client
@@ -101,8 +110,65 @@ ssh dsbx-host
 cd llm-decoding
 bash scripts/setup_wind.sh      # venv on ext4, caches on ~/.cache/dsbx, torch+transformers
 source .venv/bin/activate
+pip install -e ".[server]"      # adds fastapi + uvicorn
 dsbx doctor                     # should now show torch cuda=True on the P40
 ```
+
+### Running the server on `dsbx-host`
+
+The server is a long-lived FastAPI process that loads one heavy backend
+(`hf` or `llamacpp-py`) at startup and keeps it warm. The client's TUI
+connects via HTTP/SSE, so the 30+ second GGUF load happens *once* per
+server lifetime instead of once per `dsbx` invocation.
+
+```bash
+ssh dsbx-host
+cd llm-decoding && source .venv/bin/activate
+
+# Host the 9B Qwen3.5 Base GGUF (full-vocab via logits_all=True):
+dsbx serve --backend llamacpp-py --host 0.0.0.0 --port 8000
+
+# In a second shell on dsbx-host, host HF transformers in parallel:
+dsbx serve --backend hf --host 0.0.0.0 --port 8001
+```
+
+`--host 0.0.0.0` is opt-in (a warning is printed) -- the default
+`127.0.0.1` is loopback-only. The server has no auth, so keep this box
+on a trusted LAN. A convenience launcher with the same defaults lives at
+[scripts/run_dsbx_server_wind.sh](scripts/run_dsbx_server_wind.sh).
+
+### Connecting from the client
+
+Add one `[remote.NAME]` block per server in `config.toml`. The name you
+pick is what you'll pass to `--backend` (and what `[run].backend` can
+default to):
+
+```toml
+[run]
+backend = "dsbx-host-py"   # default backend when --backend is omitted
+
+[remote.dsbx-host-py]
+base_url = "http://192.0.2.42:8000"
+# timeout = 120.0   # bump if the first request after model load is slow
+
+[remote.dsbx-host-hf]
+base_url = "http://192.0.2.42:8001"
+```
+
+Then on the client:
+
+```bash
+dsbx doctor                     # the 'Remote dsbx servers' table probes both
+dsbx inspect "Hello there"      # uses run.backend = dsbx-host-py
+dsbx generate "Once upon a time" --backend dsbx-host-py --sampler top_p --top-p 0.9
+dsbx manual "The capital of"    --backend dsbx-host-hf
+```
+
+For `generate` the CLI auto-detects the server's streaming endpoint and
+shows `(remote-stream)` in the sampler line; per-token rendering happens
+as each SSE event arrives. Custom samplers (`--sampler custom`) keep
+working but fall back to the per-step `next_distribution` loop, because
+the server has no way to ingest arbitrary client code.
 
 ## Commands
 
@@ -120,38 +186,30 @@ dsbx doctor                     # should now show torch cuda=True on the P40
   any token, undo, save/load transcript).
 - `dsbx spec "<text>"` -- speculative decoding (HF draft+target) with
   accept/reject visualization and a tokens-per-target-pass speedup metric.
-- `dsbx session` -- long-lived REPL that **keeps the model loaded across
-  commands**. The 30+s GGUF load for the 9B happens once; every subsequent
-  `inspect`/`generate`/`manual` in the session runs immediately. Meta
-  commands: `:caps`, `:backend NAME [MODEL]` (swaps the loaded model),
-  `:timing on|off`, `:history`, `:help`, `:quit`.
+- `dsbx serve` -- run the HTTP server on `dsbx-host` that hosts one heavy
+  backend (`--backend hf|llamacpp-py`). The client's TUI connects via
+  `[remote.NAME]` aliases. Requires `pip install -e ".[server]"`. See
+  [Running the server on `dsbx-host`](#running-the-server-on-dsbx-host).
+- `dsbx session` -- convenience REPL with command history and a single
+  loaded backend. Meta commands: `:caps`, `:backend NAME [MODEL]`
+  (swaps the loaded model), `:timing on|off`, `:history`, `:help`,
+  `:quit`. (Historical note: this used to be the only way to amortize
+  the 30+ s GGUF load across many commands. With `dsbx serve` in place
+  it's now purely an ergonomic shell.)
 
 Every heavy command prints a one-line timing summary
 (`timing: prompt eval ... | decode ... | total ...`), with tokens-per-second
 for any phase where the divisor is meaningful. Suppress with `--no-timing`
 (or `:timing off` in a session).
 
-### Colors over SSH
+### Colors over SSH (legacy footnote)
 
-By default `dsbx` uses the standard `rich` TTY detection: ANSI escape codes
-are emitted when stdout is a terminal and stripped otherwise. That's the
-right choice when piping to a file, but it strips every confidence-level
-color and special-token highlight when you run
-
-```bash
-ssh dsbx-host 'dsbx inspect ...'
-```
-
-(non-interactive SSH -- stdout isn't a TTY on the remote side). Use one
-of these to keep colors:
-
-- `dsbx --color always inspect ...` -- explicit per-invocation override.
-- `FORCE_COLOR=1 dsbx inspect ...` -- standard env var, respected by
-  rich.
-- `ssh -t dsbx-host 'dsbx inspect ...'` -- request a remote PTY; the
-  terminal then looks like a TTY to rich and `--color auto` works.
-
-`--color never` (or `NO_COLOR=1`) disables colors even on a TTY.
+The TUI now runs **locally** on the client and talks to `dsbx-host` over
+HTTP, so `rich`'s TTY detection works correctly and color rendering is
+no problem. The `--color always|never` / `FORCE_COLOR` / `ssh -t`
+workarounds are still in the binary (and documented in `dsbx --help`)
+for the rare case where someone insists on `ssh dsbx-host 'dsbx inspect ...'`
+-- but that path is no longer the recommended workflow.
 
 ### Token rendering
 
@@ -280,12 +338,38 @@ decoding_sandbox/
   backends/    hf (full vocab, PyTorch) /
                llamacpp (top-k via HTTP) /
                llamacpp-py (full vocab via in-process llama-cpp-python) /
-               openai_compat (cloud)
-  cli/         argparse front-end, rich rendering, manual TUI
+               openai_compat (cloud) /
+               remote (HTTP+SSE client for `dsbx serve`)
+  server/      FastAPI app + pydantic wire schemas; `dsbx serve` entry
+               (loads ONE backend per process and serves the Backend
+               protocol over /v1/* + SSE for generate)
+  cli/         argparse front-end, rich rendering, manual TUI, session REPL
 scripts/       sync_to_wind.sh, setup_wind.sh, build_llamacpp_wind.sh,
-               run_llama_server_wind.sh, hf_smoke.py, test_manual.py
+               run_llama_server_wind.sh, run_dsbx_server_wind.sh,
+               hf_smoke.py, test_manual.py
 examples/      custom_sampler.py
 ```
+
+### Client/server split (post-server architecture)
+
+```
++-------------------+              +----------------------+
+|  thinkpad (TUI)   |   HTTP+SSE   |  dsbx-host (dsbx serve)   |
+|                   | <----------> |  - FastAPI + uvicorn |
+|  - cli (TUI)      |              |  - one heavy backend |
+|  - cloud backends |              |    (hf or llamacpp-py)
+|  - RemoteBackend  |              |  - keeps model warm  |
++-------------------+              +----------------------+
+        | HTTPS via VPN
+        v
+[ Fireworks / NIM / OpenRouter / LM Studio ]
+```
+
+`RemoteBackend` implements the same `Backend` protocol as the in-process
+backends; every CLI command (`inspect`, `generate`, `manual`, `session`,
+`spec`) works with it without branching. `generate` additionally uses
+`stream_generate` for incremental SSE rendering when the backend
+supports it.
 
 ## What was verified on the hardware (Wave 0)
 
@@ -325,8 +409,16 @@ EOS handling), the manual TUI, cloud backends (Fireworks `echo` whole-context
 - **EOS surfaced in capabilities** (`Capabilities.eos_token_ids`,
   populated by HF and `llamacpp-py`); `generate` stops when the model
   emits an EOS id and the footer prints `stopped on EOS: ... (id=...)`.
+- **`dsbx serve` HTTP server** (`decoding_sandbox/server/`) hosting one
+  heavy backend per process, with a matching `RemoteBackend` client
+  (`decoding_sandbox/backends/remote.py`). REST for tokenize / score /
+  verify; SSE for `generate` (server runs the loop, client renders each
+  step as the event arrives). Configured via `[remote.NAME]` blocks;
+  `dsbx doctor` probes every configured server's `/v1/info`. This
+  retires the "session = load-time hack" workaround and lays the wire
+  protocol the next plan's browser UI will consume.
 
 All heavy commands run the `storage.preflight_or_raise` disk check first
-(bypass with `--skip-preflight`). Next up: a thin FastAPI + browser UI over
-the same `core/`, and a `LlamaCppSpeculator` mirroring the existing
-`HFSpeculator`.
+(bypass with `--skip-preflight`). Next up: a browser UI on top of the
+same `/v1/*` + SSE surface, and a `LlamaCppSpeculator` mirroring the
+existing `HFSpeculator`.

@@ -534,6 +534,227 @@ def test_build_parser_color_rejects_invalid_value() -> None:
         parser.parse_args(["--color", "rainbow", "inspect", "hi"])
 
 
+def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
+    monkeypatch, captured_console
+) -> None:
+    """A backend exposing ``stream_generate`` should drive the CLI's
+    generate loop without re-entering ``core.engine.generate``."""
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+
+    stream_calls: list[dict] = []
+    engine_called = {"n": 0}
+
+    class _Streaming:
+        # Stand-in for RemoteBackend: implements just enough Backend
+        # surface for cmd_generate's other touchpoints (capabilities,
+        # tokenize, detokenize, piece).
+        @property
+        def capabilities(self):
+            from decoding_sandbox.core.types import Capabilities
+
+            return Capabilities(
+                name="stream-fake",
+                full_vocab=True,
+                prompt_logprobs=True,
+                max_top_logprobs=5,
+            )
+
+        def tokenize(self, text):
+            return [97]
+
+        def detokenize(self, ids):
+            return "X" * len(ids)
+
+        def piece(self, tid):
+            return "X"
+
+        def close(self):
+            pass
+
+        def stream_generate(
+            self,
+            prompt,
+            sampler_name,
+            sampler_params=None,
+            *,
+            max_tokens=20,
+            top_k=50,
+            stop_ids=(),
+            seed=0,
+            respect_eos=True,
+        ):
+            stream_calls.append(
+                dict(
+                    prompt=prompt,
+                    sampler_name=sampler_name,
+                    sampler_params=sampler_params or {},
+                    max_tokens=max_tokens,
+                    top_k=top_k,
+                    stop_ids=list(stop_ids),
+                    seed=seed,
+                )
+            )
+            sr = StepResult(
+                position=1,
+                candidates=[TokenCandidate(88, "X", math.log(0.9), 0)],
+                is_full_vocab=True,
+            )
+            decision = SamplerDecision(
+                token_id=88,
+                token_text="X",
+                kept=[(sr.candidates[0], 1.0)],
+                greedy_token_id=88,
+                note="greedy (argmax)",
+            )
+            yield GenStep(
+                step=0,
+                tokens_before=[97],
+                step_result=sr,
+                decision=decision,
+                stop_reason="max_tokens",
+            )
+
+    backend = _Streaming()
+
+    from decoding_sandbox.core import engine
+
+    real = engine.generate
+
+    def counting_generate(*a, **kw):  # pragma: no cover - must not run
+        engine_called["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(engine, "generate", counting_generate)
+    monkeypatch.setattr(
+        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
+    )
+
+    rc = app.cmd_generate(
+        argparse.Namespace(
+            backend="remote",
+            model=None,
+            prompt="P",
+            sampler="top_p",
+            custom_file=None,
+            temperature=1.0,
+            sampler_top_k=None,
+            top_p=0.9,
+            min_p=None,
+            typical_p=None,
+            max_tokens=3,
+            seed=11,
+            top_k=5,
+            stop=[],
+            skip_preflight=True,
+        ),
+        _cfg_no_preflight(),
+    )
+
+    assert rc == 0
+    # The streaming path must have been taken exactly once...
+    assert len(stream_calls) == 1
+    # ...with the same sampler params the in-process path would have used.
+    assert stream_calls[0]["sampler_name"] == "top_p"
+    assert stream_calls[0]["sampler_params"]["top_p"] == 0.9
+    assert stream_calls[0]["seed"] == 11
+    # ...and the in-process engine.generate must NOT have been called.
+    assert engine_called["n"] == 0
+    # The CLI's transport hint surfaces the choice for the user.
+    assert "remote-stream" in captured_console.getvalue()
+
+
+def test_cmd_generate_custom_sampler_uses_local_engine_even_on_streaming_backend(
+    monkeypatch, captured_console, tmp_path
+) -> None:
+    """Custom samplers cannot run server-side; cmd_generate must use the
+    in-process engine loop and *not* call stream_generate on a backend
+    that exposes it."""
+    custom = tmp_path / "s.py"
+    custom.write_text("def decode(cands, ctx):\n    return cands[0].token_id\n")
+
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 99: "STOP"},
+        distributions={(1,): [cand(99, "STOP", 0.9, 0)]},
+    )
+
+    def boom_stream(*a, **kw):  # pragma: no cover - must not run
+        raise AssertionError("stream_generate should not run for custom samplers")
+
+    backend.stream_generate = boom_stream  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
+    )
+
+    rc = app.cmd_generate(
+        argparse.Namespace(
+            backend="fake",
+            model=None,
+            prompt="P",
+            sampler="custom",
+            custom_file=f"{custom}:decode",
+            temperature=1.0,
+            sampler_top_k=None,
+            top_p=None,
+            min_p=None,
+            typical_p=None,
+            max_tokens=1,
+            seed=0,
+            top_k=5,
+            stop=[],
+            skip_preflight=True,
+        ),
+        _cfg_no_preflight(),
+    )
+    assert rc == 0
+    rendered = captured_console.getvalue()
+    assert "in-process" in rendered
+
+
+def test_main_wraps_remote_backend_error_as_clean_exit_4(
+    monkeypatch, captured_console
+) -> None:
+    """A RemoteBackendError from anywhere in a command must render as
+    one clean red line and exit 4 -- not dump a stack trace. This is
+    the bread-and-butter "server is down" case the user will hit most
+    often, so the message should also tell them what to try next."""
+    from decoding_sandbox.backends.remote import RemoteBackendError
+
+    def _exploding(args, cfg):
+        raise RemoteBackendError("GET /v1/info: Connection refused")
+
+    parser = app.build_parser()
+    args = parser.parse_args(["doctor"])
+    args.func = _exploding
+
+    monkeypatch.setattr(app, "build_parser", lambda: _StubParser(args))
+    monkeypatch.setattr(storage_mod, "check_paths", lambda paths, min_free_gb: [])
+
+    rc = app.main(["doctor"])
+    rendered = captured_console.getvalue()
+
+    assert rc == 4
+    assert "remote backend error" in rendered
+    # The literal [remote.NAME] must survive rich markup parsing.
+    assert "[remote.NAME]" in rendered
+    # And no traceback leaked through.
+    assert "Traceback" not in rendered
+
+
+class _StubParser:
+    """Minimal argparse.ArgumentParser-shaped stub used by the test above
+    so we can swap the dispatched ``func`` without actually wiring a
+    fake subcommand into the real parser. Keeps the test from depending
+    on internal subparser names."""
+
+    def __init__(self, args):
+        self._args = args
+
+    def parse_args(self, argv=None):
+        return self._args
+
+
 def test_main_with_color_always_reassigns_console(monkeypatch) -> None:
     """When the user passes --color always, the module-level console must
     be rebuilt with force_terminal=True so subsequent cmd_* calls emit

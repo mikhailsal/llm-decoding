@@ -124,6 +124,10 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         )
     console.print(ptable)
 
+    # Remote dsbx servers (if any configured) -- one probe per [remote.NAME]
+    if cfg.remotes:
+        _report_remote_servers(cfg)
+
     # Storage preflight (display all, flag low ones)
     statuses = storage.check_paths(cfg.storage.check_paths, cfg.storage.min_free_gb)
     stable = Table(title=f"Storage (floor {cfg.storage.min_free_gb} GB)", show_edge=False)
@@ -150,6 +154,48 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         return 1
     console.print("\n[green]All checks passed.[/green]")
     return 0
+
+
+def _report_remote_servers(cfg: Config) -> None:
+    """Probe each ``[remote.NAME]`` server's ``/v1/info`` and tabulate results.
+
+    A failure to reach a server is rendered red but does not abort
+    ``dsbx doctor`` -- the user might be running it on the client
+    while ``dsbx-host`` is asleep, and the rest of the report is still
+    useful.
+    """
+    import httpx
+
+    table = Table(title="Remote dsbx servers", show_edge=False)
+    table.add_column("name")
+    table.add_column("base_url")
+    table.add_column("status")
+    table.add_column("backend")
+    table.add_column("loaded model")
+    table.add_column("engine ver", justify="right")
+
+    for name in sorted(cfg.remotes):
+        rc = cfg.remotes[name]
+        status = "[green]ok[/green]"
+        backend = "-"
+        model = "-"
+        version = "-"
+        try:
+            with httpx.Client(base_url=rc.base_url, timeout=5.0) as client:
+                r = client.get("/v1/info")
+                r.raise_for_status()
+                info = r.json()
+            caps = info.get("capabilities") or {}
+            backend = str(info.get("backend_kind", caps.get("name", "?")))
+            model = info.get("loaded_model") or "[dim]?[/dim]"
+            version = str(info.get("engine_version", "?"))
+        except httpx.HTTPError as exc:
+            status = f"[red]unreachable[/red] [dim]({type(exc).__name__})[/dim]"
+        except Exception as exc:  # noqa: BLE001
+            status = f"[red]error[/red] [dim]({type(exc).__name__}: {exc})[/dim]"
+        table.add_row(name, rc.base_url, status, backend, model, version)
+
+    console.print(table)
 
 
 def _report_local_engines() -> None:
@@ -566,7 +612,10 @@ def cmd_generate(
         if show_banner:
             console.print(f"backend: [cyan]{backend.capabilities.name}[/cyan]")
 
-        # Sampler construction (built-in or custom plug-in).
+        # Sampler construction (built-in or custom plug-in). ``params`` is
+        # only populated for the built-in path -- we keep it around even
+        # for ``custom`` so the dispatch logic below has one place to look.
+        params: dict = {}
         if args.sampler == "custom":
             if not args.custom_file:
                 console.print("[red]--sampler custom requires --custom-file path.py[:func][/red]")
@@ -587,9 +636,17 @@ def cmd_generate(
 
         rng = random.Random(args.seed)
         stop_ids = _resolve_stop_ids(backend, args.stop or [])
+
+        # Stream from the server when the backend supports it AND the
+        # sampler is a built-in (custom samplers can't run server-side
+        # because the server has no way to ingest arbitrary client code).
+        # Falling back to the per-step loop keeps custom samplers fully
+        # functional, just slower over the network.
+        use_remote_stream = hasattr(backend, "stream_generate") and args.sampler != "custom"
+        transport = "remote-stream" if use_remote_stream else "in-process"
         console.print(
             f"sampler: [magenta]{sampler_name}[/magenta]  seed={args.seed}  "
-            f"max_tokens={args.max_tokens}"
+            f"max_tokens={args.max_tokens}  [dim]({transport})[/dim]"
             + (f"  stop={[s for s, _ in stop_ids]}" if stop_ids else "")
             + "\n"
         )
@@ -606,7 +663,7 @@ def cmd_generate(
         # Two phases users care about:
         #   1) prompt eval + first token  -- latency until streaming starts
         #   2) subsequent decode          -- per-new-token cost
-        # The split happens at the first ``gs`` yielded by ``generate``.
+        # The split happens at the first ``gs`` yielded.
         import time as _time
 
         chosen_ids: list[int] = []
@@ -615,15 +672,28 @@ def cmd_generate(
         last_stop_reason: str | None = None
         last_chosen_text: str = ""
 
-        for gs in generate(
-            backend,
-            args.prompt,
-            sampler,
-            max_tokens=args.max_tokens,
-            top_k=args.top_k,
-            rng=rng,
-            stop_ids=[tid for _, tid in stop_ids],
-        ):
+        if use_remote_stream:
+            step_iter = backend.stream_generate(  # type: ignore[attr-defined]
+                args.prompt,
+                sampler_name=args.sampler,
+                sampler_params=params,
+                max_tokens=args.max_tokens,
+                top_k=args.top_k,
+                stop_ids=[tid for _, tid in stop_ids],
+                seed=args.seed,
+            )
+        else:
+            step_iter = generate(
+                backend,
+                args.prompt,
+                sampler,
+                max_tokens=args.max_tokens,
+                top_k=args.top_k,
+                rng=rng,
+                stop_ids=[tid for _, tid in stop_ids],
+            )
+
+        for gs in step_iter:
             if first_token_at is None:
                 first_token_at = _time.perf_counter()
             d = gs.decision
@@ -802,6 +872,61 @@ def cmd_manual(
         name = args.backend or cfg.default_backend
         backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=None)
     return run_manual(backend, args.prompt, top_k=args.top_k, own_backend=own_backend)
+
+
+def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
+    """Launch the dsbx HTTP server (FastAPI + uvicorn) wrapping one backend.
+
+    Heavy imports (``fastapi``/``uvicorn``) live inside the function so
+    they remain optional: the rest of the CLI keeps working on machines
+    that only have the core ``[project.dependencies]`` installed.
+
+    The server hosts a single in-process backend for its lifetime. Pair
+    one ``dsbx serve --backend llamacpp-py`` and one
+    ``dsbx serve --backend hf`` on different ports if you want both
+    available simultaneously -- the client picks via ``[remote.NAME]``
+    aliases in ``config.toml``.
+    """
+    try:
+        import uvicorn  # type: ignore
+    except ImportError as exc:
+        console.print(
+            "[red]dsbx serve requires the [bold]server[/bold] extra. "
+            "Install with: [cyan]pip install -e \".[server]\"[/cyan][/red]"
+        )
+        console.print(f"[dim]underlying error: {exc}[/dim]")
+        return 2
+
+    # Loopback is the only safe default: there's no auth, anyone on the
+    # host network can talk to a loaded model. We *allow* opting in to
+    # public binding with --host 0.0.0.0 (typical for the client <->
+    # dsbx-host LAN case), but we make it visible so it's never accidental.
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(
+            f"[yellow]warning:[/yellow] binding to [bold]{args.host}[/bold] "
+            "(not loopback). The server has no authentication; anyone who "
+            "can reach this address can drive the loaded model."
+        )
+
+    from decoding_sandbox.server.app import make_app
+
+    console.print(
+        f"[dim]building backend '{args.backend}' for the server...[/dim]"
+    )
+    backend = _build_backend_with_load_timing(args.backend, cfg, model=args.model, timing=None)
+    console.print(
+        f"  loaded [cyan]{backend.capabilities.name}[/cyan] -- "
+        f"serving on [bold]http://{args.host}:{args.port}[/bold]"
+    )
+    app = make_app(backend, backend_kind=args.backend)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+    finally:
+        try:
+            backend.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
 
 
 def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
@@ -1027,11 +1152,46 @@ def build_parser() -> argparse.ArgumentParser:
     _add_timing_flag(p_spec)
     p_spec.set_defaults(func=cmd_spec)
 
+    p_serve = sub.add_parser(
+        "serve",
+        help=(
+            "Run the dsbx HTTP server (FastAPI + uvicorn) wrapping one heavy "
+            "in-process backend. Clients connect via the 'remote' backend or a "
+            "[remote.NAME] alias. Requires the [server] extra."
+        ),
+    )
+    p_serve.add_argument(
+        "--backend",
+        choices=("hf", "llamacpp-py"),
+        required=True,
+        help="Which in-process backend to host (heavy local engines only).",
+    )
+    p_serve.add_argument("--model", default=None, help="Override the model id / GGUF path.")
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind address. Default is loopback (only this machine). Use a LAN "
+            "address (or 0.0.0.0) to let the client client reach the server; "
+            "a warning is printed because there is no auth."
+        ),
+    )
+    p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--log-level",
+        default="info",
+        choices=("critical", "error", "warning", "info", "debug", "trace"),
+        help="uvicorn log verbosity.",
+    )
+    p_serve.set_defaults(func=cmd_serve)
+
     p_session = sub.add_parser(
         "session",
         help=(
-            "Long-lived REPL that keeps the model loaded across commands. "
-            "Amortizes the slow GGUF/HF load over many inspects/generates."
+            "Convenience REPL with command history and a single loaded "
+            "backend. Useful for fast iteration; for amortizing the slow "
+            "GGUF/HF load across machines/processes, run `dsbx serve` on "
+            "dsbx-host and use a [remote.NAME] backend instead."
         ),
     )
     p_session.add_argument("--backend", default=None, help=_BACKEND_HELP)
@@ -1061,6 +1221,25 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # pragma: no cover
         console.print("\n[dim]interrupted[/dim]")
         return 130
+    except Exception as exc:  # noqa: BLE001
+        # RemoteBackendError (and a few other "network failed / config
+        # wrong" errors) are routine for a tool that talks to a server on
+        # another host -- not programming bugs. Render them as one clean
+        # red line + exit 4 instead of dumping a stack trace. Importing
+        # the class lazily keeps the CLI usable even when the [server]
+        # extra isn't installed (RemoteBackend lives in backends/, not
+        # server/, but the safety net stays the same).
+        from decoding_sandbox.backends.remote import RemoteBackendError
+
+        if isinstance(exc, RemoteBackendError):
+            console.print(f"[red]remote backend error:[/red] {exc}")
+            console.print(
+                "[dim]tip: run [bold]dsbx doctor[/bold] to probe each "
+                r"configured \[remote.NAME] server, or check that "
+                "[bold]dsbx serve[/bold] is running on the host.[/dim]"
+            )
+            return 4
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover

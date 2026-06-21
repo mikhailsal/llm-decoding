@@ -12,7 +12,13 @@ secrets_env_file = "~/.config/dsbx/secrets.env"
 
 [run]
 # Default backend used when --backend is not passed.
-# One of: hf | llamacpp | fireworks | nim | openrouter
+# One of:
+#   hf | llamacpp | llamacpp-py     -- in-process (heavy; run on dsbx-host)
+#   <NAME>                          -- any [remote.NAME] entry below
+#   fireworks | nim | openrouter | lmstudio  -- cloud / local OpenAI compat
+#
+# On the client with a server on dsbx-host, the typical value is the name of
+# the [remote.NAME] alias, e.g. "dsbx-host-py".
 backend = "llamacpp"
 
 [storage]
@@ -73,6 +79,29 @@ fallback_model = "Qwen/Qwen3-1.7B-Base"
 # VRAM and want to avoid CPU offload.
 gpu_mem = "4500MiB"
 cpu_mem = "13GiB"
+
+# ---- Remote dsbx servers (one per [remote.NAME] block) ---------------------
+#
+# A remote server is a ``dsbx serve`` instance on another host that holds
+# one heavy backend in memory. The client's TUI connects to it over
+# HTTP/SSE instead of loading the model itself. Name each entry whatever
+# is convenient; use the name as ``--backend NAME`` (or in
+# ``[run].backend``).
+#
+# Typical dsbx-host setup -- one server per backend, different ports:
+#
+#   [remote.dsbx-host-py]
+#   base_url = "http://192.0.2.42:8000"
+#
+#   [remote.dsbx-host-hf]
+#   base_url = "http://192.0.2.42:8001"
+#
+# The ``remote`` name alone also works when exactly one entry is
+# configured; with more than one, pass the explicit alias.
+
+# [remote.dsbx-host-py]
+# base_url = "http://127.0.0.1:8000"
+# timeout = 120.0
 
 # ---- Cloud providers (logprob-capable, live-verified) ----------------------
 
