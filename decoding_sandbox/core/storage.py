@@ -29,10 +29,7 @@ class DiskStatus:
         if not self.exists:
             return f"{self.path:<14} (not present, skipped)"
         flag = "OK " if self.ok else "LOW"
-        return (
-            f"{self.path:<14} {flag}  free {self.free_gb:6.1f} GB / "
-            f"{self.total_gb:6.1f} GB"
-        )
+        return f"{self.path:<14} {flag}  free {self.free_gb:6.1f} GB / {self.total_gb:6.1f} GB"
 
 
 def check_paths(paths: list[str], min_free_gb: float) -> list[DiskStatus]:
@@ -46,9 +43,7 @@ def check_paths(paths: list[str], min_free_gb: float) -> list[DiskStatus]:
     for raw in paths:
         p = Path(raw)
         if not p.exists():
-            results.append(
-                DiskStatus(raw, False, 0.0, 0.0, 0.0, ok=True)
-            )
+            results.append(DiskStatus(raw, False, 0.0, 0.0, 0.0, ok=True))
             continue
         usage = shutil.disk_usage(p)
         free_gb = usage.free / GIB

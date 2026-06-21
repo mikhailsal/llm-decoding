@@ -114,9 +114,7 @@ def probe_provider(prov: ProviderConfig, model: str | None) -> ProbeResult:
     key = prov.api_key()
     use_model = model or prov.default_model
     if not key:
-        return ProbeResult(
-            prov.name, use_model, "err: no API key", "err: no API key"
-        )
+        return ProbeResult(prov.name, use_model, "err: no API key", "err: no API key")
     return ProbeResult(
         provider=prov.name,
         model=use_model,

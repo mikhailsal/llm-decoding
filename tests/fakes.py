@@ -65,9 +65,7 @@ class FakeBackend(Backend):
 
     def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
         cands = list(self.distributions.get(tuple(token_ids), []))[:top_k]
-        return StepResult(
-            position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab
-        )
+        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab)
 
     def close(self) -> None:
         self.closed = True

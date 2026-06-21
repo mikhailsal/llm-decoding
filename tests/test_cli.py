@@ -82,9 +82,7 @@ def captured_console(monkeypatch):
 
 def _cfg_no_preflight() -> Config:
     cfg = load_config(load_secrets=False)
-    cfg.storage = StorageConfig(
-        hf_home="", pip_cache="", min_free_gb=0.0, check_paths=[]
-    )
+    cfg.storage = StorageConfig(hf_home="", pip_cache="", min_free_gb=0.0, check_paths=[])
     return cfg
 
 
@@ -103,8 +101,13 @@ def test_inspect_generated_only_provider_shows_next_token_distribution(
     monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", fake_build_backend)
     rc = app.cmd_inspect(
         argparse.Namespace(
-            backend="nim", model=None, prompt="Hello", top_k=2,
-            watch=[], candidates=0, skip_preflight=True,
+            backend="nim",
+            model=None,
+            prompt="Hello",
+            top_k=2,
+            watch=[],
+            candidates=0,
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -126,25 +129,31 @@ def test_inspect_propagates_invalid_custom_backend(monkeypatch) -> None:
     with pytest.raises(ValueError, match="bad backend"):
         app.cmd_inspect(
             argparse.Namespace(
-                backend="unknown", model=None, prompt="Hello", top_k=2,
-                watch=[], candidates=0, skip_preflight=True,
+                backend="unknown",
+                model=None,
+                prompt="Hello",
+                top_k=2,
+                watch=[],
+                candidates=0,
+                skip_preflight=True,
             ),
             _cfg_no_preflight(),
         )
 
 
-def test_inspect_renders_watch_columns_in_chat_only_path(
-    monkeypatch, captured_console
-) -> None:
+def test_inspect_renders_watch_columns_in_chat_only_path(monkeypatch, captured_console) -> None:
     backend = OpenAICompatBackend()
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(
-            backend="nim", model=None, prompt="Hello", top_k=2,
-            watch=[" world"], candidates=0, skip_preflight=True,
+            backend="nim",
+            model=None,
+            prompt="Hello",
+            top_k=2,
+            watch=[" world"],
+            candidates=0,
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -176,7 +185,8 @@ def test_run_preflight_returns_exit_code_on_low_disk(monkeypatch, captured_conso
 def test_run_preflight_skip_bypasses_check(monkeypatch) -> None:
     cfg = load_config(load_secrets=False)
     monkeypatch.setattr(
-        storage_mod, "preflight_or_raise",
+        storage_mod,
+        "preflight_or_raise",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not be called")),
     )
     assert app._run_preflight(cfg, skip=True) is None
@@ -203,14 +213,20 @@ def test_cmd_inspect_aborts_when_preflight_fails(monkeypatch) -> None:
         hf_home="", pip_cache="", min_free_gb=1.0, check_paths=["/anywhere"]
     )
     monkeypatch.setattr(
-        storage_mod, "preflight_or_raise",
+        storage_mod,
+        "preflight_or_raise",
         lambda *a, **kw: (_ for _ in ()).throw(storage_mod.StoragePreflightError("nope")),
     )
 
     rc = app.cmd_inspect(
         argparse.Namespace(
-            backend="hf", model=None, prompt="Hello", top_k=2,
-            watch=[], candidates=0, skip_preflight=False,
+            backend="hf",
+            model=None,
+            prompt="Hello",
+            top_k=2,
+            watch=[],
+            candidates=0,
+            skip_preflight=False,
         ),
         cfg,
     )
@@ -246,20 +262,28 @@ def test_cmd_generate_stops_on_resolved_stop_token(monkeypatch, captured_console
             step_count["n"] += 1
             yield step
 
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
     monkeypatch.setattr("decoding_sandbox.cli.app.generate", counting_generate, raising=False)
     # ^ generate is imported *inside* cmd_generate, so we patch the engine module too.
     monkeypatch.setattr(engine, "generate", counting_generate)
 
     rc = app.cmd_generate(
         argparse.Namespace(
-            backend="fake", model=None, prompt="P",
-            sampler="greedy", custom_file=None,
-            temperature=0.0, sampler_top_k=None, top_p=None, min_p=None, typical_p=None,
-            max_tokens=10, seed=0, top_k=5,
-            stop=["STOP"], skip_preflight=True,
+            backend="fake",
+            model=None,
+            prompt="P",
+            sampler="greedy",
+            custom_file=None,
+            temperature=0.0,
+            sampler_top_k=None,
+            top_p=None,
+            min_p=None,
+            typical_p=None,
+            max_tokens=10,
+            seed=0,
+            top_k=5,
+            stop=["STOP"],
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -278,17 +302,25 @@ def test_cmd_generate_warns_on_multi_token_stop(monkeypatch, captured_console) -
         pieces={1: "P", 2: "A", 3: "B"},
         distributions={(1,): [cand(2, "A", 0.9, 0)]},
     )
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
-            backend="fake", model=None, prompt="P",
-            sampler="greedy", custom_file=None,
-            temperature=0.0, sampler_top_k=None, top_p=None, min_p=None, typical_p=None,
-            max_tokens=1, seed=0, top_k=5,
-            stop=["AB"], skip_preflight=True,
+            backend="fake",
+            model=None,
+            prompt="P",
+            sampler="greedy",
+            custom_file=None,
+            temperature=0.0,
+            sampler_top_k=None,
+            top_p=None,
+            min_p=None,
+            typical_p=None,
+            max_tokens=1,
+            seed=0,
+            top_k=5,
+            stop=["AB"],
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -299,11 +331,21 @@ def test_cmd_generate_warns_on_multi_token_stop(monkeypatch, captured_console) -
 def test_cmd_generate_custom_sampler_requires_file(captured_console) -> None:
     rc = app.cmd_generate(
         argparse.Namespace(
-            backend=None, model=None, prompt="P",
-            sampler="custom", custom_file=None,
-            temperature=1.0, sampler_top_k=None, top_p=None, min_p=None, typical_p=None,
-            max_tokens=1, seed=0, top_k=5,
-            stop=[], skip_preflight=True,
+            backend=None,
+            model=None,
+            prompt="P",
+            sampler="custom",
+            custom_file=None,
+            temperature=1.0,
+            sampler_top_k=None,
+            top_p=None,
+            min_p=None,
+            typical_p=None,
+            max_tokens=1,
+            seed=0,
+            top_k=5,
+            stop=[],
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -326,9 +368,7 @@ def test_resolve_stop_ids_skips_empty_tokenization(monkeypatch, captured_console
 # --------------------------------------------------------------------------- #
 def test_cmd_doctor_renders_provider_and_storage_tables(monkeypatch, captured_console) -> None:
     cfg = load_config(load_secrets=False)
-    cfg.storage = StorageConfig(
-        hf_home="", pip_cache="", min_free_gb=5.0, check_paths=[]
-    )
+    cfg.storage = StorageConfig(hf_home="", pip_cache="", min_free_gb=5.0, check_paths=[])
     rc = app.cmd_doctor(argparse.Namespace(), cfg)
 
     assert rc == 0
@@ -340,9 +380,7 @@ def test_cmd_doctor_renders_provider_and_storage_tables(monkeypatch, captured_co
 def test_cmd_doctor_marks_lmstudio_as_no_key_needed(monkeypatch, captured_console) -> None:
     monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
     cfg = load_config(load_secrets=False)
-    cfg.storage = StorageConfig(
-        hf_home="", pip_cache="", min_free_gb=5.0, check_paths=[]
-    )
+    cfg.storage = StorageConfig(hf_home="", pip_cache="", min_free_gb=5.0, check_paths=[])
     app.cmd_doctor(argparse.Namespace(), cfg)
     rendered = captured_console.getvalue()
     assert "no key needed" in rendered
@@ -424,7 +462,8 @@ def test_main_smoke_doctor_with_skip_preflight(monkeypatch, captured_console) ->
     # doctor doesn't actually go through _run_preflight, but it calls
     # storage.check_paths -- patch to skip real disks.
     monkeypatch.setattr(
-        storage_mod, "check_paths",
+        storage_mod,
+        "check_paths",
         lambda paths, min_free_gb: [],
     )
     rc = app.main(["doctor"])
@@ -500,9 +539,7 @@ def test_main_with_color_always_reassigns_console(monkeypatch) -> None:
     be rebuilt with force_terminal=True so subsequent cmd_* calls emit
     ANSI even over non-interactive SSH."""
     original = app.console
-    monkeypatch.setattr(
-        storage_mod, "check_paths", lambda paths, min_free_gb: []
-    )
+    monkeypatch.setattr(storage_mod, "check_paths", lambda paths, min_free_gb: [])
     app.main(["--color", "always", "doctor"])
     try:
         assert app.console is not original  # reassigned
@@ -511,16 +548,12 @@ def test_main_with_color_always_reassigns_console(monkeypatch) -> None:
         app.console = original
 
 
-def test_main_with_color_auto_preserves_existing_console(
-    monkeypatch, captured_console
-) -> None:
+def test_main_with_color_auto_preserves_existing_console(monkeypatch, captured_console) -> None:
     """The default 'auto' must NOT reassign the module-level console;
     otherwise the captured_console test fixture (which monkeypatches it
     before main runs) would lose its capture."""
     captured_before = app.console
-    monkeypatch.setattr(
-        storage_mod, "check_paths", lambda paths, min_free_gb: []
-    )
+    monkeypatch.setattr(storage_mod, "check_paths", lambda paths, min_free_gb: [])
 
     app.main(["doctor"])  # implicit --color auto
 
@@ -607,9 +640,7 @@ def test_collect_watch_targets_dedups_across_sources() -> None:
         tokens={" Paris": [42]},
         pieces={42: " Paris"},
     )
-    out = app._collect_watch_targets(
-        backend, texts=[" Paris"], ids=[42], eos=False
-    )
+    out = app._collect_watch_targets(backend, texts=[" Paris"], ids=[42], eos=False)
     assert len(out) == 1
     assert out[0].label.startswith("text:")
     assert out[0].token_id == 42
@@ -623,9 +654,7 @@ def test_collect_watch_targets_preserves_source_order() -> None:
         pieces={1: "a", 2: "b", 9: "", 250: ""},
         eos_token_ids=(250,),
     )
-    out = app._collect_watch_targets(
-        backend, texts=["a", "b"], ids=[9], eos=True
-    )
+    out = app._collect_watch_targets(backend, texts=["a", "b"], ids=[9], eos=True)
     assert [t.token_id for t in out] == [1, 2, 9, 250]
 
 
@@ -637,9 +666,7 @@ def test_collect_watch_targets_combines_text_id_and_eos() -> None:
         pieces={42: " Paris", 250: ""},
         eos_token_ids=(250,),
     )
-    out = app._collect_watch_targets(
-        backend, texts=[" Paris"], ids=[], eos=True
-    )
+    out = app._collect_watch_targets(backend, texts=[" Paris"], ids=[], eos=True)
     assert [t.token_id for t in out] == [42, 250]
     assert out[0].label.startswith("text:")
     assert out[1].label == "EOS:250"
@@ -650,9 +677,7 @@ def test_collect_watch_targets_combines_text_id_and_eos() -> None:
 # --------------------------------------------------------------------------- #
 def test_parser_inspect_collects_repeated_watch_id_flags() -> None:
     parser = app.build_parser()
-    args = parser.parse_args(
-        ["inspect", "hi", "--watch-id", "10", "--watch-id", "20"]
-    )
+    args = parser.parse_args(["inspect", "hi", "--watch-id", "10", "--watch-id", "20"])
     assert args.watch_id == [10, 20]
 
 
@@ -677,9 +702,7 @@ def test_parser_inspect_watch_eos_flag_sets_true() -> None:
 # --------------------------------------------------------------------------- #
 # End-to-end: --watch-eos renders an EOS column populated by score_prompt
 # --------------------------------------------------------------------------- #
-def test_inspect_renders_trailing_predict_next_row(
-    monkeypatch, captured_console
-) -> None:
+def test_inspect_renders_trailing_predict_next_row(monkeypatch, captured_console) -> None:
     """The new contract: an N-token prompt yields N rows in the rendered
     table, the last of which is visibly labelled as the "predict next"
     row and carries an exact watched probability."""
@@ -706,15 +729,19 @@ def test_inspect_renders_trailing_predict_next_row(
         return results
 
     backend.score_prompt = patched  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(
-            backend="fake", model=None, prompt="AB", top_k=1,
-            watch=[], watch_id=[], watch_eos=True,
-            candidates=0, skip_preflight=True,
+            backend="fake",
+            model=None,
+            prompt="AB",
+            top_k=1,
+            watch=[],
+            watch_id=[],
+            watch_eos=True,
+            candidates=0,
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -722,7 +749,7 @@ def test_inspect_renders_trailing_predict_next_row(
     rendered = captured_console.getvalue()
     assert rc == 0
     assert "(next)" in rendered  # the visible "this is the predict-next row" marker
-    assert "3.00%" in rendered   # watched EOS probability is rendered on every row
+    assert "3.00%" in rendered  # watched EOS probability is rendered on every row
 
 
 def test_inspect_watch_eos_renders_column_with_per_position_prob(
@@ -736,30 +763,39 @@ def test_inspect_watch_eos_renders_column_with_per_position_prob(
         pieces={1: "h", 2: "i", 250: ""},
         eos_token_ids=(250,),
     )
+
     # FakeBackend.score_prompt isn't overridden, so emulate it directly via
     # a thin override on this instance.
     def fake_score(prompt, top_k, watch_ids=None):
         watch_ids = watch_ids or []
         watched = {
-            wid: TokenCandidate(wid, backend.piece(wid), math.log(0.05), 7)
-            for wid in watch_ids
+            wid: TokenCandidate(wid, backend.piece(wid), math.log(0.05), 7) for wid in watch_ids
         }
         return [
             StepResult(
-                position=1, candidates=[cand(2, "i", 0.9, 0)], is_full_vocab=True,
-                chosen=cand(2, "i", 0.9, 0), context_text="h", watched=watched,
+                position=1,
+                candidates=[cand(2, "i", 0.9, 0)],
+                is_full_vocab=True,
+                chosen=cand(2, "i", 0.9, 0),
+                context_text="h",
+                watched=watched,
             )
         ]
+
     backend.score_prompt = fake_score  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(
-            backend="fake", model=None, prompt="hi", top_k=2,
-            watch=[], watch_id=[], watch_eos=True,
-            candidates=0, skip_preflight=True,
+            backend="fake",
+            model=None,
+            prompt="hi",
+            top_k=2,
+            watch=[],
+            watch_id=[],
+            watch_eos=True,
+            candidates=0,
+            skip_preflight=True,
         ),
         _cfg_no_preflight(),
     )
@@ -767,4 +803,4 @@ def test_inspect_watch_eos_renders_column_with_per_position_prob(
     rendered = captured_console.getvalue()
     assert rc == 0
     assert "EOS:250" in rendered  # the new column header
-    assert "5.00%" in rendered    # the per-position probability we faked
+    assert "5.00%" in rendered  # the per-position probability we faked

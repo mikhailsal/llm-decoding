@@ -72,9 +72,7 @@ def test_speculative_generate_never_exceeds_max_tokens() -> None:
 
 
 def test_speculative_generate_partial_accept_emits_correction() -> None:
-    target = _PartialAcceptTarget(
-        accept_n=2, correction_id=777, tokens={"P": [1]}, pieces={1: "P"}
-    )
+    target = _PartialAcceptTarget(accept_n=2, correction_id=777, tokens={"P": [1]}, pieces={1: "P"})
     draft = _SequentialDraft(tokens={"P": [1]}, pieces={1: "P"})
 
     rounds = list(speculative_generate(target, draft, "P", gamma=4, max_tokens=5))
@@ -91,9 +89,7 @@ def test_speculative_generate_partial_accept_emits_correction() -> None:
 
 
 def test_speculative_round_rejected_property_exposes_unmatched_drafts() -> None:
-    target = _PartialAcceptTarget(
-        accept_n=1, correction_id=42, tokens={"P": [1]}, pieces={1: "P"}
-    )
+    target = _PartialAcceptTarget(accept_n=1, correction_id=42, tokens={"P": [1]}, pieces={1: "P"})
     draft = _SequentialDraft(tokens={"P": [1]}, pieces={1: "P"})
 
     rounds = list(speculative_generate(target, draft, "P", gamma=3, max_tokens=2))
@@ -109,14 +105,10 @@ def test_speculative_generate_breaks_when_no_token_emitted() -> None:
         def next_distribution(self, token_ids, top_k):
             from decoding_sandbox.core.types import StepResult
 
-            return StepResult(
-                position=len(token_ids), candidates=[], is_full_vocab=False
-            )
+            return StepResult(position=len(token_ids), candidates=[], is_full_vocab=False)
 
     rounds = list(
-        speculative_generate(
-            target, _EmptyDraft(tokens={"P": [1]}), "P", gamma=3, max_tokens=10
-        )
+        speculative_generate(target, _EmptyDraft(tokens={"P": [1]}), "P", gamma=3, max_tokens=10)
     )
 
     assert len(rounds) == 1
@@ -158,9 +150,7 @@ def test_hf_speculator_propose_walks_draft_greedily() -> None:
 
 
 def test_hf_speculator_verify_routes_to_target_method() -> None:
-    target = _PartialAcceptTarget(
-        accept_n=1, correction_id=500, tokens={"P": [1]}
-    )
+    target = _PartialAcceptTarget(accept_n=1, correction_id=500, tokens={"P": [1]})
     draft = _SequentialDraft(tokens={"P": [1]})
     spec = HFSpeculator(target=target, draft=draft)
 

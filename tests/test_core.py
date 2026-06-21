@@ -280,8 +280,11 @@ def test_generate_continues_past_eos_when_respect_eos_false() -> None:
 
     steps = list(
         generate(
-            backend, "P", Sampler("greedy"),
-            max_tokens=2, respect_eos=False,
+            backend,
+            "P",
+            Sampler("greedy"),
+            max_tokens=2,
+            respect_eos=False,
         )
     )
 
@@ -297,9 +300,7 @@ def test_generate_records_user_stop_reason() -> None:
         distributions={(1,): [cand(2, "X", 0.9, 0)]},
     )
 
-    steps = list(generate(
-        backend, "P", Sampler("greedy"), max_tokens=5, stop_ids=[2]
-    ))
+    steps = list(generate(backend, "P", Sampler("greedy"), max_tokens=5, stop_ids=[2]))
 
     assert len(steps) == 1
     assert steps[0].stop_reason == "user_stop"
@@ -439,10 +440,7 @@ def test_make_sampler_passes_through_parameters() -> None:
 
 def test_load_custom_with_int_return_wraps_decision(tmp_path) -> None:
     plug = tmp_path / "custom.py"
-    plug.write_text(
-        "def decode(cands, ctx):\n"
-        "    return cands[-1].token_id\n"
-    )
+    plug.write_text("def decode(cands, ctx):\n    return cands[-1].token_id\n")
 
     from decoding_sandbox.core.samplers import load_custom
 

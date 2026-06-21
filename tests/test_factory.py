@@ -78,8 +78,15 @@ def test_build_backend_hf_forwards_memory_caps() -> None:
     captured: dict = {}
 
     class _Stub:
-        def __init__(self, model_id, *, fallback_model=None, load_in_4bit=True,
-                     gpu_mem="0MiB", cpu_mem="0MiB"):
+        def __init__(
+            self,
+            model_id,
+            *,
+            fallback_model=None,
+            load_in_4bit=True,
+            gpu_mem="0MiB",
+            cpu_mem="0MiB",
+        ):
             captured["model_id"] = model_id
             captured["fallback_model"] = fallback_model
             captured["load_in_4bit"] = load_in_4bit
@@ -109,8 +116,15 @@ def test_build_backend_hf_respects_overrides_from_config(monkeypatch) -> None:
     captured: dict = {}
 
     class _Stub:
-        def __init__(self, model_id, *, fallback_model=None, load_in_4bit=True,
-                     gpu_mem="0MiB", cpu_mem="0MiB"):
+        def __init__(
+            self,
+            model_id,
+            *,
+            fallback_model=None,
+            load_in_4bit=True,
+            gpu_mem="0MiB",
+            cpu_mem="0MiB",
+        ):
             captured.update(gpu_mem=gpu_mem, cpu_mem=cpu_mem)
 
     monkeypatch.setattr(hf_mod, "HFBackend", _Stub)

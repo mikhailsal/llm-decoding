@@ -108,7 +108,8 @@ def _build_session_parser() -> argparse.ArgumentParser:
     p_gen.add_argument("--backend", default=None, help=_BACKEND_HELP)
     p_gen.add_argument("--model", default=None)
     p_gen.add_argument(
-        "--sampler", default="greedy",
+        "--sampler",
+        default="greedy",
         choices=["greedy", "temperature", "top_k", "top_p", "min_p", "typical", "custom"],
     )
     p_gen.add_argument("--custom-file", default=None)
@@ -204,7 +205,7 @@ def dispatch_session_line(
             state.console.print(f"  {i:3d}  {h}")
         return DispatchResult("meta")
     if line.startswith(":timing"):
-        rest = line[len(":timing"):].strip().lower()
+        rest = line[len(":timing") :].strip().lower()
         if rest in ("on", "1", "true", "yes"):
             state.timing_enabled = True
         elif rest in ("off", "0", "false", "no"):
@@ -217,26 +218,20 @@ def dispatch_session_line(
                 exit_code=2,
                 message=f"unknown :timing argument {rest!r} (use on/off)",
             )
-        state.console.print(
-            f"  timing: [green]{'on' if state.timing_enabled else 'off'}[/green]"
-        )
+        state.console.print(f"  timing: [green]{'on' if state.timing_enabled else 'off'}[/green]")
         return DispatchResult("meta")
     if line.startswith(":backend"):
-        return _switch_backend(state, line[len(":backend"):])
+        return _switch_backend(state, line[len(":backend") :])
 
     # Regular subcommand. Use shlex so quoted prompts come through intact.
     try:
         argv = shlex.split(line)
     except ValueError as exc:
-        return DispatchResult(
-            "parse_error", exit_code=2, message=f"shell-parse error: {exc}"
-        )
+        return DispatchResult("parse_error", exit_code=2, message=f"shell-parse error: {exc}")
     try:
         args = parser.parse_args(argv)
     except argparse.ArgumentError as exc:
-        return DispatchResult(
-            "parse_error", exit_code=2, message=str(exc)
-        )
+        return DispatchResult("parse_error", exit_code=2, message=str(exc))
 
     # Mirror the standalone CLI's --no-timing semantics through to the
     # underlying handlers via the same args namespace.
@@ -274,9 +269,7 @@ def _switch_backend(state: SessionState, rest: str) -> DispatchResult:
 
         state.backend = build_backend(name, state.cfg, model=model)  # type: ignore[arg-type]
     except Exception as exc:  # noqa: BLE001
-        return DispatchResult(
-            "parse_error", exit_code=1, message=f"failed to build backend: {exc}"
-        )
+        return DispatchResult("parse_error", exit_code=1, message=f"failed to build backend: {exc}")
     state.backend_name = name
     state.backend_model = model
     state.console.print(
@@ -298,9 +291,7 @@ def run_session(state: SessionState, *, prompt_func: Callable[[str], str] | None
         ps: PromptSession = PromptSession()
         prompt_func = ps.prompt  # type: ignore[assignment]
 
-    state.console.print(
-        "[dim]session ready. type ':help' for commands, ':quit' to exit.[/dim]"
-    )
+    state.console.print("[dim]session ready. type ':help' for commands, ':quit' to exit.[/dim]")
     while True:
         try:
             line = prompt_func("dsbx> ")

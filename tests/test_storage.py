@@ -57,9 +57,7 @@ def test_preflight_or_raise_passes_when_all_paths_ok(monkeypatch, tmp_path) -> N
     assert statuses[0].ok is True
 
 
-def test_preflight_or_raise_raises_with_details_when_too_low(
-    monkeypatch, tmp_path
-) -> None:
+def test_preflight_or_raise_raises_with_details_when_too_low(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         storage.shutil,
         "disk_usage",

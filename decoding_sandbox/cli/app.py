@@ -94,9 +94,7 @@ def _run_preflight(cfg: Config, *, skip: bool) -> int | None:
         storage.preflight_or_raise(cfg.storage.check_paths, cfg.storage.min_free_gb)
     except storage.StoragePreflightError as exc:
         console.print(f"[red]preflight failed:[/red] {exc}")
-        console.print(
-            "[dim]pass --skip-preflight to bypass this check.[/dim]"
-        )
+        console.print("[dim]pass --skip-preflight to bypass this check.[/dim]")
         return 3
     return None
 
@@ -105,12 +103,8 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     console.rule(f"[bold]Decoding Sandbox doctor[/bold] v{__version__}")
 
     # Config source / secrets
-    console.print(
-        f"Config file : [cyan]{cfg.config_path or 'built-in defaults'}[/cyan]"
-    )
-    console.print(
-        f"Secrets file: [cyan]{cfg.secrets_env_file or '(none)'}[/cyan]"
-    )
+    console.print(f"Config file : [cyan]{cfg.config_path or 'built-in defaults'}[/cyan]")
+    console.print(f"Secrets file: [cyan]{cfg.secrets_env_file or '(none)'}[/cyan]")
     console.print(f"Host        : [cyan]{os.uname().nodename}[/cyan]\n")
 
     # Provider keys
@@ -152,9 +146,7 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     _report_local_engines()
 
     if any_low:
-        console.print(
-            "\n[red]Warning:[/red] at least one disk is below the free-space floor."
-        )
+        console.print("\n[red]Warning:[/red] at least one disk is below the free-space floor.")
         return 1
     console.print("\n[green]All checks passed.[/green]")
     return 0
@@ -194,9 +186,7 @@ def _report_local_engines() -> None:
         ver = getattr(llama_cpp, "__version__", "?")
         # Probing CUDA support without loading a model is hard; just report the
         # binding version. The build flags went through CMAKE_ARGS at install.
-        table.add_row(
-            "llama-cpp-python", f"[green]{ver}[/green] (for the llamacpp-py backend)"
-        )
+        table.add_row("llama-cpp-python", f"[green]{ver}[/green] (for the llamacpp-py backend)")
     except Exception:  # noqa: BLE001
         table.add_row(
             "llama-cpp-python",
@@ -397,14 +387,10 @@ def _print_backend_banner(backend: Backend, *, out: Console | None = None) -> No
         pieces: list[str] = []
         for tid in caps.eos_token_ids:
             text = backend.piece(tid) if hasattr(backend, "piece") else ""
-            pieces.append(
-                f"{tid}={_render.token_repr(text, 16, is_special=True)}"
-            )
+            pieces.append(f"{tid}={_render.token_repr(text, 16, is_special=True)}")
         out.print(f"[dim]EOS ids: {', '.join(pieces)}[/dim]")
     else:
-        out.print(
-            "[dim]EOS ids: <not exposed by this backend>[/dim]"
-        )
+        out.print("[dim]EOS ids: <not exposed by this backend>[/dim]")
     if caps.notes:
         out.print(f"[dim]{caps.notes}[/dim]")
     if not caps.full_vocab:
@@ -452,9 +438,7 @@ def cmd_inspect(
     try:
         if own_backend:
             name = args.backend or cfg.default_backend
-            backend = _build_backend_with_load_timing(
-                name, cfg, model=args.model, timing=timing
-            )
+            backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=timing)
         if show_banner:
             _print_backend_banner(backend)
 
@@ -467,8 +451,7 @@ def cmd_inspect(
         caps = backend.capabilities
         prompt_tokens = backend.tokenize(args.prompt)
         generated_only_inspect = (
-            backend.__class__.__name__ == "OpenAICompatBackend"
-            and not caps.prompt_logprobs
+            backend.__class__.__name__ == "OpenAICompatBackend" and not caps.prompt_logprobs
         )
         if generated_only_inspect:
             console.print(
@@ -479,9 +462,7 @@ def cmd_inspect(
             with _maybe_phase(timing, "next-token distribution", tokens=tok_count):
                 step = backend.next_distribution(prompt_tokens, top_k=args.top_k)
             step.context_text = args.prompt
-            step.watched = {
-                t.token_id: backend.lookup_watch(step, t.token_id) for t in watch
-            }
+            step.watched = {t.token_id: backend.lookup_watch(step, t.token_id) for t in watch}
             steps = [step]
             title = f"Next-token inspection: {args.prompt!r}"
         else:
@@ -507,15 +488,9 @@ def cmd_inspect(
             ctx = render.token_repr(st.context_text or "", 14)
             is_trailing = st.chosen is None
             if not is_trailing:
-                nxt = render.token_repr(
-                    st.chosen.text, 14, is_special=st.chosen.is_special
-                )
+                nxt = render.token_repr(st.chosen.text, 14, is_special=st.chosen.is_special)
                 p_next = render.fmt_prob(st.chosen.prob)
-                rank = (
-                    f"#{st.chosen.rank}"
-                    if st.chosen.rank >= 0
-                    else "[dim]?[/dim]"
-                )
+                rank = f"#{st.chosen.rank}" if st.chosen.rank >= 0 else "[dim]?[/dim]"
                 pos_cell = str(st.position)
             else:
                 # The trailing "predict next" row: there is no actual next
@@ -587,18 +562,14 @@ def cmd_generate(
     try:
         if own_backend:
             name = args.backend or cfg.default_backend
-            backend = _build_backend_with_load_timing(
-                name, cfg, model=args.model, timing=timing
-            )
+            backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=timing)
         if show_banner:
             console.print(f"backend: [cyan]{backend.capabilities.name}[/cyan]")
 
         # Sampler construction (built-in or custom plug-in).
         if args.sampler == "custom":
             if not args.custom_file:
-                console.print(
-                    "[red]--sampler custom requires --custom-file path.py[:func][/red]"
-                )
+                console.print("[red]--sampler custom requires --custom-file path.py[:func][/red]")
                 return 2
             sampler = samplers.load_custom(args.custom_file)
             sampler_name = f"custom({args.custom_file})"
@@ -645,8 +616,12 @@ def cmd_generate(
         last_chosen_text: str = ""
 
         for gs in generate(
-            backend, args.prompt, sampler,
-            max_tokens=args.max_tokens, top_k=args.top_k, rng=rng,
+            backend,
+            args.prompt,
+            sampler,
+            max_tokens=args.max_tokens,
+            top_k=args.top_k,
+            rng=rng,
             stop_ids=[tid for _, tid in stop_ids],
         ):
             if first_token_at is None:
@@ -654,23 +629,17 @@ def cmd_generate(
             d = gs.decision
             chosen_cand = gs.chosen_candidate()
             chosen_is_special = chosen_cand.is_special if chosen_cand else False
-            p_chosen = (
-                render.fmt_prob(chosen_cand.prob)
-                if chosen_cand
-                else "[dim]?[/dim]"
-            )
+            p_chosen = render.fmt_prob(chosen_cand.prob) if chosen_cand else "[dim]?[/dim]"
             if d.changed_greedy:
                 greedy_text = next(
-                    (c.text for c in gs.step_result.candidates
-                     if c.token_id == d.greedy_token_id),
+                    (c.text for c in gs.step_result.candidates if c.token_id == d.greedy_token_id),
                     "?",
                 )
                 vs = f"[yellow]!= {render.token_repr(greedy_text, 10)}[/yellow]"
             else:
                 vs = "[green]= greedy[/green]"
             tops = "  ".join(
-                f"{render.token_repr(c.text, 8, is_special=c.is_special)}="
-                f"{render.fmt_prob(c.prob)}"
+                f"{render.token_repr(c.text, 8, is_special=c.is_special)}={render.fmt_prob(c.prob)}"
                 for c in gs.step_result.candidates[:5]
             )
             table.add_row(
@@ -703,18 +672,15 @@ def cmd_generate(
             chosen_last_id = chosen_ids[-1] if chosen_ids else -1
             label = render.token_repr(last_chosen_text, 24, is_special=True)
             console.print(
-                f"[magenta]stopped on EOS[/magenta]: model emitted {label} "
-                f"(id={chosen_last_id})"
+                f"[magenta]stopped on EOS[/magenta]: model emitted {label} (id={chosen_last_id})"
             )
         elif last_stop_reason == "user_stop":
             console.print(
-                f"[dim]stopped on --stop token: "
-                f"{render.token_repr(last_chosen_text, 24)}[/dim]"
+                f"[dim]stopped on --stop token: {render.token_repr(last_chosen_text, 24)}[/dim]"
             )
         elif last_stop_reason == "max_tokens":
             console.print(
-                f"[dim]reached --max-tokens={args.max_tokens} "
-                "(model did not emit EOS).[/dim]"
+                f"[dim]reached --max-tokens={args.max_tokens} (model did not emit EOS).[/dim]"
             )
         completion = backend.detokenize(chosen_ids)
         console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
@@ -774,17 +740,17 @@ def cmd_spec(
         all_ids: list[int] = []
         with _maybe_phase(timing, "speculative loop"):
             for rnd in speculative_generate(
-                target, draft, args.prompt,
-                gamma=args.gamma, max_tokens=args.max_tokens,
+                target,
+                draft,
+                args.prompt,
+                gamma=args.gamma,
+                max_tokens=args.max_tokens,
             ):
                 parts = []
                 for i, c in enumerate(rnd.proposed):
                     color = "green" if i < rnd.accepted else "red strike"
                     parts.append(f"[{color}]{render.token_repr(c.text, 10)}[/]")
-                corr = (
-                    render.token_repr(rnd.correction.text, 12)
-                    if rnd.correction else "-"
-                )
+                corr = render.token_repr(rnd.correction.text, 12) if rnd.correction else "-"
                 table.add_row(
                     str(rnd.step),
                     " ".join(parts) or "[dim](none)[/dim]",
@@ -809,9 +775,7 @@ def cmd_spec(
             f"(plain greedy = 1.00; higher is faster)"
         )
         console.print(f"\n[bold]prompt:[/bold] {args.prompt}")
-        console.print(
-            f"[bold]completion:[/bold][green]{target.detokenize(all_ids)}[/green]"
-        )
+        console.print(f"[bold]completion:[/bold][green]{target.detokenize(all_ids)}[/green]")
         if timing is not None:
             console.print(timing.render())
         return 0
@@ -836,12 +800,8 @@ def cmd_manual(
         if rc is not None:
             return rc
         name = args.backend or cfg.default_backend
-        backend = _build_backend_with_load_timing(
-            name, cfg, model=args.model, timing=None
-        )
-    return run_manual(
-        backend, args.prompt, top_k=args.top_k, own_backend=own_backend
-    )
+        backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=None)
+    return run_manual(backend, args.prompt, top_k=args.top_k, own_backend=own_backend)
 
 
 def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
@@ -863,9 +823,7 @@ def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
 
     name = args.backend or cfg.default_backend
     timing = None if getattr(args, "no_timing", False) else Timing()
-    backend = _build_backend_with_load_timing(
-        name, cfg, model=args.model, timing=timing
-    )
+    backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=timing)
     _print_backend_banner(backend)
     if timing is not None:
         console.print(timing.render(prefix="startup"))
@@ -895,8 +853,7 @@ def _print_candidates(steps, max_positions: int, top_k: int) -> None:
         ctx = render.token_repr(st.context_text or "", 14)
         line = f"[cyan]pos {st.position}[/cyan] after {ctx!r}: "
         line += "  ".join(
-            f"{render.token_repr(c.text, 10, is_special=c.is_special)!s}="
-            f"{render.fmt_prob(c.prob)}"
+            f"{render.token_repr(c.text, 10, is_special=c.is_special)!s}={render.fmt_prob(c.prob)}"
             for c in st.candidates
         )
         console.print(line)
@@ -973,11 +930,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("--model", default=None, help="Override the model id.")
     p_inspect.add_argument("--top-k", type=int, default=8, help="Candidates per position.")
     p_inspect.add_argument(
-        "--watch", action="append", default=[],
+        "--watch",
+        action="append",
+        default=[],
         help="Token text to highlight at every position (repeatable). Use a leading space, e.g. --watch ' Paris'.",
     )
     p_inspect.add_argument(
-        "--watch-id", action="append", type=int, default=[], metavar="N",
+        "--watch-id",
+        action="append",
+        type=int,
+        default=[],
+        metavar="N",
         help=(
             "Watch a specific token id (repeatable). Bypasses the text -> id "
             "round-trip, so it works for reserved/control tokens whose "
@@ -985,7 +948,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_inspect.add_argument(
-        "--watch-eos", action="store_true", default=False,
+        "--watch-eos",
+        action="store_true",
+        default=False,
         help=(
             "Convenience: expand to one watch column per id in "
             "backend.capabilities.eos_token_ids. Use this to track how the "
@@ -993,7 +958,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_inspect.add_argument(
-        "--candidates", type=int, default=0, metavar="N",
+        "--candidates",
+        type=int,
+        default=0,
+        metavar="N",
         help="Also print the full top-k candidate list for the first N positions.",
     )
     _add_preflight_flag(p_inspect)
@@ -1005,24 +973,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument("--backend", default=None, help=_BACKEND_HELP)
     p_gen.add_argument("--model", default=None, help="Override the model id.")
     p_gen.add_argument(
-        "--sampler", default="greedy",
+        "--sampler",
+        default="greedy",
         choices=["greedy", "temperature", "top_k", "top_p", "min_p", "typical", "custom"],
         help="Decoding function.",
     )
     p_gen.add_argument("--custom-file", default=None, help="path.py[:func] for --sampler custom.")
     p_gen.add_argument("--temperature", type=float, default=1.0)
-    p_gen.add_argument("--sampler-top-k", type=int, default=None, help="top_k for the top_k sampler.")
+    p_gen.add_argument(
+        "--sampler-top-k", type=int, default=None, help="top_k for the top_k sampler."
+    )
     p_gen.add_argument("--top-p", type=float, default=None)
     p_gen.add_argument("--min-p", type=float, default=None)
     p_gen.add_argument("--typical-p", type=float, default=None)
     p_gen.add_argument("--max-tokens", type=int, default=20)
     p_gen.add_argument("--seed", type=int, default=0)
     p_gen.add_argument(
-        "--top-k", type=int, default=50,
+        "--top-k",
+        type=int,
+        default=50,
         help="How many candidates to pull from the backend per step (sampler input).",
     )
     p_gen.add_argument(
-        "--stop", action="append", default=[],
+        "--stop",
+        action="append",
+        default=[],
         help=(
             "Stop generation as soon as this single-token string is chosen "
             "(repeatable). Multi-token strings are warned-about and ignored."

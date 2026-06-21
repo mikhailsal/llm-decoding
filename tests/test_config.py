@@ -33,15 +33,13 @@ def test_deep_merge_overrides_scalar_and_recurses_into_dicts() -> None:
     assert base["b"]["y"]["deep"] == "old"
 
 
-def test_load_env_file_sets_missing_keys_but_does_not_overwrite(
-    tmp_path, monkeypatch
-) -> None:
+def test_load_env_file_sets_missing_keys_but_does_not_overwrite(tmp_path, monkeypatch) -> None:
     env_path = tmp_path / "secrets.env"
     env_path.write_text(
         "# comment\n"
         "\n"
         "EXISTING_KEY=should_not_overwrite\n"
-        "NEW_KEY=\"quoted value\"\n"
+        'NEW_KEY="quoted value"\n'
         "ANOTHER='single-quoted'\n"
         "NOEQUALS_LINE\n"  # ignored
     )
@@ -76,10 +74,7 @@ def test_load_config_uses_defaults_when_no_file(tmp_path, monkeypatch) -> None:
 
 def test_load_config_merges_overrides_from_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
-    (tmp_path / "config.toml").write_text(
-        "[run]\nbackend = \"hf\"\n"
-        "[storage]\nmin_free_gb = 12.5\n"
-    )
+    (tmp_path / "config.toml").write_text('[run]\nbackend = "hf"\n[storage]\nmin_free_gb = 12.5\n')
 
     cfg = cfg_mod.load_config(load_secrets=False)
 

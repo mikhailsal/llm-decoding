@@ -53,13 +53,13 @@ def test_openai_compat_next_distribution_completions_parses_dict(monkeypatch) ->
         monkeypatch,
         routes={
             ("POST", "/completions"): {
-                "choices": [{
-                    "logprobs": {
-                        "top_logprobs": [
-                            {" Paris": -0.5, " London": -3.0, " Berlin": -4.0}
-                        ]
+                "choices": [
+                    {
+                        "logprobs": {
+                            "top_logprobs": [{" Paris": -0.5, " London": -3.0, " Berlin": -4.0}]
+                        }
                     }
-                }]
+                ]
             }
         },
         has_completions=True,
@@ -85,16 +85,20 @@ def test_openai_compat_next_distribution_chat_parses_list(monkeypatch) -> None:
         monkeypatch,
         routes={
             ("POST", "/chat/completions"): {
-                "choices": [{
-                    "logprobs": {
-                        "content": [
-                            {"top_logprobs": [
-                                {"token": "yes", "logprob": -0.2},
-                                {"token": "no", "logprob": -2.0},
-                            ]}
-                        ]
+                "choices": [
+                    {
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "top_logprobs": [
+                                        {"token": "yes", "logprob": -0.2},
+                                        {"token": "no", "logprob": -2.0},
+                                    ]
+                                }
+                            ]
+                        }
                     }
-                }]
+                ]
             }
         },
         has_completions=False,
@@ -143,17 +147,19 @@ def test_openai_compat_score_prompt_uses_echo_and_records_actual(monkeypatch) ->
         monkeypatch,
         routes={
             ("POST", "/completions"): {
-                "choices": [{
-                    "logprobs": {
-                        "tokens": ["The", " cap", "ital"],
-                        "token_logprobs": [None, -1.0, -2.0],
-                        "top_logprobs": [
-                            None,
-                            {" cap": -1.0, " other": -3.0},
-                            {"ital": -2.0, "stuff": -4.0},
-                        ],
+                "choices": [
+                    {
+                        "logprobs": {
+                            "tokens": ["The", " cap", "ital"],
+                            "token_logprobs": [None, -1.0, -2.0],
+                            "top_logprobs": [
+                                None,
+                                {" cap": -1.0, " other": -3.0},
+                                {"ital": -2.0, "stuff": -4.0},
+                            ],
+                        }
                     }
-                }]
+                ]
             }
         },
         has_completions=True,
@@ -300,7 +306,7 @@ def test_llamacpp_next_distribution_parses_n_probs(monkeypatch) -> None:
                 "completion_probabilities": [
                     {
                         "top_logprobs": [
-                            {"id": 100, "token": " Paris",  "logprob": -0.4},
+                            {"id": 100, "token": " Paris", "logprob": -0.4},
                             {"id": 200, "token": " London", "logprob": -2.3},
                         ]
                     }

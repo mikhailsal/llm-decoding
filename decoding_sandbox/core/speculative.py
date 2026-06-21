@@ -41,7 +41,7 @@ class SpecRound:
 
     @property
     def rejected(self) -> list[TokenCandidate]:
-        return self.proposed[self.accepted:]
+        return self.proposed[self.accepted :]
 
 
 @runtime_checkable
@@ -58,9 +58,7 @@ class Speculator(Protocol):
     def propose(self, tokens: list[int], gamma: int) -> list[TokenCandidate]:
         """Draft proposes up to ``gamma`` greedy continuations of ``tokens``."""
 
-    def verify(
-        self, tokens: list[int], draft_ids: list[int]
-    ) -> tuple[int, TokenCandidate | None]:
+    def verify(self, tokens: list[int], draft_ids: list[int]) -> tuple[int, TokenCandidate | None]:
         """Target verifies the drafts; returns ``(accepted, correction)``.
 
         ``accepted`` is how many leading drafts the target's argmax agrees with.
@@ -95,9 +93,7 @@ class HFSpeculator:
             ctx.append(c.token_id)
         return proposed
 
-    def verify(
-        self, tokens: list[int], draft_ids: list[int]
-    ) -> tuple[int, TokenCandidate | None]:
+    def verify(self, tokens: list[int], draft_ids: list[int]) -> tuple[int, TokenCandidate | None]:
         verify_greedy = getattr(self.target, "verify_greedy", None)
         if verify_greedy is None:
             raise TypeError(
@@ -145,8 +141,7 @@ def speculative_generate(
         accepted, correction = spec.verify(tokens, draft_ids)
         remaining = max_tokens - produced
         emitted = (
-            draft_ids[:accepted]
-            + ([correction.token_id] if correction is not None else [])
+            draft_ids[:accepted] + ([correction.token_id] if correction is not None else [])
         )[:remaining]
         tokens.extend(emitted)
         produced += len(emitted)

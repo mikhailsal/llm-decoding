@@ -36,8 +36,10 @@ class HFBackend(Backend):
         except Exception as exc:  # noqa: BLE001
             if not fallback_model or fallback_model == model_id:
                 raise
-            print(f"[HFBackend] {model_id} failed ({type(exc).__name__}); "
-                  f"falling back to {fallback_model}")
+            print(
+                f"[HFBackend] {model_id} failed ({type(exc).__name__}); "
+                f"falling back to {fallback_model}"
+            )
             self._load(fallback_model, load_in_4bit, gpu_mem, cpu_mem)
             self.loaded_model = fallback_model
 
@@ -60,9 +62,7 @@ class HFBackend(Backend):
             kwargs["torch_dtype"] = torch.float16
         self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
         self.model.eval()
-        self._eos_ids: tuple[int, ...] = _gather_eos_ids(
-            self.model.config, self.tokenizer
-        )
+        self._eos_ids: tuple[int, ...] = _gather_eos_ids(self.model.config, self.tokenizer)
         self._special_ids: frozenset[int] = frozenset(
             int(i) for i in (getattr(self.tokenizer, "all_special_ids", []) or [])
         )
@@ -108,7 +108,10 @@ class HFBackend(Backend):
         vals, idx = torch.topk(logp, k)
         cands = [
             TokenCandidate(
-                int(i), self.piece(int(i)), float(v), rank,
+                int(i),
+                self.piece(int(i)),
+                float(v),
+                rank,
                 is_special=self._is_special(int(i)),
             )
             for rank, (v, i) in enumerate(zip(vals.tolist(), idx.tolist()))
@@ -119,7 +122,10 @@ class HFBackend(Backend):
         lp = float(dist[token_id].item())
         rank = int((dist > dist[token_id]).sum().item())
         return TokenCandidate(
-            token_id, self.piece(token_id), lp, rank,
+            token_id,
+            self.piece(token_id),
+            lp,
+            rank,
             is_special=self._is_special(token_id),
         )
 
@@ -149,7 +155,10 @@ class HFBackend(Backend):
             else:
                 dist = torch.log_softmax(logits[pos].float(), dim=-1)
                 return accepted, TokenCandidate(
-                    tgt, self.piece(tgt), float(dist[tgt]), 0,
+                    tgt,
+                    self.piece(tgt),
+                    float(dist[tgt]),
+                    0,
                     is_special=self._is_special(tgt),
                 )
         # all accepted -> emit the bonus token from the last position
@@ -157,7 +166,10 @@ class HFBackend(Backend):
         tgt = int(torch.argmax(logits[pos]).item())
         dist = torch.log_softmax(logits[pos].float(), dim=-1)
         return accepted, TokenCandidate(
-            tgt, self.piece(tgt), float(dist[tgt]), 0,
+            tgt,
+            self.piece(tgt),
+            float(dist[tgt]),
+            0,
             is_special=self._is_special(tgt),
         )
 
@@ -190,16 +202,15 @@ class HFBackend(Backend):
             vals, idx = torch.topk(dist, k)
             cands = [
                 TokenCandidate(
-                    int(j), self.piece(int(j)), float(v), rank,
+                    int(j),
+                    self.piece(int(j)),
+                    float(v),
+                    rank,
                     is_special=self._is_special(int(j)),
                 )
                 for rank, (v, j) in enumerate(zip(vals.tolist(), idx.tolist()))
             ]
-            chosen = (
-                self._exact_candidate(dist, ids[i + 1])
-                if i + 1 < len(ids)
-                else None
-            )
+            chosen = self._exact_candidate(dist, ids[i + 1]) if i + 1 < len(ids) else None
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}
             results.append(
                 StepResult(

@@ -118,9 +118,7 @@ def test_switch_backend_closes_old_and_replaces(monkeypatch) -> None:
         assert name == "new"
         return new
 
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", _fake_build_backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", _fake_build_backend)
 
     s = _state(backend=old)
     r = dispatch_session_line(s, ":backend new")
@@ -181,8 +179,12 @@ def test_inspect_dispatch_calls_cmd_inspect_with_session_backend(monkeypatch) ->
 
     def _fake_cmd_inspect(args, cfg, *, backend=None, show_banner=True):
         captured.update(
-            prompt=args.prompt, watch=args.watch, top_k=args.top_k,
-            backend=backend, show_banner=show_banner, no_timing=args.no_timing,
+            prompt=args.prompt,
+            watch=args.watch,
+            top_k=args.top_k,
+            backend=backend,
+            show_banner=show_banner,
+            no_timing=args.no_timing,
         )
         return 0
 
@@ -192,9 +194,7 @@ def test_inspect_dispatch_calls_cmd_inspect_with_session_backend(monkeypatch) ->
     monkeypatch.setattr("decoding_sandbox.cli.app.cmd_inspect", _fake_cmd_inspect)
     parser = session_mod._build_session_parser()
 
-    r = dispatch_session_line(
-        s, "inspect 'The weather' --watch ' dry' --top-k 5", parser=parser
-    )
+    r = dispatch_session_line(s, "inspect 'The weather' --watch ' dry' --top-k 5", parser=parser)
     assert r.tag == "ok"
     assert captured["prompt"] == "The weather"
     assert captured["watch"] == [" dry"]
@@ -224,7 +224,9 @@ def test_generate_dispatch_threads_sampler_and_max_tokens(monkeypatch) -> None:
 
     def _fake_cmd_generate(args, cfg, *, backend=None, show_banner=True):
         captured.update(
-            prompt=args.prompt, sampler=args.sampler, max_tokens=args.max_tokens,
+            prompt=args.prompt,
+            sampler=args.sampler,
+            max_tokens=args.max_tokens,
             top_p=args.top_p,
         )
         return 0
@@ -232,7 +234,8 @@ def test_generate_dispatch_threads_sampler_and_max_tokens(monkeypatch) -> None:
     monkeypatch.setattr("decoding_sandbox.cli.app.cmd_generate", _fake_cmd_generate)
     parser = session_mod._build_session_parser()
     dispatch_session_line(
-        s, "generate 'once upon a time' --sampler top_p --top-p 0.9 --max-tokens 30",
+        s,
+        "generate 'once upon a time' --sampler top_p --top-p 0.9 --max-tokens 30",
         parser=parser,
     )
     assert captured == {

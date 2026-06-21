@@ -154,9 +154,7 @@ def test_discover_model_path_globs_under_search_dirs(monkeypatch, tmp_path) -> N
     found = nested / "Qwen3.5-9B-Base-Q4_K_M.gguf"
     found.write_bytes(b"")
 
-    out = mod._discover_model_path(
-        None, [str(tmp_path)], "**/Qwen3.5-9B-Base-Q4_K_M.gguf"
-    )
+    out = mod._discover_model_path(None, [str(tmp_path)], "**/Qwen3.5-9B-Base-Q4_K_M.gguf")
     assert out == str(found)
 
 
@@ -175,18 +173,14 @@ def test_discover_model_path_ignores_missing_search_dirs(tmp_path) -> None:
     real = tmp_path / "a"
     real.mkdir()
     (real / "m.gguf").write_bytes(b"")
-    out = mod._discover_model_path(
-        None, ["/does/not/exist", str(tmp_path)], "**/*.gguf"
-    )
+    out = mod._discover_model_path(None, ["/does/not/exist", str(tmp_path)], "**/*.gguf")
     assert out.endswith("m.gguf")
 
 
 # --------------------------------------------------------------------------- #
 # Capabilities + tokenization
 # --------------------------------------------------------------------------- #
-def test_capabilities_advertise_full_vocab_when_logits_all_true(
-    monkeypatch, tmp_path
-) -> None:
+def test_capabilities_advertise_full_vocab_when_logits_all_true(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     caps = b.capabilities
 
@@ -226,9 +220,7 @@ def test_piece_caches_individual_token_detokenization(monkeypatch, tmp_path) -> 
 # --------------------------------------------------------------------------- #
 # Forward pass + log-softmax sanity
 # --------------------------------------------------------------------------- #
-def test_next_distribution_returns_ranked_full_vocab_candidates(
-    monkeypatch, tmp_path
-) -> None:
+def test_next_distribution_returns_ranked_full_vocab_candidates(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     step = b.next_distribution(b.tokenize("abc"), top_k=4)
 
@@ -251,9 +243,7 @@ def test_next_distribution_clamps_top_k_to_vocab_size(monkeypatch, tmp_path) -> 
     assert step.candidates[0].rank == 0
 
 
-def test_score_prompt_records_actual_token_at_each_position(
-    monkeypatch, tmp_path
-) -> None:
+def test_score_prompt_records_actual_token_at_each_position(monkeypatch, tmp_path) -> None:
     """For an N-token prompt the new contract is N steps:
     N-1 scored rows plus a trailing "predict next" row with chosen=None.
     """
@@ -278,9 +268,7 @@ def test_score_prompt_records_actual_token_at_each_position(
         assert not math.isnan(w.logprob)
 
 
-def test_score_prompt_includes_trailing_step_for_single_token_prompt(
-    monkeypatch, tmp_path
-) -> None:
+def test_score_prompt_includes_trailing_step_for_single_token_prompt(monkeypatch, tmp_path) -> None:
     """A 1-token prompt has no scored rows (nothing to score against) but
     still has a trailing prediction. Empty list would silently drop the
     only interesting position for a 1-token prompt."""
@@ -311,9 +299,7 @@ def test_log_softmax_helper_normalizes_rows() -> None:
 # --------------------------------------------------------------------------- #
 # KV-cache reuse
 # --------------------------------------------------------------------------- #
-def test_score_prompt_calls_eval_only_once_for_a_fresh_prompt(
-    monkeypatch, tmp_path
-) -> None:
+def test_score_prompt_calls_eval_only_once_for_a_fresh_prompt(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     fake: _FakeLlama = b._llama  # type: ignore[assignment]
 
@@ -348,9 +334,7 @@ def test_non_extension_context_resets_cache(monkeypatch, tmp_path) -> None:
     assert fake.reset_calls >= 1
 
 
-def test_next_distribution_with_empty_ids_returns_empty_step(
-    monkeypatch, tmp_path
-) -> None:
+def test_next_distribution_with_empty_ids_returns_empty_step(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     step = b.next_distribution([], top_k=4)
     assert step.candidates == []
@@ -360,9 +344,7 @@ def test_next_distribution_with_empty_ids_returns_empty_step(
 # --------------------------------------------------------------------------- #
 # Speculative-decoding hook
 # --------------------------------------------------------------------------- #
-def test_verify_greedy_accepts_matching_drafts_and_emits_bonus(
-    monkeypatch, tmp_path
-) -> None:
+def test_verify_greedy_accepts_matching_drafts_and_emits_bonus(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     ctx = b.tokenize("ab")
     # Use the model's own greedy choices as the drafts -> all accepted.
@@ -378,9 +360,7 @@ def test_verify_greedy_accepts_matching_drafts_and_emits_bonus(
     assert correction.text != ""
 
 
-def test_verify_greedy_rejects_wrong_draft_and_returns_correction(
-    monkeypatch, tmp_path
-) -> None:
+def test_verify_greedy_rejects_wrong_draft_and_returns_correction(monkeypatch, tmp_path) -> None:
     b = _backend(monkeypatch, tmp_path)
     ctx = b.tokenize("ab")
     # Deliberately wrong draft id 0. verify_greedy reads the row at
@@ -416,9 +396,7 @@ def test_capabilities_expose_eos_from_token_eos(monkeypatch, tmp_path) -> None:
     assert b.capabilities.eos_token_ids == (250,)
 
 
-def test_capabilities_include_token_eot_when_binding_exposes_it(
-    monkeypatch, tmp_path
-) -> None:
+def test_capabilities_include_token_eot_when_binding_exposes_it(monkeypatch, tmp_path) -> None:
     """Newer llama-cpp-python builds expose ``Llama.token_eot()`` for chat
     templates. The backend should pick that up too."""
 
@@ -433,8 +411,11 @@ def test_capabilities_include_token_eot_when_binding_exposes_it(
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
-        logits_all=True, verbose=False,
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
     )
     assert b.capabilities.eos_token_ids == (250, 251)
 
@@ -454,8 +435,11 @@ def test_negative_eos_id_is_dropped(monkeypatch, tmp_path) -> None:
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
-        logits_all=True, verbose=False,
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
     )
     assert b.capabilities.eos_token_ids == ()
 
@@ -486,8 +470,11 @@ def test_is_special_true_for_braced_tokens(monkeypatch, tmp_path) -> None:
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64,
-        logits_all=True, verbose=False,
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
     )
     step = b.next_distribution(b.tokenize("ab"), top_k=256)
     braced = next(c for c in step.candidates if c.token_id == 7)

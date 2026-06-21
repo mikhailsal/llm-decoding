@@ -40,7 +40,9 @@ def main() -> int:
     print(f"picked rank 0 -> {picked.text!r}; text now: {session.generated_text()!r}")
 
     forced = session.force_text(args.force)
-    print(f"forced {args.force!r} -> {[f.text for f in forced]}; text now: {session.generated_text()!r}")
+    print(
+        f"forced {args.force!r} -> {[f.text for f in forced]}; text now: {session.generated_text()!r}"
+    )
 
     undone = session.undo()
     print(f"undo -> removed token id {undone}; text now: {session.generated_text()!r}")

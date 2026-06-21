@@ -64,7 +64,8 @@ class OpenAICompatBackend(Backend):
             max_top_logprobs=self.provider.max_top_logprobs,
             can_force_token=self.provider.has_completions,
             notes=(
-                "whole-context via echo" if self.provider.supports_prompt_logprobs
+                "whole-context via echo"
+                if self.provider.supports_prompt_logprobs
                 else ("raw /completions" if self.provider.has_completions else "chat-only top-k")
             ),
         )
@@ -162,7 +163,9 @@ class OpenAICompatBackend(Backend):
             cand_dict = top_lps[i] if i < len(top_lps) and top_lps[i] else {}
             cands = self._cands_from_dict(cand_dict)
             actual_text = tokens[i]
-            actual_lp = token_lps[i] if i < len(token_lps) and token_lps[i] is not None else float("nan")
+            actual_lp = (
+                token_lps[i] if i < len(token_lps) and token_lps[i] is not None else float("nan")
+            )
             actual_id = self._intern(actual_text)
             chosen = StepResult(0, cands, False).find(actual_id)
             if chosen is None:

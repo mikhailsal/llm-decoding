@@ -80,14 +80,9 @@ class LlamaCppBackend(Backend):
         if not cp:
             return StepResult(position=len(token_ids), candidates=[], is_full_vocab=False)
         top = cp[0].get("top_logprobs", [])
-        triples = [
-            (e["id"], _clean_piece(e.get("token", "")), float(e["logprob"]))
-            for e in top
-        ]
+        triples = [(e["id"], _clean_piece(e.get("token", "")), float(e["logprob"])) for e in top]
         cands = candidates_from_logprobs(triples)
-        return StepResult(
-            position=len(token_ids), candidates=cands, is_full_vocab=False
-        )
+        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
 
     def close(self) -> None:
         self._client.close()

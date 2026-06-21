@@ -84,7 +84,9 @@ def demo(model_id: str, four_bit: bool) -> bool:
     topv, topi = torch.topk(last, 8)
     print(f"\nFull-vocab next-token after {PROMPT!r} (vocab={vocab}):")
     for lp, idx in zip(topv.tolist(), topi.tolist()):
-        print(f"  {tok.decode([idx])!r:>14}  p={torch.exp(torch.tensor(lp)).item():6.2%}  logprob={lp:7.3f}")
+        print(
+            f"  {tok.decode([idx])!r:>14}  p={torch.exp(torch.tensor(lp)).item():6.2%}  logprob={lp:7.3f}"
+        )
 
     # (2) Whole-context: prob the model gave to each ACTUAL next token.
     logp = torch.log_softmax(logits[0].float(), dim=-1)  # [seq, vocab]

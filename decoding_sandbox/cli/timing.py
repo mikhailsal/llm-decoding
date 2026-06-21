@@ -97,9 +97,7 @@ class Timing:
                 continue
             tps = p.tps
             tps_str = f" = {tps:.1f} tok/s" if tps is not None else ""
-            parts.append(
-                f"{p.name} {p.tokens} tok in {_fmt_seconds(p.seconds)}{tps_str}"
-            )
+            parts.append(f"{p.name} {p.tokens} tok in {_fmt_seconds(p.seconds)}{tps_str}")
         parts.append(f"total {_fmt_seconds(self.total_seconds)}")
         return "[dim]" + prefix + ": " + " | ".join(parts) + "[/dim]"
 

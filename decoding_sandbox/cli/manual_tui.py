@@ -37,8 +37,18 @@ commands:
 
 # Tagged outcome of a single command, used by both the live TUI and tests.
 Tag = Literal[
-    "quit", "help", "pick", "pick_error", "undo", "undo_empty",
-    "force", "force_blocked", "set_top_k", "bad_top_k", "save", "load",
+    "quit",
+    "help",
+    "pick",
+    "pick_error",
+    "undo",
+    "undo_empty",
+    "force",
+    "force_blocked",
+    "set_top_k",
+    "bad_top_k",
+    "save",
+    "load",
     "unknown",
 ]
 
@@ -162,9 +172,7 @@ def _print_result(console: Console, result: CommandResult) -> None:
         console.print("[yellow]unknown command (type ? for help)[/yellow]")
 
 
-def run_manual(
-    backend: Backend, prompt: str, top_k: int = 12, *, own_backend: bool = True
-) -> int:
+def run_manual(backend: Backend, prompt: str, top_k: int = 12, *, own_backend: bool = True) -> int:
     """Run the interactive manual-decoding TUI.
 
     When ``own_backend=False`` (e.g. called from the long-lived ``session``
@@ -194,7 +202,9 @@ def run_manual(
         if result.should_quit:
             break
 
-    console.print(f"\n[bold]final:[/bold] {session.prompt}[green]{session.generated_text()}[/green]")
+    console.print(
+        f"\n[bold]final:[/bold] {session.prompt}[green]{session.generated_text()}[/green]"
+    )
     if own_backend:
         backend.close()
     return 0
