@@ -75,9 +75,7 @@ class LlamaCppPyBackend(Backend):
         import numpy as np  # noqa: F401  (validate availability early)
 
         self._numpy = __import__("numpy")
-        self.model_path = _discover_model_path(
-            model_path, model_search_dirs or [], model_glob
-        )
+        self.model_path = _discover_model_path(model_path, model_search_dirs or [], model_glob)
         self._llama = Llama(
             model_path=self.model_path,
             n_gpu_layers=n_gpu_layers,
@@ -192,6 +190,11 @@ class LlamaCppPyBackend(Backend):
         # Llama.scores is a (n_ctx, n_vocab) float32 buffer; only the first
         # `len(token_ids)` rows are populated by our eval.
         scores = np.asarray(self._llama.scores[: len(token_ids)], dtype=np.float32)
+        overhead_mb = scores.nbytes / (1024 * 1024)
+        if hasattr(self, "_verbose") and self._verbose or True:  # print unconditionally for now, or use rich.print
+            import rich
+            rich.print(f"[dim]\\[llamacpp-py] logits matrix shape {scores.shape} allocated {overhead_mb:.2f} MB[/dim]")
+            
         if scores.shape[0] != len(token_ids):
             raise RuntimeError(
                 f"unexpected scores shape {scores.shape} for {len(token_ids)} tokens"
@@ -219,7 +222,10 @@ class LlamaCppPyBackend(Backend):
         vals = logp[idx]
         cands = [
             TokenCandidate(
-                int(j), self.piece(int(j)), float(v), rank,
+                int(j),
+                self.piece(int(j)),
+                float(v),
+                rank,
                 is_special=self._is_special(int(j)),
             )
             for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
@@ -253,16 +259,15 @@ class LlamaCppPyBackend(Backend):
             vals = dist[idx]
             cands = [
                 TokenCandidate(
-                    int(j), self.piece(int(j)), float(v), rank,
+                    int(j),
+                    self.piece(int(j)),
+                    float(v),
+                    rank,
                     is_special=self._is_special(int(j)),
                 )
                 for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
             ]
-            chosen = (
-                self._exact_candidate(dist, ids[i + 1])
-                if i + 1 < len(ids)
-                else None
-            )
+            chosen = self._exact_candidate(dist, ids[i + 1]) if i + 1 < len(ids) else None
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}
             results.append(
                 StepResult(
@@ -280,7 +285,10 @@ class LlamaCppPyBackend(Backend):
         lp = float(dist[token_id])
         rank = int((dist > dist[token_id]).sum())
         return TokenCandidate(
-            token_id, self.piece(token_id), lp, rank,
+            token_id,
+            self.piece(token_id),
+            lp,
+            rank,
             is_special=self._is_special(token_id),
         )
 
@@ -308,13 +316,19 @@ class LlamaCppPyBackend(Backend):
                 accepted += 1
             else:
                 return accepted, TokenCandidate(
-                    tgt, self.piece(tgt), float(logp[pos, tgt]), 0,
+                    tgt,
+                    self.piece(tgt),
+                    float(logp[pos, tgt]),
+                    0,
                     is_special=self._is_special(tgt),
                 )
         pos = len(full) - 1
         tgt = int(np.argmax(logp[pos]))
         return accepted, TokenCandidate(
-            tgt, self.piece(tgt), float(logp[pos, tgt]), 0,
+            tgt,
+            self.piece(tgt),
+            float(logp[pos, tgt]),
+            0,
             is_special=self._is_special(tgt),
         )
 
