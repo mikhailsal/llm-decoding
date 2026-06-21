@@ -419,6 +419,79 @@ EOS handling), the manual TUI, cloud backends (Fireworks `echo` whole-context
   protocol the next plan's browser UI will consume.
 
 All heavy commands run the `storage.preflight_or_raise` disk check first
-(bypass with `--skip-preflight`). Next up: a browser UI on top of the
-same `/v1/*` + SSE surface, and a `LlamaCppSpeculator` mirroring the
-existing `HFSpeculator`.
+(bypass with `--skip-preflight`). Next up: a `LlamaCppSpeculator`
+mirroring the existing `HFSpeculator`.
+
+## Web UI
+
+The browser UI is a SvelteKit single-page app served by `dsbx web` -- a
+small FastAPI **middleware** that fronts every configured backend behind
+a single bearer-token API. The browser never sees provider API keys, the
+dsbx-host LAN address, or anything in `secrets_env_file`; it only knows the
+address of `dsbx web` (and the token to talk to it).
+
+```
++------------------+   bearer token       +--------------------+
+| browser (SPA)    | ------------------>  | dsbx web           |
+| svelte + ts      |  HTTP + SSE (auth)   | FastAPI on client|
+|                  |                      |  - hides all keys  |
++------------------+                      |  - hides remote IPs|
+                                          +--------------------+
+                                              |          |
+                       LAN HTTP+SSE           |          |  HTTPS keys
+                       to dsbx-host/dsbx serve     v          v
+                                  +----------------+  +------------------+
+                                  | dsbx-host dsbx serve|  | Fireworks / NIM  |
+                                  | (model loaded) |  | OpenRouter / LMS |
+                                  +----------------+  +------------------+
+```
+
+The UI mirrors every TUI verb: `/inspect`, `/generate`, `/manual`,
+`/spec`, `/status` (combines `doctor` + `probe`). Streaming token output
+uses SSE end-to-end (`generate` and `spec`); manual-decoding state lives
+on the middleware in a UUID-keyed, TTL-evicted session registry.
+
+### Running it
+
+```bash
+# One-time install on the middleware host (the client in our setup):
+pip install -e ".[web]"
+
+# Pick a token (treat it like an API key). One option:
+export DSBX_WEB_TOKEN="$(openssl rand -hex 32)"
+
+# Make sure the dsbx-host backend is up so the middleware has something to
+# talk to (the client's CLI already does this with `dsbx doctor`):
+make serve-py    # starts `dsbx serve --backend llamacpp-py` on dsbx-host
+
+# Build the frontend bundle (output: frontend/build/):
+make web-build
+
+# Run the middleware (this also static-serves the bundle at /):
+dsbx web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build
+
+# Open http://localhost:8765 in a browser, paste the token, log in.
+```
+
+For frontend development with hot reload, use the dev-mode launcher:
+
+```bash
+make web-dev   # runs FastAPI on :8765 and `pnpm dev` on :5173
+```
+
+### What is and isn't exposed
+
+The middleware actively scrubs:
+
+- ``base_url`` for any ``[remote.NAME]`` entry (the dsbx-host LAN address).
+- ``api_key_env`` and all environment-resolved API keys.
+- The ``secrets_env_file`` path itself.
+
+The browser only ever receives:
+
+- A list of opaque backend names with their ``Capabilities`` flags.
+- The token-level outputs of inspect / generate / spec / manual.
+- ``/api/v1/probe`` results (status strings only, no keys).
+
+The no-secrets-leak invariant is enforced by `tests/test_web_info.py`,
+which scans every ``/api/v1/info`` payload for known sentinel values.

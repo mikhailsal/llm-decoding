@@ -143,3 +143,29 @@ has_completions = true
 
 # Gemini AI Studio is intentionally absent: logprobs is disabled there
 # (capability gate, verified live). Use Vertex AI + billing if ever needed.
+
+# ---- Web middleware (browser <-> dsbx) -------------------------------------
+#
+# The ``dsbx web`` middleware fronts every configured backend behind a single
+# bearer-token API so the browser never sees provider keys or the dsbx-host LAN
+# address. Install the extra on the host that runs the middleware:
+#
+#   pip install -e ".[web]"
+#
+# Then run it:
+#
+#   export DSBX_WEB_TOKEN="$(openssl rand -hex 32)"
+#   dsbx web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build
+
+[web]
+# Bearer token the browser must send. The CLI flag --token and the
+# environment variable DSBX_WEB_TOKEN both override this. Treat it like an
+# API key (rotate freely; gitignored config.toml is the right place for it).
+api_token = "change-me-please-use-a-long-random-string"
+# Origins allowed by CORS. The SvelteKit dev server defaults to 5173; when
+# you serve the built bundle from this same process you don't need an entry
+# here at all (same-origin).
+cors_origins = ["http://localhost:5173"]
+# How long an idle manual-decoding session lives on the middleware before it
+# gets evicted (seconds). 1h is a reasonable default for a single-user box.
+manual_session_ttl = 3600

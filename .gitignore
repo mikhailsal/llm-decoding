@@ -33,3 +33,12 @@ scratch/
 .idea/
 .vscode/
 .DS_Store
+
+# Frontend (SvelteKit) build artifacts -- the build/ directory is the
+# adapter-static output we serve from `dsbx web --frontend-dist`. It's
+# regenerated on every `make web-build` so no point committing it.
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/dist/
+frontend/.vite/

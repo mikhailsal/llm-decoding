@@ -1,0 +1,206 @@
+"""Tests for /api/v1/generate/stream (SSE).
+
+We parse the ``text/event-stream`` body line by line and assert:
+
+- Each step is one ``{"event":"step", "step": WireGenStep}`` frame.
+- The terminator is exactly one ``{"event":"done", "stop_reason": ...}`` frame.
+- Custom samplers are rejected at the 400 boundary, never streamed.
+- Unknown samplers are rejected at the 400 boundary too.
+- Mid-stream backend exceptions surface as ``done.error`` without crashing
+  the connection (200 status, structured error in the final frame).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from decoding_sandbox.core.backend import Backend
+from decoding_sandbox.core.types import Capabilities
+from tests.fakes import FakeBackend, cand
+from tests.web_helpers import build_test_app, make_authed_client
+
+
+def _parse_sse(body: str) -> list[dict]:
+    """Pull every ``data:`` payload out of an SSE response body."""
+    events: list[dict] = []
+    for chunk in body.split("\n\n"):
+        chunk = chunk.strip()
+        if not chunk.startswith("data:"):
+            continue
+        payload = chunk[len("data:") :].strip()
+        events.append(json.loads(payload))
+    return events
+
+
+def _backend() -> FakeBackend:
+    return FakeBackend(
+        tokens={"ab": [97, 98]},
+        pieces={97: "a", 98: "b", 88: "X", 89: "Y"},
+        distributions={
+            (97, 98): [cand(88, "X", 0.6, 0), cand(89, "Y", 0.4, 1)],
+            (97, 98, 88): [cand(88, "X", 0.55, 0), cand(89, "Y", 0.45, 1)],
+            (97, 98, 88, 88): [cand(88, "X", 0.55, 0), cand(89, "Y", 0.45, 1)],
+        },
+        eos_token_ids=(99,),
+    )
+
+
+@pytest.fixture
+def client():
+    app = build_test_app({"dsbx-host-py": _backend()})
+    with make_authed_client(app) as c:
+        yield c
+
+
+def test_generate_stream_emits_step_events_and_done(client) -> None:
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 2,
+        "top_k": 5,
+        "stop_ids": [],
+        "seed": 0,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(r.text)
+    step_events = [e for e in events if e["event"] == "step"]
+    assert len(step_events) == 2
+    # Greedy picks the rank-0 candidate "X" at each step.
+    assert step_events[0]["step"]["decision"]["token_text"] == "X"
+    # The terminator is exactly one ``done`` event.
+    assert events[-1]["event"] == "done"
+    assert events[-1]["stop_reason"] == "max_tokens"
+    assert events[-1].get("error") is None
+
+
+def test_generate_stream_stops_on_user_stop_token(client) -> None:
+    """``stop_ids`` halts generation as soon as that id is chosen."""
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 5,
+        "top_k": 5,
+        "stop_ids": [88],  # X is greedy at every step -> first emission stops
+        "seed": 0,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    events = _parse_sse(r.text)
+    step_events = [e for e in events if e["event"] == "step"]
+    assert len(step_events) == 1
+    assert events[-1]["event"] == "done"
+    assert events[-1]["stop_reason"] == "user_stop"
+
+
+def test_generate_stream_resolves_stop_texts_to_ids(client) -> None:
+    """``stop_texts`` is tokenized server-side; a single-token match stops."""
+    backend = _backend()
+    # Add the stop string to the fake tokenizer so it tokenizes to one id.
+    backend.tokens["STOP"] = [88]
+    app = build_test_app({"dsbx-host-py": backend})
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 5,
+        "top_k": 5,
+        "stop_texts": ["STOP"],
+        "seed": 0,
+    }
+    with make_authed_client(app) as c:
+        r = c.post("/api/v1/generate/stream", json=body)
+    events = _parse_sse(r.text)
+    assert events[-1]["stop_reason"] == "user_stop"
+
+
+def test_generate_stream_rejects_custom_sampler(client) -> None:
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "custom", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 400
+    assert "custom" in r.json()["detail"].lower()
+
+
+def test_generate_stream_rejects_unknown_sampler(client) -> None:
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "no-such-sampler", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 400
+    assert "unknown sampler" in r.json()["detail"]
+
+
+def test_generate_stream_top_p_works_with_params(client) -> None:
+    """Sampler params reach the builder and produce a valid stream."""
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "top_p", "params": {"top_p": 0.9, "temperature": 1.0}},
+        "max_tokens": 1,
+        "top_k": 10,
+        "seed": 42,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    assert any(e["event"] == "step" for e in events)
+    assert events[-1]["event"] == "done"
+
+
+def test_generate_stream_runtime_error_lands_in_done() -> None:
+    """An exception in the engine mid-decode is wrapped as a done.error
+    frame rather than a hard 500 -- streaming response has already
+    committed headers by then."""
+
+    class _Exploding(Backend):
+        @property
+        def capabilities(self) -> Capabilities:
+            return Capabilities(
+                name="boom",
+                full_vocab=True,
+                prompt_logprobs=True,
+                max_top_logprobs=5,
+            )
+
+        def tokenize(self, text):
+            return [ord(c) for c in text]
+
+        def detokenize(self, ids):
+            return ""
+
+        def piece(self, tid):
+            return chr(tid)
+
+        def next_distribution(self, token_ids, top_k):
+            raise RuntimeError("kaboom")
+
+    app = build_test_app({"boom": _Exploding()})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "boom",
+                "prompt": "ab",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 2,
+                "top_k": 5,
+            },
+        )
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    assert events[-1]["event"] == "done"
+    assert events[-1]["error"] == "kaboom"

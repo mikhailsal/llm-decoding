@@ -929,6 +929,79 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace, cfg: Config) -> int:
+    """Launch the dsbx web middleware (FastAPI + uvicorn).
+
+    The middleware fronts every configured backend behind a single
+    bearer-token API so the browser never sees provider keys or remote
+    server URLs. Token resolution order: ``--token`` > ``$DSBX_WEB_TOKEN``
+    > ``[web].api_token`` in config.toml.
+
+    Heavy imports live inside the function so the rest of the CLI keeps
+    working on machines that only have the core dependencies installed.
+    """
+    try:
+        import uvicorn  # type: ignore
+    except ImportError as exc:
+        console.print(
+            "[red]dsbx web requires the [bold]web[/bold] extra. "
+            "Install with: [cyan]pip install -e \".[web]\"[/cyan][/red]"
+        )
+        console.print(f"[dim]underlying error: {exc}[/dim]")
+        return 2
+
+    from decoding_sandbox.web.app import make_web_app
+
+    web_cfg = cfg.get("web", default={}) or {}
+    token = (
+        args.token
+        or os.environ.get("DSBX_WEB_TOKEN")
+        or str(web_cfg.get("api_token") or "").strip()
+    )
+    if not token:
+        console.print(
+            "[red]dsbx web requires a bearer token.[/red] Set one via "
+            "[cyan]--token[/cyan], [cyan]$DSBX_WEB_TOKEN[/cyan], or "
+            "[cyan][web].api_token[/cyan] in config.toml. A long random "
+            "string is best (e.g. [dim]openssl rand -hex 32[/dim])."
+        )
+        return 2
+
+    cors_origins = list(web_cfg.get("cors_origins") or [])
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(
+            f"[yellow]warning:[/yellow] binding to [bold]{args.host}[/bold] "
+            "(not loopback). The middleware authenticates requests, but make "
+            "sure the bearer token is strong and the box isn't exposed to "
+            "the public internet."
+        )
+
+    manual_ttl = float(web_cfg.get("manual_session_ttl", 3600.0))
+    app = make_web_app(
+        cfg,
+        token=token,
+        server_label=args.server_label,
+        cors_origins=cors_origins,
+        frontend_dist=args.frontend_dist,
+        manual_ttl_seconds=manual_ttl,
+    )
+
+    console.print(
+        f"[dim]dsbx web {__version__} -- serving on [bold]"
+        f"http://{args.host}:{args.port}[/bold][/dim]"
+    )
+    console.print(
+        f"[dim]bearer token: {token[:4]}...{token[-3:] if len(token) > 8 else ''}"
+        f" ({len(token)} chars)[/dim]"
+    )
+    if args.frontend_dist:
+        console.print(
+            f"[dim]frontend bundle: [cyan]{args.frontend_dist}[/cyan][/dim]"
+        )
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+    return 0
+
+
 def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
     """Long-lived REPL that keeps a backend loaded across commands.
 
@@ -1184,6 +1257,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="uvicorn log verbosity.",
     )
     p_serve.set_defaults(func=cmd_serve)
+
+    p_web = sub.add_parser(
+        "web",
+        help=(
+            "Run the dsbx web middleware (FastAPI + uvicorn) -- the browser-"
+            "facing API that hides every backend key and URL behind one bearer "
+            "token. Requires the [web] extra."
+        ),
+    )
+    p_web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind address. Default is loopback. The web middleware "
+            "authenticates every request, but pick the bind address with "
+            "intent if you're putting it on a LAN interface."
+        ),
+    )
+    p_web.add_argument("--port", type=int, default=8765)
+    p_web.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Bearer token the browser must send. Defaults to $DSBX_WEB_TOKEN "
+            "and then to [web].api_token in config.toml."
+        ),
+    )
+    p_web.add_argument(
+        "--frontend-dist",
+        default=None,
+        help=(
+            "Path to a built SvelteKit bundle to static-serve at /. If omitted, "
+            "only the JSON API is exposed (e.g. for dev where the frontend is "
+            "served by `pnpm dev` on a different origin)."
+        ),
+    )
+    p_web.add_argument(
+        "--server-label",
+        default="dsbx-web",
+        help=(
+            "Cosmetic label echoed by /api/v1/health and /api/v1/info so an "
+            "operator can tell instances apart in a screenshot."
+        ),
+    )
+    p_web.add_argument(
+        "--log-level",
+        default="info",
+        choices=("critical", "error", "warning", "info", "debug", "trace"),
+        help="uvicorn log verbosity.",
+    )
+    p_web.set_defaults(func=cmd_web)
 
     p_session = sub.add_parser(
         "session",

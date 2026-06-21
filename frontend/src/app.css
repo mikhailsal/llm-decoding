@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    background-color: rgb(2 6 23);
+    color: rgb(226 232 240);
+  }
+
+  *:focus-visible {
+    outline: 2px solid rgb(96 165 250);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5
+           text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply bg-sky-600 hover:bg-sky-500 text-white;
+  }
+  .btn-ghost {
+    @apply bg-slate-800 hover:bg-slate-700 text-slate-100;
+  }
+  .input {
+    @apply w-full rounded-md bg-slate-900 border border-slate-700
+           px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500
+           focus:border-sky-500 focus:outline-none;
+  }
+  .label {
+    @apply block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1;
+  }
+  .card {
+    @apply rounded-lg border border-slate-800 bg-slate-900/60 p-4 shadow-sm;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full bg-slate-800 border border-slate-700
+           px-2 py-0.5 text-xs text-slate-200;
+  }
+  .table-cell {
+    @apply px-2 py-1 align-middle whitespace-nowrap;
+  }
+}
+
+/* Visible-whitespace markers (mirrors decoding_sandbox/cli/render.py).
+ * The renderer wraps each "space" glyph in a tiny dim span so it stands
+ * out without being noisy. ``ws`` for ␣ / ↵ / →, ``special`` for the
+ * magenta highlight on EOS/BOS/PAD/<|...|> token text.
+ */
+.tok-ws {
+  color: rgb(100 116 139);
+  font-weight: 600;
+}
+.tok-special {
+  color: rgb(217 70 239);
+  font-weight: 600;
+}
+.tok-empty {
+  color: rgb(100 116 139);
+  font-style: italic;
+}

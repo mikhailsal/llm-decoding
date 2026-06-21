@@ -81,6 +81,15 @@ _DEFAULTS: dict[str, Any] = {
     #   base_url = "http://192.0.2.42:8000"
     #   timeout = 120.0
     "remote": {},
+    # Web middleware (``dsbx web``). The bearer token defaults to empty so a
+    # misconfigured deployment fails loudly at startup rather than serving
+    # an unauthenticated API. Override via [web] in config.toml or
+    # $DSBX_WEB_TOKEN / --token at the CLI.
+    "web": {
+        "api_token": "",
+        "cors_origins": ["http://localhost:5173"],
+        "manual_session_ttl": 3600,
+    },
     "providers": {
         "fireworks": {
             "base_url": "https://api.fireworks.ai/inference/v1",
