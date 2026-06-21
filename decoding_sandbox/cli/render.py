@@ -7,7 +7,7 @@ problems made this non-obvious before:
 * ``"I"``, ``" I"`` and ``"I "`` are three different tokens, but in a
   column with default padding all three look identical -- whitespace inside
   a cell is indistinguishable from the cell's padding. This module now
-  surfaces leading/trailing whitespace with a visible marker (``·`` for
+  surfaces leading/trailing whitespace with a visible marker (``␣`` for
   spaces) and replaces newlines (``↵``), tabs (``→``) and other control
   bytes (``\\xNN``) with explicit escapes. Internal spaces are left intact
   so normal English text still reads naturally.
@@ -25,7 +25,7 @@ import re
 
 from decoding_sandbox.core.types import TokenCandidate
 
-SPACE_MARK = "·"  # U+00B7 MIDDLE DOT -- narrow, unobtrusive
+SPACE_MARK = "␣"  # U+2423 OPEN BOX -- clear and unambiguous
 NEWLINE_MARK = "↵"
 TAB_MARK = "→"
 EMPTY_MARK = "<empty>"
@@ -84,7 +84,7 @@ def token_repr(
     * Special tokens (``is_special=True`` or text matches ``<|...|>``)
       render in magenta bold with no whitespace mangling -- the token
       already is its own escape sequence.
-    * Leading and trailing runs of spaces become ``·`` markers; internal
+    * Leading and trailing runs of spaces become ``␣`` markers; internal
       spaces are left alone so prose reads naturally.
     * ``\\n`` -> ``↵``, ``\\t`` -> ``→``, other C0 control bytes -> ``\\xNN``.
     * Rich's ``[`` is escaped so token text never accidentally opens a tag.

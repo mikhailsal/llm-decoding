@@ -159,8 +159,8 @@ Tokens that look identical in a column actually differ by leading/trailing
 whitespace -- ``"I"``, ``" I"`` and ``"I "`` are three different ids. The
 renderer surfaces this with explicit markers:
 
-- Leading / trailing spaces -> `·` (one per space), so ` I` reads as `·I`
-  and `I ` reads as `I·`. Internal spaces in prose stay untouched.
+- Leading / trailing spaces -> `␣` (one per space), so ` I` reads as `␣I`
+  and `I ` reads as `I␣`. Internal spaces in prose stay untouched.
 - Newline -> `↵`, tab -> `→`, other control bytes -> `\xNN`.
 - Empty token -> `<empty>` (dim).
 - Special tokens (EOS/BOS/PAD/`<|im_start|>`/`<|endoftext|>`, anything the
@@ -318,7 +318,7 @@ EOS handling), the manual TUI, cloud backends (Fireworks `echo` whole-context
 - **`dsbx session`** REPL that keeps the loaded backend alive across
   multiple commands; one-time 30 s model load is amortized.
 - **Per-command timing/TPS summary** on every heavy path.
-- **Visible-whitespace token rendering** (`·` for leading/trailing spaces,
+- **Visible-whitespace token rendering** (`␣` for leading/trailing spaces,
   `↵` newline, `→` tab, `<empty>` / `<special>`) and magenta highlighting
   for special tokens, so ``"I"`` / ``" I"`` / ``"I "`` never collapse in a
   column.
