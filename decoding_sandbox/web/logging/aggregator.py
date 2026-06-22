@@ -174,17 +174,30 @@ def _detect_shape(frames: list[Any]) -> str:
 def _merge_openai_stream(frames: list[Any]) -> AggregatedStream:
     """Merge a list of OpenAI-style SSE frames into one response body.
 
-    Builds up per-choice ``merged_choices[idx]`` by walking each
-    ``choices[].delta`` and applying:
+    OpenAI-compat streams come in two wire shapes that this merger
+    handles transparently:
 
-    - string keys in :data:`_STRING_MERGE_KEYS` are concatenated;
-    - list keys (notably ``tool_calls``) are deep-merged by ``index``;
-    - everything else overwrites (later frames win, matching what the
-      OpenAI client library does internally).
+    - ``/v1/chat/completions`` (``object: chat.completion.chunk``):
+      each chunk carries ``choices[].delta`` with ``content`` /
+      ``reasoning_content`` / ``tool_calls`` fragments. Concatenate
+      string fragments, deep-merge tool-call list items, overwrite
+      scalars.
+    - ``/v1/completions`` (``object: text_completion``): each chunk
+      carries ``choices[].text`` directly (no ``delta`` object), and
+      optional per-token ``choices[].logprobs`` whose arrays
+      (``tokens``, ``token_logprobs``, ``top_logprobs``,
+      ``text_offset``) are length-1 fragments we extend into the full
+      record the non-streaming endpoint would have returned. Fireworks'
+      ``gpt-oss-*`` family streams this way (see
+      ``decoding_sandbox/backends/openai_compat.py``: ``stream_native``
+      always hits ``/completions`` when the provider exposes it,
+      because that's the only OpenAI endpoint with prompt logprobs).
 
-    ``usage`` blocks on any frame are kept (last write wins). The model
-    name reported on the chunks themselves is captured for the
-    log row's ``model_resolved`` field.
+    ``usage`` blocks on any frame are kept (last write wins). The
+    final assembled body is dispatched to ``choices[].text`` shape
+    (legacy completions) or ``choices[].message`` shape (chat
+    completions) based on the ``object`` field, falling back to the
+    presence of ``text`` in any merged choice.
     """
     out = AggregatedStream()
     out.chunks = list(frames)
@@ -204,29 +217,43 @@ def _merge_openai_stream(frames: list[Any]) -> AggregatedStream:
             if not isinstance(choice, dict):
                 continue
             idx = int(choice.get("index", 0))
-            delta = choice.get("delta") or {}
+            merged = merged_choices.setdefault(idx, {})
+
+            delta = choice.get("delta")
             if isinstance(delta, dict):
                 _merge_delta(merged_choices, idx, delta)
+
+            text = choice.get("text")
+            if isinstance(text, str):
+                merged["text"] = (merged.get("text") or "") + text
+
+            lp = choice.get("logprobs")
+            if isinstance(lp, dict):
+                existing_lp = merged.setdefault("logprobs", {})
+                _merge_logprobs(existing_lp, lp)
+
             finish = choice.get("finish_reason")
             if finish is not None:
-                merged_choices.setdefault(idx, {})["finish_reason"] = finish
+                merged["finish_reason"] = finish
         usage = frame.get("usage")
         if isinstance(usage, dict):
             usage_data = usage
 
-    # Synthesize the response body.
-    choices_out: list[dict[str, Any]] = []
-    for idx in sorted(merged_choices):
-        merged = merged_choices[idx]
-        finish = merged.pop("finish_reason", None)
-        message = {k: v for k, v in merged.items() if v is not None}
-        message.setdefault("role", "assistant")
-        entry: dict[str, Any] = {"index": idx, "message": message}
-        if finish is not None:
-            entry["finish_reason"] = finish
-        choices_out.append(entry)
+    is_text_completion = (
+        str(extra_fields.get("object", "")).lower() == "text_completion"
+        or any(
+            isinstance(c, dict) and "text" in c and "content" not in c
+            for c in merged_choices.values()
+        )
+    )
+    if is_text_completion:
+        choices_out = _build_text_choices(merged_choices)
+        empty_placeholder = {"index": 0, "text": ""}
+    else:
+        choices_out = _build_chat_choices(merged_choices)
+        empty_placeholder = {"index": 0, "message": {"role": "assistant", "content": ""}}
     if not choices_out and frames:
-        choices_out.append({"index": 0, "message": {"role": "assistant", "content": ""}})
+        choices_out.append(empty_placeholder)
 
     body: dict[str, Any] = dict(extra_fields)
     body["choices"] = choices_out
@@ -240,11 +267,16 @@ def _merge_openai_stream(frames: list[Any]) -> AggregatedStream:
         out.total_tokens = _coerce_int(usage_data.get("total_tokens"))
 
     if choices_out:
-        first_message = choices_out[0].get("message") or {}
-        content = first_message.get("content")
-        if isinstance(content, str) and content:
-            out.completion_text = content
-        finish_reason = choices_out[0].get("finish_reason")
+        first = choices_out[0]
+        text_field = first.get("text")
+        if isinstance(text_field, str) and text_field:
+            out.completion_text = text_field
+        else:
+            first_message = first.get("message") or {}
+            content = first_message.get("content") if isinstance(first_message, dict) else None
+            if isinstance(content, str) and content:
+                out.completion_text = content
+        finish_reason = first.get("finish_reason")
         if isinstance(finish_reason, str):
             out.stop_reason = finish_reason
 
@@ -252,6 +284,73 @@ def _merge_openai_stream(frames: list[Any]) -> AggregatedStream:
     if isinstance(model, str):
         out.model_resolved = model
     return out
+
+
+def _build_chat_choices(merged_choices: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assemble chat-completions-style ``choices[].message`` entries."""
+    choices_out: list[dict[str, Any]] = []
+    for idx in sorted(merged_choices):
+        merged = dict(merged_choices[idx])
+        finish = merged.pop("finish_reason", None)
+        # Drop legacy fields that don't belong in chat-completion shape.
+        merged.pop("text", None)
+        merged.pop("logprobs", None)
+        message = {k: v for k, v in merged.items() if v is not None}
+        message.setdefault("role", "assistant")
+        entry: dict[str, Any] = {"index": idx, "message": message}
+        if finish is not None:
+            entry["finish_reason"] = finish
+        choices_out.append(entry)
+    return choices_out
+
+
+def _build_text_choices(merged_choices: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assemble legacy ``/completions``-style ``choices[].text`` entries.
+
+    The resulting choice dict is shape-compatible with what the
+    non-streaming ``/v1/completions`` endpoint returns -- the same
+    consumer code path can therefore read either a streamed or
+    non-streamed response without branching.
+    """
+    choices_out: list[dict[str, Any]] = []
+    for idx in sorted(merged_choices):
+        merged = merged_choices[idx]
+        entry: dict[str, Any] = {"index": idx, "text": merged.get("text", "")}
+        finish = merged.get("finish_reason")
+        if finish is not None:
+            entry["finish_reason"] = finish
+        lp = merged.get("logprobs")
+        if isinstance(lp, dict) and lp:
+            entry["logprobs"] = lp
+        choices_out.append(entry)
+    return choices_out
+
+
+def _merge_logprobs(target: dict[str, Any], source: dict[str, Any]) -> None:
+    """Extend per-chunk legacy-completions logprobs arrays in place.
+
+    Each streamed chunk carries a one-token-wide ``logprobs`` record:
+
+        {"tokens": ["Hel"], "token_logprobs": [-1.2],
+         "top_logprobs": [{"Hel": -1.2, "He": -2.1}],
+         "text_offset": [42]}
+
+    The non-streaming endpoint returns all of these as parallel arrays
+    across the whole completion, so we concatenate the lists here.
+    Scalar fields (if any provider ever adds them) take the latest
+    value -- matches the OpenAI client library's own behaviour.
+    """
+    for k, v in source.items():
+        if v is None:
+            continue
+        if isinstance(v, list):
+            existing = target.get(k)
+            if isinstance(existing, list):
+                existing.extend(v)
+            else:
+                target[k] = list(v)
+        else:
+            target[k] = v
 
 
 def _merge_delta(merged_choices: dict[int, dict[str, Any]], idx: int, delta: dict[str, Any]) -> None:

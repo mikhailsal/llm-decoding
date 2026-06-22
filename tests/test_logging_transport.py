@@ -230,9 +230,20 @@ async def test_dsbx_sse_stream_merges_into_single_entry(queue_setup):
 # --------------------------------------------------------------------------- #
 # Cancellation: caller closes the stream before exhausting it
 # --------------------------------------------------------------------------- #
-async def test_stream_close_before_completion_records_partial_entry(queue_setup):
+async def test_stream_close_before_completion_is_normal(queue_setup):
+    """Closing the stream without iterating must NOT mark an error.
+
+    SSE consumers (both our remote and openai_compat backends) iterate
+    frame-by-frame and ``return`` the moment they see the terminator
+    frame (``done`` for dsbx, ``[DONE]`` for OpenAI). httpx then exits
+    the response context manager, which closes the stream with bytes
+    still unread on the wire. That is the *normal* SSE flow, not a
+    cancellation -- we want the row to render as a clean 200 with no
+    ``error_message``. (Genuine network errors during iteration still
+    surface as errors; they're caught inside ``_TeeStream.__iter__``
+    and are exercised by other tests.)
+    """
     queue = queue_setup
-    # Two valid frames, then we close the stream early.
     frames = [
         b'data: {"choices":[{"index":0,"delta":{"content":"par"}}]}\n\n',
         b'data: {"choices":[{"index":0,"delta":{"content":"tial"}}]}\n\n',
@@ -261,9 +272,6 @@ async def test_stream_close_before_completion_records_partial_entry(queue_setup)
         json={"model": "x", "messages": []},
     )
     response = transport.handle_request(request)
-    # Close the stream without iterating it. The transport's
-    # TeeStream.close() path emits a log entry for the attempt
-    # regardless of how many bytes were consumed.
     response.stream.close()
 
     entries = await _drain(queue)
@@ -271,9 +279,7 @@ async def test_stream_close_before_completion_records_partial_entry(queue_setup)
     entry = entries[0]
     assert entry.is_streaming is True
     assert entry.response_status_code == 200
-    # We expect the partial-cancellation marker on the error_message
-    # field whenever close() runs before iteration finishes.
-    assert (entry.error_message or "").startswith("stream closed")
+    assert entry.error_message is None
 
 
 # --------------------------------------------------------------------------- #
@@ -319,3 +325,60 @@ def test_aggregate_empty_input_returns_empty_result():
     assert agg.assembled_body is None
     assert agg.chunks == []
     assert agg.completion_text is None
+
+
+def test_aggregate_legacy_completions_stream_stitches_text_and_logprobs():
+    """``/v1/completions`` SSE (object: text_completion) stitches correctly.
+
+    This is the exact shape Fireworks' ``gpt-oss-*`` models stream:
+    each chunk has ``choices[].text`` directly on the choice (no
+    ``delta`` object) and one-token-wide ``logprobs`` arrays. The
+    aggregator must:
+
+    - concatenate every ``text`` fragment into one ``choices[0].text``;
+    - extend every ``logprobs`` array (tokens, token_logprobs,
+      top_logprobs, text_offset) across chunks;
+    - emit ``object: text_completion`` shape (NOT
+      ``choices[].message``);
+    - surface ``completion_text``, ``stop_reason``, and usage as
+      usual.
+    """
+    raw = (
+        b'data: {"id":"cmpl-1","object":"text_completion","model":"gpt-oss-120b",'
+        b'"choices":[{"index":0,"text":"Hel","logprobs":{"tokens":["Hel"],'
+        b'"token_logprobs":[-0.5],"top_logprobs":[{"Hel":-0.5,"He":-1.0}],'
+        b'"text_offset":[0]},"finish_reason":null}]}\n\n'
+        b'data: {"id":"cmpl-1","object":"text_completion","model":"gpt-oss-120b",'
+        b'"choices":[{"index":0,"text":"lo ","logprobs":{"tokens":["lo "],'
+        b'"token_logprobs":[-0.3],"top_logprobs":[{"lo ":-0.3," ":-1.4}],'
+        b'"text_offset":[3]},"finish_reason":null}]}\n\n'
+        b'data: {"id":"cmpl-1","object":"text_completion","model":"gpt-oss-120b",'
+        b'"choices":[{"index":0,"text":"world","logprobs":{"tokens":["world"],'
+        b'"token_logprobs":[-0.1],"top_logprobs":[{"world":-0.1}],'
+        b'"text_offset":[6]},"finish_reason":"length"}],'
+        b'"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    agg = aggregate_stream(raw)
+    assert agg.assembled_body is not None
+    body = agg.assembled_body
+    assert body["object"] == "text_completion"
+
+    choice = body["choices"][0]
+    assert choice["text"] == "Hello world"
+    assert choice["finish_reason"] == "length"
+    assert "message" not in choice
+    lp = choice["logprobs"]
+    assert lp["tokens"] == ["Hel", "lo ", "world"]
+    assert lp["token_logprobs"] == [-0.5, -0.3, -0.1]
+    assert lp["text_offset"] == [0, 3, 6]
+    assert len(lp["top_logprobs"]) == 3
+    assert lp["top_logprobs"][0] == {"Hel": -0.5, "He": -1.0}
+
+    assert agg.completion_text == "Hello world"
+    assert agg.stop_reason == "length"
+    assert agg.prompt_tokens == 5
+    assert agg.completion_tokens == 3
+    assert agg.total_tokens == 8
+    assert agg.model_resolved == "gpt-oss-120b"
+    assert agg.chunks is not None and len(agg.chunks) == 3

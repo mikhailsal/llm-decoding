@@ -405,18 +405,29 @@ class _TeeStream(SyncByteStream, AsyncByteStream):
             self._finish(error=None)
 
     def close(self) -> None:
-        # Called by httpx when the response context manager exits.
-        # If the iterator never finished (e.g. caller aborted), record a
-        # partial entry so the log still has a row for the attempt.
+        """Called when the response context manager exits.
+
+        SSE consumers in this codebase typically iterate frame-by-frame
+        and ``return`` the moment they see the terminator (``done`` for
+        dsbx, ``[DONE]`` for OpenAI); httpx then closes the response,
+        which lands here with unread bytes still on the wire. That is
+        the *normal* SSE flow, not a cancellation -- we already have
+        every byte the consumer actually pulled, which is exactly what
+        we want to log. So if no log entry has been emitted yet, emit
+        one with ``error=None``. Genuine mid-stream failures still get
+        an ``error_message``: they're caught inside ``__iter__`` /
+        ``__aiter__`` BEFORE close() runs, and that path is the only
+        one that sets the error field.
+        """
         if not self._emitted:
-            self._finish(error="stream closed before completion")
+            self._finish(error=None)
         inner_close = getattr(self._inner, "close", None)
         if callable(inner_close):
             inner_close()
 
     async def aclose(self) -> None:
         if not self._emitted:
-            self._finish(error="stream closed before completion")
+            self._finish(error=None)
         inner_aclose = getattr(self._inner, "aclose", None)
         if callable(inner_aclose):
             await inner_aclose()
