@@ -684,6 +684,9 @@ def test_stream_native_retries_initial_429(monkeypatch) -> None:
         ],
     )
 
+    sink = {"requests": 0}
+    backend.set_active_usage(sink)
+
     steps = list(
         backend.stream_native(
             "p",
@@ -695,6 +698,11 @@ def test_stream_native_retries_initial_429(monkeypatch) -> None:
     )
     assert len(steps) == 1
     assert sleeps == [pytest.approx(0.2)]
+    # Both the 429 attempt and the successful retry must show up in the
+    # request counter, matching how ``_request`` counts non-streaming
+    # retries -- otherwise a user fighting RPS limits sees stable "1
+    # request" even when we're retrying for them under the hood.
+    assert sink["requests"] == 2
 
 
 # Smoke-test: MockResponse honors its new headers kwarg without breaking
@@ -880,6 +888,12 @@ def test_stream_native_records_usage_from_final_chunk(monkeypatch) -> None:
     assert sink["prompt_tokens"] == 5
     assert sink["completion_tokens"] == 1
     assert sink["total_tokens"] == 6
+    # Critical: the streaming path opens one HTTP connection -- the
+    # ``requests`` counter MUST tick. Earlier this was zero because
+    # ``_iter_completions_stream`` bypassed ``_request`` and never
+    # called ``record_request`` itself, so the UI happily reported
+    # "0 requests, 20 tokens" for a perfectly working native stream.
+    assert sink["requests"] == 1
 
 
 def test_set_active_usage_clear_stops_accounting(monkeypatch) -> None:

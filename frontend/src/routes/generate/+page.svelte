@@ -56,6 +56,17 @@
     $info.info?.backends.find((b) => b.name === backend) ?? null
   );
 
+  // Cloud OpenAI-compat providers (Fireworks, NIM, OpenRouter, LM Studio)
+  // always halt on the model's EOS token -- no documented field lets us
+  // tell the server "keep generating past EOS". We honestly disable the
+  // ``respect EOS`` toggle for those backends and pin it to ``true``, so
+  // the UI never offers an option the upstream silently won't honor.
+  // Local (HF / llamacpp_py) and remote-dsbx backends keep the toggle.
+  let respectEosLocked = $derived<boolean>(backendInfo?.family === 'cloud');
+  $effect(() => {
+    if (respectEosLocked && !respectEos) respectEos = true;
+  });
+
   onMount(async () => {
     if (!$info.info) await info.refresh();
     backend = $info.info?.default_backend ?? '';
@@ -254,9 +265,24 @@
     <ChipInput bind:values={stopTexts} label="Stop text" placeholder="e.g. '.'" />
     <ChipInput bind:values={stopIds} label="Stop ids" placeholder="token id" preserveSpace={false} />
     <div class="space-y-2">
-      <label class="flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={respectEos} class="accent-sky-500" />
+      <label
+        class="flex items-center gap-2 text-sm {respectEosLocked
+          ? 'text-slate-500 cursor-not-allowed'
+          : ''}"
+        title={respectEosLocked
+          ? 'Cloud OpenAI-compat providers always halt on EOS; this option has no effect there.'
+          : ''}
+      >
+        <input
+          type="checkbox"
+          bind:checked={respectEos}
+          class="accent-sky-500"
+          disabled={respectEosLocked}
+        />
         respect EOS
+        {#if respectEosLocked}
+          <span class="text-[10px] uppercase tracking-wider text-slate-600">cloud-only: always on</span>
+        {/if}
       </label>
       <label class="flex items-center gap-2 text-sm">
         <input type="checkbox" bind:checked={includePrompt} class="accent-sky-500" />

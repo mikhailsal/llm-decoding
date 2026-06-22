@@ -651,6 +651,13 @@ class OpenAICompatBackend(Backend):
         # stream. Once we've started reading bytes, the wire is committed.
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
+            # Count every attempt to open the stream, matching what
+            # ``_request`` does for non-streaming calls. Without this
+            # the happy path (one streaming POST, no retry) reported
+            # ``requests=0`` to the UI -- making the "0 requests, 20
+            # tokens" miracle look like our accounting was broken
+            # rather than just an unincremented counter on this path.
+            usage_mod.record_request(self._active_usage)
             try:
                 stream_cm = self._client.stream("POST", "/completions", json=body)
             except Exception as exc:  # noqa: BLE001
