@@ -140,7 +140,7 @@ def make_web_app(
         dependencies=[Depends(require_bearer)],
     )
     def tokenize(req: S.TokenizeRequest) -> S.TokenizeResponse:
-        with _use_backend(registry, req.backend) as backend:
+        with _use_backend(registry, req.backend, model=req.model) as backend:
             ids = backend.tokenize(req.text)
         return S.TokenizeResponse(ids=[int(i) for i in ids])
 
@@ -151,7 +151,7 @@ def make_web_app(
         dependencies=[Depends(require_bearer)],
     )
     def detokenize(req: S.DetokenizeRequest) -> S.DetokenizeResponse:
-        with _use_backend(registry, req.backend) as backend:
+        with _use_backend(registry, req.backend, model=req.model) as backend:
             text = backend.detokenize(list(req.ids))
         return S.DetokenizeResponse(text=text)
 
@@ -162,7 +162,7 @@ def make_web_app(
         dependencies=[Depends(require_bearer)],
     )
     def piece(req: S.PieceRequest) -> S.PieceResponse:
-        with _use_backend(registry, req.backend) as backend:
+        with _use_backend(registry, req.backend, model=req.model) as backend:
             text = backend.piece(int(req.id))
         return S.PieceResponse(text=text)
 
@@ -174,7 +174,7 @@ def make_web_app(
         dependencies=[Depends(require_bearer)],
     )
     def inspect(req: S.InspectRequest) -> S.InspectResponse:
-        with _use_backend(registry, req.backend) as backend:
+        with _use_backend(registry, req.backend, model=req.model) as backend:
             watches = _resolve_watches(
                 backend,
                 texts=list(req.watch_texts or []),
@@ -242,7 +242,7 @@ def make_web_app(
         # the lock for the whole stream when we're going to acquire it again
         # in stream_generate -- so we tokenize under the lock, release, then
         # stream (the registry's per-backend lock is re-entered there).
-        backend_holder = _use_backend(registry, req.backend)
+        backend_holder = _use_backend(registry, req.backend, model=req.model)
         with backend_holder as backend:
             stop_ids = list(req.stop_ids or [])
             for s in req.stop_texts or []:
@@ -253,7 +253,7 @@ def make_web_app(
         # Now start the stream. The streaming body acquires the lock again
         # for its duration so the stream is internally consistent.
         def _body():
-            with _use_backend(registry, req.backend) as backend:
+            with _use_backend(registry, req.backend, model=req.model) as backend:
                 yield from stream_generate(
                     backend,
                     prompt=req.prompt,
@@ -265,6 +265,7 @@ def make_web_app(
                     stop_ids=[int(i) for i in stop_ids],
                     seed=int(req.seed),
                     respect_eos=bool(req.respect_eos),
+                    include_prompt=bool(req.include_prompt),
                 )
 
         return StreamingResponse(
@@ -284,8 +285,10 @@ def make_web_app(
         dependencies=[Depends(require_bearer)],
     )
     def manual_create(req: S.ManualCreateRequest) -> S.ManualSnapshot:
-        with _use_backend(registry, req.backend) as backend:
-            entry = sessions.create(req.backend, backend, req.prompt, top_k=int(req.top_k))
+        with _use_backend(registry, req.backend, model=req.model) as backend:
+            entry = sessions.create(
+                req.backend, backend, req.prompt, top_k=int(req.top_k), model=req.model
+            )
             return _snapshot(backend, entry)
 
     @app.get(
@@ -296,7 +299,7 @@ def make_web_app(
     )
     def manual_get(sid: str) -> S.ManualSnapshot:
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             return _snapshot(backend, entry)
 
     @app.post(
@@ -307,9 +310,9 @@ def make_web_app(
     )
     def manual_pick(sid: str, req: S.ManualPickRequest) -> S.ManualSnapshot:
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             try:
-                entry.session.pick(int(req.rank))
+                entry.pick(int(req.rank))
             except IndexError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return _snapshot(backend, entry)
@@ -327,16 +330,16 @@ def make_web_app(
                 detail="force requires exactly one of {text, id}",
             )
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             if not backend.capabilities.can_force_token:
                 raise HTTPException(
                     status_code=400,
                     detail=(f"backend {backend.capabilities.name!r} cannot force arbitrary tokens"),
                 )
             if req.text is not None:
-                entry.session.force_text(req.text)
+                entry.force_text(req.text)
             else:
-                entry.session.force_id(int(req.id))
+                entry.force_id(int(req.id))
             return _snapshot(backend, entry)
 
     @app.post(
@@ -347,8 +350,8 @@ def make_web_app(
     )
     def manual_undo(sid: str) -> S.ManualSnapshot:
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
-            entry.session.undo()
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
+            entry.undo()
             return _snapshot(backend, entry)
 
     @app.post(
@@ -361,7 +364,7 @@ def make_web_app(
         if req.top_k < 1:
             raise HTTPException(status_code=400, detail="top_k must be >= 1")
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             entry.session.top_k = int(req.top_k)
             return _snapshot(backend, entry)
 
@@ -373,7 +376,7 @@ def make_web_app(
     )
     def manual_transcript(sid: str) -> S.ManualTranscript:
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             data = transcript_to_dict(entry, backend=backend)
         return S.ManualTranscript(**data)
 
@@ -385,7 +388,7 @@ def make_web_app(
     )
     def manual_load(sid: str, payload: S.ManualTranscript) -> S.ManualSnapshot:
         entry = _get_session_or_404(sessions, sid)
-        with _use_backend(registry, entry.backend_name) as backend, entry.lock:
+        with _use_backend(registry, entry.backend_name, model=entry.model) as backend, entry.lock:
             load_transcript_into_session(entry, payload.model_dump())
             return _snapshot(backend, entry)
 
@@ -419,8 +422,8 @@ def make_web_app(
         # Build now so we can return a 400 (instead of a half-streamed body)
         # if the names are unknown.
         try:
-            target_backend = registry.ensure_loaded(target_name)
-            draft_backend = registry.ensure_loaded(draft_name)
+            target_backend = registry.ensure_loaded(target_name, model=req.target_model)
+            draft_backend = registry.ensure_loaded(draft_name, model=req.draft_model)
         except LookupError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
@@ -510,10 +513,16 @@ def make_web_app(
 # --------------------------------------------------------------------------- #
 # Internal helpers
 # --------------------------------------------------------------------------- #
-def _use_backend(registry: BackendRegistry, name: str):
-    """``with _use_backend(...) as backend:`` -- lock + load."""
+def _use_backend(registry: BackendRegistry, name: str, model: str | None = None):
+    """``with _use_backend(...) as backend:`` -- lock + load.
+
+    ``model`` is honored only for cloud providers (see
+    :meth:`BackendRegistry.use`); other families ignore it but won't error,
+    so callers can pass the request's ``model`` field through without
+    branching on family.
+    """
     try:
-        return registry.use(name)
+        return registry.use(name, model=model)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except LookupError as exc:
@@ -537,6 +546,12 @@ def _snapshot(backend: Backend, entry) -> S.ManualSnapshot:
     sess = entry.session
     dist: StepResult = sess.distribution()
     text = backend.detokenize(list(sess.generated_ids)) if sess.generated_ids else ""
+    # Pad probs to match ids in case a transcript-load left them short.
+    probs: list[float | None] = list(entry.generated_probs)
+    while len(probs) < len(sess.generated_ids):
+        probs.append(None)
+    probs = probs[: len(sess.generated_ids)]
+    pieces: list[str] = [backend.piece(int(tid)) for tid in sess.generated_ids]
     return S.ManualSnapshot(
         session_id=entry.session_id,
         backend=entry.backend_name,
@@ -547,6 +562,9 @@ def _snapshot(backend: Backend, entry) -> S.ManualSnapshot:
         top_k=int(sess.top_k),
         distribution=step_to_wire(dist),
         can_force_token=bool(backend.capabilities.can_force_token),
+        generated_probs=probs,
+        generated_pieces=pieces,
+        model=getattr(entry, "model", None),
     )
 
 

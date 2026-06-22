@@ -25,15 +25,17 @@ session.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.manual import ManualSession
+from decoding_sandbox.core.types import TokenCandidate
 
 log = logging.getLogger("decoding_sandbox.web.sessions")
 
@@ -46,7 +48,20 @@ DEFAULT_MAX_SESSIONS = 64
 
 @dataclass
 class _Entry:
-    """One row in the registry."""
+    """One row in the registry.
+
+    ``generated_probs`` mirrors ``session.generated_ids`` element-wise:
+    each slot is the *linear* probability of the token at the moment the
+    user picked it (``exp(logprob)`` clamped to ``[0, 1]``), or ``None``
+    when the token was forced and therefore has no associated rank in the
+    original distribution. The browser uses this list to color the
+    running completion text by per-token confidence -- the same buckets
+    the inspect/generate tables use.
+
+    ``model`` is purely informational: the cloud-provider model name the
+    session was created with (so the UI can round-trip it in transcripts
+    and the load-snapshot reflects what's running).
+    """
 
     session_id: str
     backend_name: str
@@ -54,6 +69,47 @@ class _Entry:
     lock: threading.Lock
     created_at: float
     last_used: float
+    generated_probs: list[float | None] = field(default_factory=list)
+    model: str | None = None
+
+    # ------------------------------------------------- mutation helpers
+    # These wrap the underlying ManualSession actions so the probs list
+    # stays in lockstep with generated_ids. The routes call these (not
+    # ``session.pick`` directly) so we have a single place that records
+    # the bookkeeping.
+    def pick(self, rank: int) -> TokenCandidate:
+        cand = self.session.pick(int(rank))
+        self.generated_probs.append(_prob_from_logprob(cand.logprob))
+        return cand
+
+    def force_text(self, text: str) -> list[TokenCandidate]:
+        out = self.session.force_text(text)
+        for _ in out:
+            self.generated_probs.append(None)
+        return out
+
+    def force_id(self, token_id: int) -> TokenCandidate:
+        cand = self.session.force_id(int(token_id))
+        self.generated_probs.append(None)
+        return cand
+
+    def undo(self) -> int | None:
+        result = self.session.undo()
+        if result is not None and self.generated_probs:
+            self.generated_probs.pop()
+        return result
+
+
+def _prob_from_logprob(logprob: float) -> float | None:
+    """``exp(logprob)`` -> linear prob, with NaN/inf -> ``None``.
+
+    Mirrors the wire convention: a ``None`` slot means "we don't know the
+    probability for this token" (forced tokens or backends that don't
+    return a finite logprob for a low-ranked candidate).
+    """
+    if not math.isfinite(logprob):
+        return None
+    return float(math.exp(logprob))
 
 
 class ManualSessionRegistry:
@@ -81,6 +137,7 @@ class ManualSessionRegistry:
         prompt: str,
         *,
         top_k: int = 12,
+        model: str | None = None,
     ) -> _Entry:
         """Create a new session and return its entry.
 
@@ -99,6 +156,7 @@ class ManualSessionRegistry:
             lock=threading.Lock(),
             created_at=now,
             last_used=now,
+            model=model,
         )
         with self._mu:
             # Evict the oldest entry if we're at the cap. We choose the
@@ -183,6 +241,7 @@ def transcript_to_dict(entry: _Entry, *, backend: Backend) -> dict:
         if sess.generated_ids
         else "",
         "top_k": sess.top_k,
+        "model": entry.model,
     }
 
 
@@ -194,6 +253,12 @@ def load_transcript_into_session(entry: _Entry, payload: dict) -> None:
     is informational -- we do NOT switch backends here. The UI is expected
     to pre-select a matching backend before invoking load (mirrors the CLI's
     save/load which is tied to the running session's backend).
+
+    The per-token ``generated_probs`` list is *reset* to ``None`` for every
+    loaded token: transcripts are token-id-only by design (the saved file
+    doesn't include logprobs), so the UI shows neutral-colored tokens
+    until the user picks new ones. Picks made after load will be colored
+    normally.
     """
     sess = entry.session
     sess.prompt = str(payload.get("prompt", sess.prompt))
@@ -204,6 +269,9 @@ def load_transcript_into_session(entry: _Entry, payload: dict) -> None:
             sess.top_k = int(payload["top_k"])
         except (TypeError, ValueError):
             pass
+    entry.generated_probs = [None for _ in sess.generated_ids]
+    if "model" in payload and payload["model"] is not None:
+        entry.model = str(payload["model"])
 
 
 def write_transcript(path: str | Path, data: dict) -> None:

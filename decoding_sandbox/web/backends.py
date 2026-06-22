@@ -49,17 +49,32 @@ class _BackendEntry:
     set when a list-time check (e.g. missing API key for a cloud provider)
     can predict that the backend can't be used; the UI then shows it as
     disabled with that reason in a tooltip.
+
+    ``instance`` is the default-model instance (used for non-cloud families
+    and as the fallback when a cloud caller doesn't specify a model).
+    ``cloud_variants`` is the per-(model) cache used only by cloud providers
+    where the user can pick a different model per request -- those
+    backends are cheap to construct (one ``httpx.Client``) so a tiny LRU
+    of recently-seen names beats reloading on every request.
+
+    The single ``lock`` covers *all* variants of the same logical backend
+    name; that's intentional. Two concurrent generates on the same cloud
+    provider with two different models would still hit the same upstream
+    rate-limit bucket, so serializing them keeps the load predictable.
     """
 
     name: str
     family: str  # "remote" | "cloud" | "local"
     instance: Backend | None = None
+    cloud_variants: dict[str, Backend] = None  # type: ignore[assignment]
     lock: threading.Lock = None  # type: ignore[assignment]
     unavailable_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.lock is None:
             self.lock = threading.Lock()
+        if self.cloud_variants is None:
+            self.cloud_variants = {}
 
 
 class BackendRegistry:
@@ -124,6 +139,7 @@ class BackendRegistry:
                 except Exception:  # noqa: BLE001
                     caps = None
             label = self._public_label(entry)
+            loaded_model, suggested, editable = self._public_model_info(entry)
             out.append(
                 BackendInfo(
                     name=entry.name,
@@ -132,9 +148,50 @@ class BackendRegistry:
                     capabilities=caps,
                     available=not entry.unavailable_reason,
                     note=entry.unavailable_reason,
+                    loaded_model=loaded_model,
+                    suggested_models=suggested,
+                    model_editable=editable,
                 )
             )
         return out
+
+    def _public_model_info(self, entry: _BackendEntry) -> tuple[str | None, list[str], bool]:
+        """Compute (loaded_model, suggested_models, model_editable) for a row.
+
+        We compute this from *static* config wherever possible so the
+        listing endpoint stays cheap (no network calls). For an
+        already-loaded ``remote`` backend we DO have a cached
+        ``loaded_model`` string from the upstream ``/v1/info`` response
+        that came back at first construction, so we surface that too.
+        """
+        if entry.family == "cloud":
+            prov = self._cfg.providers.get(entry.name)
+            if prov is None:
+                return None, [], False
+            return prov.default_model, prov.known_models(), True
+        if entry.family == "remote":
+            # If the remote is already loaded we know exactly what's running;
+            # otherwise we don't know (the upstream hasn't been pinged yet)
+            # and leave it null -- the browser shows "unknown until loaded".
+            loaded = None
+            if entry.instance is not None:
+                loaded = getattr(entry.instance, "loaded_model", None)
+            return loaded, ([loaded] if loaded else []), False
+        # family == "local"
+        if entry.name == "hf":
+            hf_cfg = self._cfg.get("local", "hf", default={})
+            model = hf_cfg.get("model")
+            return model, ([model] if model else []), False
+        if entry.name == "llamacpp":
+            lc_cfg = self._cfg.get("local", "llamacpp", default={})
+            model = lc_cfg.get("model")
+            return model, ([model] if model else []), False
+        if entry.name == "llamacpp-py":
+            lp_cfg = self._cfg.get("local", "llamacpp_py", default={})
+            glob = lp_cfg.get("model_glob") or ""
+            model = lp_cfg.get("model_path") or glob.replace("**/", "")
+            return model, ([model] if model else []), False
+        return None, [], False
 
     @staticmethod
     def _public_label(entry: _BackendEntry) -> str:
@@ -159,33 +216,57 @@ class BackendRegistry:
             raise KeyError(f"unknown backend {name!r}")
         return self._entries[name]
 
-    def ensure_loaded(self, name: str) -> Backend:
+    def ensure_loaded(self, name: str, model: str | None = None) -> Backend:
         """Load the backend on first use; reuse on every subsequent call.
+
+        For non-cloud families ``model`` is ignored (changing the model in
+        an HF / llamacpp-py / remote backend means reloading or restarting
+        a remote process, which the middleware deliberately does NOT do
+        silently). For cloud providers a fresh ``OpenAICompatBackend`` is
+        cached per distinct ``model`` string; absent ``model`` defaults to
+        the provider's ``default_model``.
 
         Heavy local engines (HF, llamacpp-py) print a load banner to stderr
         but never to the response body so the browser stays oblivious.
         """
         entry = self.get(name)
+        if entry.unavailable_reason:
+            # Surface the *category* of the problem (missing key) but
+            # not the value: "missing FIREWORKS_API_KEY" is fine; an
+            # actual key would obviously not be.
+            raise LookupError(f"backend {name!r} is unavailable: {entry.unavailable_reason}")
+
+        if entry.family == "cloud" and model:
+            # Reuse if we've already built this model variant.
+            cached = entry.cloud_variants.get(model)
+            if cached is not None:
+                return cached
+            log.info(
+                "dsbx-web: building cloud backend %r with model %r on first use",
+                name,
+                model,
+            )
+            inst = build_backend(name, self._cfg, model=model)
+            entry.cloud_variants[model] = inst
+            return inst
+
         if entry.instance is None:
-            if entry.unavailable_reason:
-                # Surface the *category* of the problem (missing key) but
-                # not the value: "missing FIREWORKS_API_KEY" is fine; an
-                # actual key would obviously not be.
-                raise LookupError(f"backend {name!r} is unavailable: {entry.unavailable_reason}")
             log.info("dsbx-web: building backend %r on first use", name)
             entry.instance = build_backend(name, self._cfg, model=None)
         return entry.instance
 
-    def use(self, name: str) -> "_LockedBackend":
+    def use(self, name: str, model: str | None = None) -> "_LockedBackend":
         """Context manager that yields the live backend under its lock.
 
         Mirrors the lock usage in ``server/app.py``. The lock is held only
         for the duration of the ``with`` block; SSE generation uses it for
         the entire stream so a parallel ``inspect`` can't corrupt the KV
-        cache mid-decode.
+        cache mid-decode. The lock is per *logical* backend name so two
+        concurrent cloud calls with different models still serialize -- we
+        want the upstream rate-limit bucket to stay predictable.
         """
         entry = self.get(name)
-        backend = self.ensure_loaded(name)
+        backend = self.ensure_loaded(name, model)
         return _LockedBackend(backend, entry.lock)
 
     # ---------------------------------------------------------- lifecycle
@@ -204,6 +285,17 @@ class BackendRegistry:
                     log.warning("dsbx-web: error closing backend %r: %s", entry.name, exc)
                 finally:
                     entry.instance = None
+            for mkey, inst in list(entry.cloud_variants.items()):
+                try:
+                    inst.close()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "dsbx-web: error closing cloud variant %r/%r: %s",
+                        entry.name,
+                        mkey,
+                        exc,
+                    )
+            entry.cloud_variants.clear()
 
     def __enter__(self) -> "BackendRegistry":
         return self

@@ -1,17 +1,22 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import BackendSelect from '$lib/components/BackendSelect.svelte';
+  import ModelInput from '$lib/components/ModelInput.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
+  import TokenInline from '$lib/components/TokenInline.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
-  import type { SpecRound, TokenCandidate } from '$lib/types';
+  import type { BackendInfo, SpecRound, TokenCandidate } from '$lib/types';
 
   let targetBackend = $state('');
   let draftBackend = $state('');
+  let targetModel = $state('');
+  let draftModel = $state('');
   let prompt = $state('The capital of France is');
   let gamma = $state(4);
   let maxTokens = $state(24);
+  let showMarkers = $state(true);
   let rounds = $state<SpecRound[]>([]);
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -23,12 +28,33 @@
   } | null>(null);
   let cancelFn: (() => void) | null = null;
 
+  let targetBackendInfo = $derived<BackendInfo | null>(
+    $info.info?.backends.find((b) => b.name === targetBackend) ?? null
+  );
+  let draftBackendInfo = $derived<BackendInfo | null>(
+    $info.info?.backends.find((b) => b.name === draftBackend) ?? null
+  );
+
   onMount(async () => {
     if (!$info.info) await info.refresh();
     const localHf = $info.info?.backends.find((b) => b.name === 'hf')?.name;
     targetBackend = localHf ?? $info.info?.default_backend ?? '';
     draftBackend = $info.info?.backends.find((b) => b.name !== targetBackend)?.name ?? '';
+    targetModel = targetBackendInfo?.loaded_model ?? '';
+    draftModel = draftBackendInfo?.loaded_model ?? '';
   });
+
+  function onTargetChange(next: string) {
+    targetBackend = next;
+    const b = $info.info?.backends.find((x) => x.name === next) ?? null;
+    targetModel = b?.loaded_model ?? '';
+  }
+
+  function onDraftChange(next: string) {
+    draftBackend = next;
+    const b = $info.info?.backends.find((x) => x.name === next) ?? null;
+    draftModel = b?.loaded_model ?? '';
+  }
 
   async function run() {
     error = null;
@@ -38,6 +64,8 @@
     const stream = apiStream('/api/v1/spec/stream', {
       target_backend: targetBackend,
       draft_backend: draftBackend,
+      target_model: targetModel || undefined,
+      draft_model: draftModel || undefined,
       prompt,
       gamma,
       max_tokens: maxTokens
@@ -79,16 +107,18 @@
     </p>
     <BackendSelect
       bind:value={targetBackend}
-      onChange={(v) => (targetBackend = v)}
+      onChange={onTargetChange}
       label="Target"
       id="target"
     />
+    <ModelInput backend={targetBackendInfo} bind:value={targetModel} label="Target model" id="target-model" />
     <BackendSelect
       bind:value={draftBackend}
-      onChange={(v) => (draftBackend = v)}
+      onChange={onDraftChange}
       label="Draft"
       id="draft"
     />
+    <ModelInput backend={draftBackendInfo} bind:value={draftModel} label="Draft model" id="draft-model" />
     <div>
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" rows="3" class="input font-mono" bind:value={prompt}></textarea>
@@ -103,6 +133,10 @@
         <input id="mt" type="number" min="1" max="200" class="input" bind:value={maxTokens} />
       </div>
     </div>
+    <label class="flex items-center gap-2 text-sm">
+      <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />
+      show whitespace markers (<span class="font-mono">␣ ↵ →</span>)
+    </label>
     <button class="btn btn-primary w-full" onclick={run} disabled={busy || !targetBackend || !draftBackend}>
       {busy ? 'streaming…' : 'speculate'}
     </button>
@@ -111,8 +145,12 @@
   <div class="lg:col-span-2 space-y-3">
     {#if summary}
       <div class="card text-sm">
-        <div class="font-mono text-slate-200 whitespace-pre-wrap">
-          {prompt}<span class="text-sky-300">{summary.completion}</span>
+        <div class="font-mono text-slate-200 whitespace-pre-wrap leading-relaxed">
+          <span class="text-slate-400">{prompt}</span><TokenInline
+            text={summary.completion}
+            showMarkers={showMarkers}
+            bgClass="bg-sky-500/20 text-sky-100"
+          />
         </div>
         <div class="text-xs text-slate-500 mt-2">
           {summary.total_accepted} of {summary.total_proposed} drafts accepted
@@ -134,12 +172,20 @@
                     : 'bg-rose-500/20 border-rose-500/40 text-rose-200'}"
                   title={accepted ? 'accepted by target' : 'rejected'}
                 >
-                  <TokenText text={p.text} isSpecial={p.is_special} className="font-mono text-xs" />
+                  {#if showMarkers}
+                    <TokenText text={p.text} isSpecial={p.is_special} className="font-mono text-xs" />
+                  {:else}
+                    <span class="font-mono text-xs">{p.text || '<empty>'}</span>
+                  {/if}
                 </span>
               {/each}
               {#if r.correction}
                 <span class="chip bg-sky-500/20 border-sky-500/40 text-sky-200" title="target correction / bonus">
-                  +<TokenText text={r.correction.text} isSpecial={r.correction.is_special} className="font-mono text-xs" />
+                  +{#if showMarkers}
+                    <TokenText text={r.correction.text} isSpecial={r.correction.is_special} className="font-mono text-xs" />
+                  {:else}
+                    <span class="font-mono text-xs">{r.correction.text || '<empty>'}</span>
+                  {/if}
                 </span>
               {/if}
             </div>

@@ -141,3 +141,25 @@ def test_construction_rejects_empty_token(env_with_secret) -> None:
     cfg = make_test_config()
     with pytest.raises(ValueError, match="non-empty"):
         make_web_app(cfg, token="")
+
+
+def test_info_exposes_loaded_model_and_suggestions(app) -> None:
+    """The browser needs ``loaded_model`` + ``suggested_models`` to render a
+    proper model picker; cloud providers are the only ``model_editable``
+    family today."""
+    with make_authed_client(app) as c:
+        r = c.get("/api/v1/info")
+    rows = {b["name"]: b for b in r.json()["backends"]}
+    # Cloud providers: editable, advertise their default and any extras.
+    fw = rows["fireworks"]
+    assert fw["model_editable"] is True
+    assert fw["loaded_model"] == "fireworks/default-model"
+    assert fw["loaded_model"] in fw["suggested_models"]
+    nim = rows["nim"]
+    assert nim["model_editable"] is True
+    assert nim["loaded_model"] == "nim/default-model"
+    # Remote: not editable, listing carries no model until the upstream is
+    # actually contacted (the test app never hits the wire so loaded_model
+    # stays null here; the UI shows "unknown until loaded").
+    wp = rows["dsbx-host-py"]
+    assert wp["model_editable"] is False

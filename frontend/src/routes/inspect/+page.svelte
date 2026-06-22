@@ -1,30 +1,52 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import BackendSelect from '$lib/components/BackendSelect.svelte';
+  import ModelInput from '$lib/components/ModelInput.svelte';
   import CapabilityBadges from '$lib/components/CapabilityBadges.svelte';
   import ChipInput from '$lib/components/ChipInput.svelte';
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
+  import TokenInline from '$lib/components/TokenInline.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { ApiError, apiFetch } from '$lib/api';
   import { info } from '$lib/stores/info';
-  import { fmtProb } from '$lib/render';
-  import type { InspectResponse, StepResult, Watched, TokenCandidate } from '$lib/types';
+  import { probFromLogprob, tokenBackgroundClass } from '$lib/render';
+  import type {
+    BackendInfo,
+    InspectResponse,
+    StepResult,
+    Watched,
+    TokenCandidate
+  } from '$lib/types';
 
   let backend = $state<string>('');
+  let model = $state<string>('');
   let prompt = $state('The capital of France is Paris');
   let topK = $state(5);
+  let altCount = $state(5);
   let watchTexts = $state<string[]>([]);
   let watchIds = $state<string[]>([]);
   let watchEos = $state(false);
+  let showMarkers = $state(true);
   let busy = $state(false);
   let result = $state<InspectResponse | null>(null);
   let error = $state<string | null>(null);
 
+  let backendInfo = $derived<BackendInfo | null>(
+    $info.info?.backends.find((b) => b.name === backend) ?? null
+  );
+
   onMount(async () => {
     if (!$info.info) await info.refresh();
     backend = $info.info?.default_backend ?? '';
+    model = backendInfo?.loaded_model ?? '';
   });
+
+  function onBackendChange(next: string) {
+    info.select(next);
+    const b = $info.info?.backends.find((x) => x.name === next) ?? null;
+    model = b?.loaded_model ?? '';
+  }
 
   function watchedById(step: StepResult, id: number): TokenCandidate | null {
     const w = step.watched.find((x: Watched) => x.token_id === id);
@@ -43,6 +65,7 @@
         method: 'POST',
         body: JSON.stringify({
           backend,
+          model: model || undefined,
           prompt,
           top_k: topK,
           watch_texts: watchTexts,
@@ -69,7 +92,8 @@
       Score the next-token distribution at every position of the prompt.
       Mirrors <span class="font-mono">dsbx inspect</span>.
     </p>
-    <BackendSelect bind:value={backend} onChange={(v) => info.select(v)} />
+    <BackendSelect bind:value={backend} onChange={onBackendChange} />
+    <ModelInput backend={backendInfo} bind:value={model} />
     <CapabilityBadges backend={backend} />
     <div>
       <label class="label" for="prompt">Prompt</label>
@@ -80,9 +104,15 @@
         bind:value={prompt}
       ></textarea>
     </div>
-    <div>
-      <label class="label" for="topk">top_k</label>
-      <input id="topk" type="number" min="1" max="50" class="input w-24" bind:value={topK} />
+    <div class="grid grid-cols-2 gap-2">
+      <div>
+        <label class="label" for="topk">top_k (fetched)</label>
+        <input id="topk" type="number" min="1" max="50" class="input" bind:value={topK} />
+      </div>
+      <div>
+        <label class="label" for="alt">alternatives shown</label>
+        <input id="alt" type="number" min="1" max="50" class="input" bind:value={altCount} />
+      </div>
     </div>
     <ChipInput
       bind:values={watchTexts}
@@ -96,10 +126,16 @@
       placeholder="numeric token id"
       preserveSpace={false}
     />
-    <label class="flex items-center gap-2 text-sm">
-      <input type="checkbox" bind:checked={watchEos} class="accent-sky-500" />
-      Watch EOS tokens
-    </label>
+    <div class="space-y-2">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={watchEos} class="accent-sky-500" />
+        Watch EOS tokens
+      </label>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />
+        show whitespace markers (<span class="font-mono">␣ ↵ →</span>)
+      </label>
+    </div>
     <button class="btn btn-primary w-full" onclick={run} disabled={busy || !backend || !prompt}>
       {busy ? 'inspecting…' : 'run inspect'}
     </button>
@@ -113,20 +149,41 @@
       </div>
     {/if}
     {#if result}
+      <div class="card">
+        <div class="text-xs uppercase tracking-wider text-slate-500 mb-1">
+          prompt as scored (background = chosen-token confidence)
+        </div>
+        <div class="font-mono text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
+          {#each result.steps as step}
+            {@const p = probFromLogprob(step.chosen?.logprob ?? null)}
+            {#if step.chosen}
+              <TokenInline
+                text={step.chosen.text}
+                isSpecial={step.chosen.is_special}
+                showMarkers={showMarkers}
+                bgClass={tokenBackgroundClass(p)}
+                title={`pos ${step.position} · p=${p !== null ? (p * 100).toFixed(2) + '%' : '?'}`}
+              />
+            {/if}
+          {/each}
+        </div>
+      </div>
       <div class="card overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-xs text-slate-400 border-b border-slate-800">
             <tr>
               <th class="table-cell text-left">pos</th>
               <th class="table-cell text-left">token chosen</th>
-              <th class="table-cell text-left">top candidates</th>
+              <th class="table-cell text-left">prob</th>
+              <th class="table-cell text-left">top candidates (rank 1..{altCount})</th>
               {#each result.watches as w}
                 <th class="table-cell text-left">{w.label}</th>
               {/each}
             </tr>
           </thead>
           <tbody>
-            {#each result.steps as step, i}
+            {#each result.steps as step}
+              {@const chosenP = probFromLogprob(step.chosen?.logprob ?? null)}
               <tr class="border-b border-slate-800/60 align-top" data-token-row>
                 <td class="table-cell font-mono text-slate-400">{step.position}</td>
                 <td class="table-cell">
@@ -136,9 +193,10 @@
                     <span class="text-slate-500 text-xs">(predict next)</span>
                   {/if}
                 </td>
+                <td class="table-cell w-40"><ConfidenceBar prob={chosenP} /></td>
                 <td class="table-cell">
                   <div class="space-y-0.5">
-                    {#each step.candidates.slice(0, topK) as c, j}
+                    {#each step.candidates.slice(0, altCount) as c, j}
                       <div class="flex items-center gap-2">
                         <span class="text-xs text-slate-500 font-mono w-6 text-right">{j + 1}.</span>
                         <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />

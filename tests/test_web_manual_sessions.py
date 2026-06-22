@@ -198,6 +198,53 @@ def test_unknown_session_404(client) -> None:
     assert r.status_code == 404
 
 
+def test_snapshot_tracks_generated_probs(client) -> None:
+    """Each ``pick`` records its candidate's linear probability; ``force_id``
+    records ``None``; ``undo`` pops them in lockstep. The browser uses this
+    to color the running completion text -- the same way ``/generate`` does."""
+    import math
+
+    snap = _create(client)
+    sid = snap["session_id"]
+    # First pick: rank 0 is X with prob 0.6.
+    after = client.post(f"/api/v1/manual/sessions/{sid}/pick", json={"rank": 0}).json()
+    assert after["generated_ids"] == [88]
+    assert len(after["generated_probs"]) == 1
+    assert after["generated_probs"][0] == pytest.approx(0.6, abs=1e-6)
+    # Force by id: no associated prob -> None slot.
+    after = client.post(f"/api/v1/manual/sessions/{sid}/force", json={"id": 89}).json()
+    assert after["generated_ids"] == [88, 89]
+    assert after["generated_probs"][1] is None
+    # Undo: probs list stays in lockstep with ids.
+    after = client.post(f"/api/v1/manual/sessions/{sid}/undo").json()
+    assert after["generated_ids"] == [88]
+    assert len(after["generated_probs"]) == 1
+    # Sanity: prob is in [0, 1] and the math.exp(log(0.6)) round-trips.
+    assert 0.0 <= after["generated_probs"][0] <= 1.0
+    assert math.isclose(after["generated_probs"][0], 0.6, abs_tol=1e-6)
+
+
+def test_snapshot_includes_model_field(client) -> None:
+    """The snapshot echoes the ``model`` the session was created with so the
+    UI can round-trip it in transcripts. Plain non-cloud sessions yield
+    ``model=None``."""
+    snap = _create(client)
+    assert snap.get("model") is None
+    r = client.post(
+        "/api/v1/manual/sessions",
+        json={
+            "backend": "dsbx-host-py",
+            "prompt": "ab",
+            "top_k": 5,
+            "model": "ignored-by-non-cloud",
+        },
+    )
+    assert r.status_code == 200
+    # Even though dsbx-host-py ignores the model when building the backend, we
+    # still echo it back so the UI can show "currently set: ...".
+    assert r.json().get("model") == "ignored-by-non-cloud"
+
+
 # --------------------------------------------------------------------------- #
 # Registry-level tests (no HTTP) for TTL + locking
 # --------------------------------------------------------------------------- #

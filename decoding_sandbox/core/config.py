@@ -98,6 +98,12 @@ _DEFAULTS: dict[str, Any] = {
             "max_top_logprobs": 5,
             "supports_prompt_logprobs": True,
             "has_completions": True,
+            "models": [
+                "accounts/fireworks/models/gpt-oss-120b",
+                "accounts/fireworks/models/gpt-oss-20b",
+                "accounts/fireworks/models/llama-v3p1-8b-instruct",
+                "accounts/fireworks/models/qwen2p5-7b-instruct",
+            ],
         },
         "nim": {
             "base_url": "https://integrate.api.nvidia.com/v1",
@@ -106,6 +112,12 @@ _DEFAULTS: dict[str, Any] = {
             "max_top_logprobs": 20,
             "supports_prompt_logprobs": False,
             "has_completions": False,
+            "models": [
+                "meta/llama-3.1-8b-instruct",
+                "meta/llama-3.1-70b-instruct",
+                "mistralai/mistral-7b-instruct-v0.3",
+                "google/gemma-2-9b-it",
+            ],
         },
         "openrouter": {
             "base_url": "https://openrouter.ai/api/v1",
@@ -115,6 +127,12 @@ _DEFAULTS: dict[str, Any] = {
             "supports_prompt_logprobs": False,
             "require_parameters": True,
             "has_completions": False,
+            "models": [
+                "meta-llama/llama-3.1-8b-instruct",
+                "meta-llama/llama-3.1-70b-instruct",
+                "qwen/qwen-2.5-7b-instruct",
+                "google/gemma-2-9b-it",
+            ],
         },
         "lmstudio": {
             "base_url": "http://127.0.0.1:1234/v1",
@@ -123,6 +141,7 @@ _DEFAULTS: dict[str, Any] = {
             "max_top_logprobs": 10,
             "supports_prompt_logprobs": False,
             "has_completions": True,
+            "models": ["local-model"],
         },
     },
 }
@@ -165,9 +184,23 @@ class ProviderConfig:
     # samplers and whole-context echo). Chat-only providers (NIM, OpenRouter)
     # set this False and use /chat/completions for generated-token logprobs.
     has_completions: bool = False
+    # Optional curated list of model names the UI should offer in its picker.
+    # Always includes ``default_model``. The CLI also accepts any model name
+    # via ``--model`` (or `model=` in the wire request), so this is purely
+    # a UX convenience: spelling out the most useful 3-5 names per provider
+    # so the browser doesn't have to know the provider's catalogue.
+    models: list[str] = field(default_factory=list)
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env)
+
+    def known_models(self) -> list[str]:
+        """``default_model`` first, followed by every distinct ``models`` entry."""
+        seen: list[str] = [self.default_model]
+        for m in self.models:
+            if m and m not in seen:
+                seen.append(m)
+        return seen
 
 
 @dataclass
@@ -288,6 +321,7 @@ def load_config(
             supports_prompt_logprobs=bool(pdata.get("supports_prompt_logprobs", False)),
             require_parameters=bool(pdata.get("require_parameters", False)),
             has_completions=bool(pdata.get("has_completions", False)),
+            models=list(pdata.get("models", [])),
         )
 
     remotes: dict[str, RemoteConfig] = {}
@@ -295,7 +329,7 @@ def load_config(
         if not isinstance(rdata, dict) or "base_url" not in rdata:
             raise ValueError(
                 f"[remote.{name}] is missing required key 'base_url' "
-                "(e.g. base_url = \"http://192.0.2.42:8000\")."
+                '(e.g. base_url = "http://192.0.2.42:8000").'
             )
         remotes[name] = RemoteConfig(
             name=name,

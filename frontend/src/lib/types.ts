@@ -24,6 +24,17 @@ export interface BackendInfo {
   capabilities: Capabilities | null;
   available: boolean;
   note: string;
+  // Model the backend is currently running (or its default for deferred-load
+  // backends). Null when unknown (e.g. a remote we haven't pinged yet).
+  loaded_model: string | null;
+  // Picker options for the model dropdown. Cloud providers carry their
+  // curated catalogue here; remote / local backends carry a single-element
+  // list with ``loaded_model``.
+  suggested_models: string[];
+  // Whether the UI lets the user pick a different model per request. Only
+  // cloud providers set this true today; flipping it for a remote backend
+  // would require restarting ``dsbx serve`` on dsbx-host.
+  model_editable: boolean;
 }
 
 export interface InfoResponse {
@@ -96,8 +107,22 @@ export interface GenStep {
   stop_reason: string | null;
 }
 
+export interface PromptScorePayload {
+  steps: StepResult[];
+  is_full_vocab: boolean;
+  prompt_logprobs: boolean;
+  note: string;
+}
+
 export type SSEEvent =
   | { event: 'step'; step: GenStep }
+  | {
+      event: 'prompt_score';
+      steps: StepResult[];
+      is_full_vocab: boolean;
+      prompt_logprobs: boolean;
+      note: string;
+    }
   | { event: 'done'; stop_reason: string | null; error?: string | null }
   | { event: 'round'; round: SpecRound }
   | {
@@ -128,6 +153,15 @@ export interface ManualSnapshot {
   top_k: number;
   distribution: StepResult;
   can_force_token: boolean;
+  // Per-emitted-token linear probability (or null for forced/load-loaded
+  // tokens). Indexed in lockstep with ``generated_ids``. The UI uses this
+  // to color the running completion text.
+  generated_probs: (number | null)[];
+  // Printable per-token text. Lockstep with ``generated_ids``. The UI uses
+  // this so it can render each token as its own ``<span>`` without an
+  // extra ``/piece`` round trip per token.
+  generated_pieces: string[];
+  model: string | null;
 }
 
 export interface ManualTranscript {
@@ -137,6 +171,7 @@ export interface ManualTranscript {
   generated_ids: number[];
   generated_text: string;
   top_k: number;
+  model: string | null;
 }
 
 export interface ProbeRow {

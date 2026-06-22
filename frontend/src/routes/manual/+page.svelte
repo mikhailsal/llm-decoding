@@ -1,29 +1,45 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import BackendSelect from '$lib/components/BackendSelect.svelte';
+  import ModelInput from '$lib/components/ModelInput.svelte';
   import CapabilityBadges from '$lib/components/CapabilityBadges.svelte';
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
+  import TokenInline from '$lib/components/TokenInline.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { ApiError, apiFetch } from '$lib/api';
   import { info } from '$lib/stores/info';
-  import type { ManualSnapshot, ManualTranscript } from '$lib/types';
+  import { tokenBackgroundClass } from '$lib/render';
+  import type { BackendInfo, ManualSnapshot, ManualTranscript } from '$lib/types';
 
   let backend = $state<string>('');
+  let model = $state<string>('');
   let prompt = $state('The capital of France is');
   let topK = $state(8);
+  let showMarkers = $state(true);
   let snap = $state<ManualSnapshot | null>(null);
   let error = $state<string | null>(null);
   let busy = $state(false);
   let forceText = $state('');
   let forceId = $state('');
 
+  let backendInfo = $derived<BackendInfo | null>(
+    $info.info?.backends.find((b) => b.name === backend) ?? null
+  );
+
   onMount(async () => {
     if (!$info.info) await info.refresh();
     backend = $info.info?.default_backend ?? '';
+    model = backendInfo?.loaded_model ?? '';
     window.addEventListener('keydown', onGlobalKey);
   });
   onDestroy(() => window.removeEventListener('keydown', onGlobalKey));
+
+  function onBackendChange(next: string) {
+    info.select(next);
+    const b = $info.info?.backends.find((x) => x.name === next) ?? null;
+    model = b?.loaded_model ?? '';
+  }
 
   async function create() {
     error = null;
@@ -31,7 +47,12 @@
       busy = true;
       snap = await apiFetch<ManualSnapshot>('/api/v1/manual/sessions', {
         method: 'POST',
-        body: JSON.stringify({ backend, prompt, top_k: topK })
+        body: JSON.stringify({
+          backend,
+          model: model || undefined,
+          prompt,
+          top_k: topK
+        })
       });
     } catch (exc) {
       error = exc instanceof ApiError ? exc.message : String(exc);
@@ -174,7 +195,8 @@
     </p>
 
     {#if !snap}
-      <BackendSelect bind:value={backend} onChange={(v) => info.select(v)} />
+      <BackendSelect bind:value={backend} onChange={onBackendChange} />
+      <ModelInput backend={backendInfo} bind:value={model} />
       <CapabilityBadges backend={backend} />
       <div>
         <label class="label" for="prompt">Prompt</label>
@@ -184,12 +206,25 @@
         <label class="label" for="tk">top_k</label>
         <input id="tk" type="number" min="1" max="50" class="input w-24" bind:value={topK} />
       </div>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />
+        show whitespace markers (<span class="font-mono">␣ ↵ →</span>)
+      </label>
       <button class="btn btn-primary w-full" onclick={create} disabled={busy || !backend}>
         {busy ? 'starting…' : 'start session'}
       </button>
     {:else}
       <div class="text-xs text-slate-400 font-mono">session {snap.session_id.slice(0, 8)}</div>
       <CapabilityBadges backend={snap.backend} />
+      {#if snap.model}
+        <div class="text-xs text-slate-500">
+          model: <span class="font-mono text-slate-300">{snap.model}</span>
+        </div>
+      {/if}
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />
+        show whitespace markers (<span class="font-mono">␣ ↵ →</span>)
+      </label>
       <div class="grid grid-cols-2 gap-2">
         <button class="btn btn-ghost" onclick={undo} disabled={busy || snap.generated_ids.length === 0}>
           undo (u)
@@ -243,9 +278,23 @@
   <div class="lg:col-span-2 space-y-3">
     {#if snap}
       <div class="card">
-        <div class="text-xs uppercase tracking-wider text-slate-500 mb-1">running completion</div>
-        <div class="font-mono text-sm whitespace-pre-wrap min-h-[2.5rem]">
-          {snap.prompt}<span class="text-sky-300">{snap.generated_text}</span>
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-xs uppercase tracking-wider text-slate-500">running completion</div>
+          <div class="text-[10px] uppercase tracking-wider text-slate-600 flex items-center gap-2">
+            <span class="inline-block w-3 h-3 rounded bg-emerald-500/40"></span>≥80%
+            <span class="inline-block w-3 h-3 rounded bg-sky-500/40"></span>≥50%
+            <span class="inline-block w-3 h-3 rounded bg-amber-500/40"></span>≥25%
+            <span class="inline-block w-3 h-3 rounded bg-orange-500/40"></span>≥10%
+            <span class="inline-block w-3 h-3 rounded bg-rose-500/40"></span>&lt;10%
+          </div>
+        </div>
+        <div class="font-mono text-sm whitespace-pre-wrap min-h-[2.5rem] leading-relaxed">
+          <span class="text-slate-400">{snap.prompt}</span>{#each snap.generated_pieces as piece, i}{@const p = snap.generated_probs[i] ?? null}<TokenInline
+              text={piece}
+              showMarkers={showMarkers}
+              bgClass={tokenBackgroundClass(p)}
+              title={`id ${snap.generated_ids[i]}${p !== null ? ` · p=${(p * 100).toFixed(2)}%` : ' · forced'}`}
+            />{/each}
         </div>
       </div>
 

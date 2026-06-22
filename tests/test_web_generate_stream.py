@@ -161,6 +161,49 @@ def test_generate_stream_top_p_works_with_params(client) -> None:
     assert events[-1]["event"] == "done"
 
 
+def test_generate_stream_include_prompt_emits_prompt_score_first(client) -> None:
+    """``include_prompt=true`` produces a single ``prompt_score`` frame before
+    the regular ``step`` frames, with one entry per prompt token. The
+    browser uses this to show prompt-token logits in the same table as
+    generation, which was previously inspect-only."""
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+        "seed": 0,
+        "include_prompt": True,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    # First non-empty frame is prompt_score; then exactly one step and a done.
+    assert events[0]["event"] == "prompt_score"
+    assert isinstance(events[0]["steps"], list)
+    # FakeBackend.score_prompt returns one StepResult per prompt token.
+    assert len(events[0]["steps"]) == len("ab")
+    assert events[0]["prompt_logprobs"] is True
+    step_events = [e for e in events if e["event"] == "step"]
+    assert len(step_events) == 1
+    assert events[-1]["event"] == "done"
+
+
+def test_generate_stream_default_does_not_emit_prompt_score(client) -> None:
+    """Without ``include_prompt`` the wire shape is identical to before."""
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+        "seed": 0,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    events = _parse_sse(r.text)
+    assert all(e["event"] != "prompt_score" for e in events)
+
+
 def test_generate_stream_runtime_error_lands_in_done() -> None:
     """An exception in the engine mid-decode is wrapped as a done.error
     frame rather than a hard 500 -- streaming response has already

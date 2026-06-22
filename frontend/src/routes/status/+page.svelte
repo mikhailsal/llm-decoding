@@ -41,15 +41,31 @@
           <tr>
             <th class="table-cell text-left">name</th>
             <th class="table-cell text-left">family</th>
+            <th class="table-cell text-left">model</th>
             <th class="table-cell text-left">status</th>
             <th class="table-cell text-left">capabilities</th>
           </tr>
         </thead>
         <tbody>
           {#each $info.info.backends as b}
-            <tr class="border-b border-slate-800/60">
+            <tr class="border-b border-slate-800/60 align-top">
               <td class="table-cell font-mono">{b.name}</td>
               <td class="table-cell text-slate-400">{b.family}</td>
+              <td class="table-cell text-xs">
+                {#if b.loaded_model}
+                  <span class="font-mono text-slate-300">{b.loaded_model}</span>
+                  {#if b.model_editable}
+                    <span class="text-slate-500"> · editable</span>
+                  {/if}
+                {:else}
+                  <span class="text-slate-600">unknown</span>
+                {/if}
+                {#if b.suggested_models.length > 1}
+                  <div class="text-[10px] text-slate-500 mt-0.5 font-mono">
+                    +{b.suggested_models.length - 1} more in picker
+                  </div>
+                {/if}
+              </td>
               <td class="table-cell">
                 {#if b.available}
                   <span class="text-emerald-300">available</span>

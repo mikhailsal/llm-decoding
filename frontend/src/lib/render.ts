@@ -124,6 +124,31 @@ export function confidenceClass(p: number | null | undefined): string {
   return 'bg-rose-500';
 }
 
+/**
+ * Background-style tailwind class used to color *inline text* by its
+ * probability bucket (e.g. one chosen token inside a paragraph of running
+ * completion). Same five buckets as ``confidenceClass`` but at low opacity
+ * so the underlying text stays readable against a dark surface. ``null`` /
+ * NaN -> a neutral slate so unknown-prob tokens remain visually grouped
+ * but don't draw the eye.
+ */
+export function tokenBackgroundClass(p: number | null | undefined): string {
+  if (p === null || p === undefined || !Number.isFinite(p)) {
+    return 'bg-slate-700/40 text-slate-200';
+  }
+  if (p >= 0.8) return 'bg-emerald-500/30 text-emerald-50';
+  if (p >= 0.5) return 'bg-sky-500/30 text-sky-50';
+  if (p >= 0.25) return 'bg-amber-500/30 text-amber-50';
+  if (p >= 0.1) return 'bg-orange-500/30 text-orange-50';
+  return 'bg-rose-500/30 text-rose-50';
+}
+
+/** ``exp(logprob)`` -> linear prob, clamped to [0,1]; null/NaN passes through. */
+export function probFromLogprob(lp: number | null | undefined): number | null {
+  if (lp === null || lp === undefined || !Number.isFinite(lp)) return null;
+  return Math.max(0, Math.min(1, Math.exp(lp)));
+}
+
 /** Convenience helper for probability bars (width in 0..100). */
 export function probWidth(p: number | null | undefined): number {
   if (p === null || p === undefined || !Number.isFinite(p)) return 0;
