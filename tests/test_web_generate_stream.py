@@ -204,6 +204,154 @@ def test_generate_stream_default_does_not_emit_prompt_score(client) -> None:
     assert all(e["event"] != "prompt_score" for e in events)
 
 
+# --------------------------------------------------------------------------- #
+# Native-streaming opt-in (backend implements supports_native_sampler + stream_native)
+# --------------------------------------------------------------------------- #
+def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
+    """A backend advertising ``supports_native_sampler`` skips the per-step loop.
+
+    This is the wire-level check on the Fireworks 429 fix: when the
+    backend signals it can run the sampler server-side, the middleware
+    issues a SINGLE call to ``stream_native`` and forwards its
+    ``GenStep`` events as SSE frames -- instead of looping
+    ``next_distribution`` once per generated token. If this regresses,
+    we're back to spamming providers with N requests per generate.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import StepResult, TokenCandidate
+
+    next_dist_calls = {"n": 0}
+
+    class _NativeFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"hi": [1, 2]},
+                pieces={1: "h", 2: "i", 10: "X"},
+                distributions={(1, 2): [cand(10, "X", 0.99, 0)]},
+            )
+            self.native_calls: list[dict] = []
+
+        def supports_native_sampler(self, name, params):  # noqa: D401
+            return name in {"greedy", "top_p"}
+
+        def stream_native(
+            self, prompt, *, sampler_name, sampler_params, max_tokens, top_k, stop_ids=None
+        ):
+            self.native_calls.append(
+                {
+                    "prompt": prompt,
+                    "sampler_name": sampler_name,
+                    "sampler_params": sampler_params,
+                    "max_tokens": max_tokens,
+                    "top_k": top_k,
+                    "stop_ids": list(stop_ids or []),
+                }
+            )
+            cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2],
+                step_result=StepResult(
+                    position=2,
+                    candidates=[cand_x],
+                    is_full_vocab=False,
+                    chosen=cand_x,
+                ),
+                decision=SamplerDecision(
+                    token_id=10,
+                    token_text="X",
+                    kept=[],
+                    greedy_token_id=10,
+                    note="greedy (server-side)",
+                ),
+                stop_reason="max_tokens",
+            )
+
+        def next_distribution(self, token_ids, top_k):
+            next_dist_calls["n"] += 1
+            return super().next_distribution(token_ids, top_k)
+
+    backend = _NativeFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "hi",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 5,
+                "top_k": 5,
+            },
+        )
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    step_events = [e for e in events if e["event"] == "step"]
+    assert len(step_events) == 1
+    assert step_events[0]["step"]["decision"]["token_text"] == "X"
+    assert "server-side" in step_events[0]["step"]["decision"]["note"]
+    assert events[-1]["event"] == "done"
+    assert events[-1]["stop_reason"] == "max_tokens"
+    # The native path was taken: exactly one call, zero next_distribution hits.
+    assert len(backend.native_calls) == 1
+    assert backend.native_calls[0]["sampler_name"] == "greedy"
+    assert next_dist_calls["n"] == 0
+
+
+def test_generate_stream_falls_back_to_per_step_when_native_says_no() -> None:
+    """When ``supports_native_sampler`` returns False the loop path runs.
+
+    Critically, custom samplers must NEVER end up in the native branch
+    (we'd silently change behaviour); this test pins that the fallback
+    still goes through ``next_distribution`` even if the backend
+    *declares* the capability for some samplers.
+    """
+    next_dist_calls = {"n": 0}
+    native_calls = {"n": 0}
+
+    class _PickyFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"ab": [97, 98]},
+                pieces={97: "a", 98: "b", 88: "X"},
+                distributions={
+                    (97, 98): [cand(88, "X", 0.9, 0)],
+                    (97, 98, 88): [cand(88, "X", 0.9, 0)],
+                },
+            )
+
+        def supports_native_sampler(self, name, params):
+            return False  # decline everything; loop must run
+
+        def stream_native(self, *args, **kwargs):
+            native_calls["n"] += 1
+            return iter([])
+
+        def next_distribution(self, token_ids, top_k):
+            next_dist_calls["n"] += 1
+            return super().next_distribution(token_ids, top_k)
+
+    backend = _PickyFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "ab",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 2,
+                "top_k": 5,
+            },
+        )
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    assert len([e for e in events if e["event"] == "step"]) == 2
+    assert native_calls["n"] == 0
+    assert next_dist_calls["n"] == 2
+
+
 def test_generate_stream_runtime_error_lands_in_done() -> None:
     """An exception in the engine mid-decode is wrapped as a done.error
     frame rather than a hard 500 -- streaming response has already

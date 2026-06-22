@@ -86,6 +86,19 @@ class MockHTTPClient:
         })
         client.get("/v1/models")           # returns MockResponse with the JSON
         client.post("/completion", json=...) # ditto
+
+    Each route's value may be:
+
+    - a plain dict / list / string → returned with status 200 and no headers
+      (the legacy shape every existing test uses), OR
+    - a list of (status, payload, headers) tuples → each call to that route
+      pops the next tuple, so tests can simulate
+      ``429 -> 429 -> 200`` retry sequences. The last tuple is replayed if
+      the route is called more times than tuples were supplied, which keeps
+      "happy path after the retry storm" tests concise.
+
+    ``status_overrides`` is preserved for legacy tests that want to pin a
+    single status independent of the route's payload.
     """
 
     def __init__(
@@ -94,39 +107,62 @@ class MockHTTPClient:
         *,
         status_overrides: dict[tuple[str, str], int] | None = None,
     ) -> None:
-        self.routes = routes or {}
+        self.routes: dict[tuple[str, str], Any] = routes or {}
         self.status_overrides = status_overrides or {}
         self.calls: list[dict[str, Any]] = []
         self.closed = False
+        self._route_cursor: dict[tuple[str, str], int] = {}
 
-    def _resolve(self, method: str, url: str) -> tuple[int, Any]:
+    def _resolve(self, method: str, url: str) -> "MockResponse":
         key = (method, url)
-        status = self.status_overrides.get(key, 200)
         if key not in self.routes:
             raise AssertionError(
                 f"MockHTTPClient: unregistered request {method} {url!r}. "
                 f"Known: {sorted(self.routes)}"
             )
-        return status, self.routes[key]
+        entry = self.routes[key]
+        if isinstance(entry, list) and entry and isinstance(entry[0], tuple):
+            idx = min(self._route_cursor.get(key, 0), len(entry) - 1)
+            self._route_cursor[key] = idx + 1
+            triple = entry[idx]
+            # Tuple form: (status, payload[, headers])
+            status = int(triple[0])
+            payload = triple[1] if len(triple) > 1 else None
+            headers = triple[2] if len(triple) > 2 else {}
+            return MockResponse(status, payload, headers=headers)
+        status = int(self.status_overrides.get(key, 200))
+        return MockResponse(status, entry)
 
     def get(self, url: str, **kwargs: Any) -> "MockResponse":
         self.calls.append({"method": "GET", "url": url, "kwargs": kwargs})
-        status, payload = self._resolve("GET", url)
-        return MockResponse(status, payload)
+        return self._resolve("GET", url)
 
     def post(self, url: str, *, json: Any | None = None, **kwargs: Any) -> "MockResponse":
         self.calls.append({"method": "POST", "url": url, "json": json, "kwargs": kwargs})
-        status, payload = self._resolve("POST", url)
-        return MockResponse(status, payload)
+        return self._resolve("POST", url)
 
     def close(self) -> None:
         self.closed = True
 
 
 class MockResponse:
-    def __init__(self, status_code: int, payload: Any) -> None:
+    """Stand-in for ``httpx.Response`` covering the surface our code uses.
+
+    ``headers`` defaults to an empty dict so existing tests (which never
+    set it) keep working. The retry path reads ``Retry-After`` off of it
+    via ``.get(...)``; new tests opt in to a populated dict.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        payload: Any,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
+        self.headers: dict[str, str] = dict(headers or {})
 
     def json(self) -> Any:
         return self._payload

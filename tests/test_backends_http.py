@@ -8,7 +8,9 @@ response.
 
 from __future__ import annotations
 
+import json
 import math
+from contextlib import contextmanager
 
 import pytest
 
@@ -17,7 +19,7 @@ from decoding_sandbox.backends import openai_compat as oc_mod
 from decoding_sandbox.backends.llamacpp import LlamaCppBackend
 from decoding_sandbox.backends.openai_compat import OpenAICompatBackend
 from decoding_sandbox.core.config import ProviderConfig
-from tests.fakes import MockHTTPClient
+from tests.fakes import MockHTTPClient, MockResponse
 
 
 # --------------------------------------------------------------------------- #
@@ -31,7 +33,16 @@ def _make_oc_backend(
     supports_prompt_logprobs: bool = False,
     require_parameters: bool = False,
     max_top: int = 5,
+    max_retries: int = 0,
+    sleeps: list[float] | None = None,
 ) -> tuple[OpenAICompatBackend, MockHTTPClient]:
+    """Build an OpenAICompatBackend wired to a MockHTTPClient.
+
+    ``max_retries`` defaults to 0 so existing tests stay deterministic
+    (one shot, raises on non-2xx). Tests that exercise retry pass it
+    explicitly along with a ``sleeps`` list that captures wait values
+    instead of actually sleeping.
+    """
     mock = MockHTTPClient(routes)
     monkeypatch.setattr(oc_mod.httpx, "Client", lambda **kw: mock)
     prov = ProviderConfig(
@@ -44,7 +55,10 @@ def _make_oc_backend(
         require_parameters=require_parameters,
         has_completions=has_completions,
     )
-    backend = OpenAICompatBackend(prov, model="test/m")
+    sleep_fn = sleeps.append if sleeps is not None else (lambda _w: None)
+    backend = OpenAICompatBackend(
+        prov, model="test/m", max_retries=max_retries, sleep=sleep_fn
+    )
     return backend, mock
 
 
@@ -233,6 +247,440 @@ def test_openai_compat_close_propagates(monkeypatch) -> None:
 
     backend.close()
     assert mock.closed is True
+
+
+# --------------------------------------------------------------------------- #
+# OpenAICompatBackend: 429/Retry-After / backoff
+# --------------------------------------------------------------------------- #
+def test_request_retries_on_429_and_honors_retry_after(monkeypatch) -> None:
+    """A 429 with ``Retry-After`` is retried after the exact reported wait.
+
+    This is the exact scenario that bit Fireworks/glm-5p2: the per-step
+    decode loop burst past the per-account RPS limit, the server replied
+    ``429`` with a small ``Retry-After``, and we used to surface that as
+    an httpx exception terminating the whole generate stream. Now the
+    backend swallows it and re-issues, so the user sees the generation
+    complete (a touch slower) instead of an error toast.
+    """
+    sleeps: list[float] = []
+    success_payload = {
+        "choices": [
+            {"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}
+        ]
+    }
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): [
+                (429, {"error": "throttled"}, {"Retry-After": "0.42"}),
+                (200, success_payload, {}),
+            ]
+        },
+        has_completions=True,
+        max_retries=2,
+        sleeps=sleeps,
+    )
+
+    step = backend.next_distribution(backend.tokenize("hi"), top_k=2)
+
+    assert sleeps == [pytest.approx(0.42)]
+    assert [c.text for c in step.candidates] == [" Paris", " London"]
+    # The retry counted as a second POST (same URL) recorded in mock.calls.
+    posts = [c for c in mock.calls if c["url"] == "/completions"]
+    assert len(posts) == 2
+
+
+def test_request_uses_exponential_backoff_when_no_retry_after(monkeypatch) -> None:
+    """No ``Retry-After`` -> we fall back to base * 2**attempt + jitter.
+
+    We patch ``random.uniform`` to 0 so the wait values are exact: with
+    ``base_backoff_s=1.0`` and three retries, the first two waits are
+    1.0s and 2.0s (the third attempt succeeds before sleeping again).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(oc_mod.random, "uniform", lambda _a, _b: 0.0)
+    success = {"choices": [{"logprobs": {"top_logprobs": [{"x": -0.1}]}}]}
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): [
+                (429, {}, {}),
+                (503, {}, {}),
+                (200, success, {}),
+            ]
+        },
+        has_completions=True,
+        max_retries=3,
+        sleeps=sleeps,
+    )
+
+    backend.next_distribution(backend.tokenize("hi"), top_k=1)
+
+    assert sleeps == [1.0, 2.0]  # 1*2**0=1, 1*2**1=2
+
+
+def test_request_exhausts_retries_and_raises(monkeypatch) -> None:
+    """When every retry returns 429, the final ``raise_for_status`` fires.
+
+    The MockResponse raises ``RuntimeError`` for non-2xx; the real
+    backend raises ``httpx.HTTPStatusError``. Either way the caller
+    (web/streaming) sees a propagated exception and emits a terminal
+    ``done.error`` event -- matching the historical pre-fix behaviour
+    for the genuine "we really are over quota" case.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(oc_mod.random, "uniform", lambda _a, _b: 0.0)
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): [
+                (429, {}, {"Retry-After": "0.01"}),
+                (429, {}, {"Retry-After": "0.01"}),
+                (429, {}, {"Retry-After": "0.01"}),
+                (429, {}, {"Retry-After": "0.01"}),
+            ]
+        },
+        has_completions=True,
+        max_retries=2,
+        sleeps=sleeps,
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        backend.next_distribution(backend.tokenize("hi"), top_k=1)
+    # Initial attempt + 2 retries = 3 total POSTs, 2 sleeps.
+    assert len(sleeps) == 2
+
+
+def test_request_does_not_retry_4xx_other_than_429(monkeypatch) -> None:
+    """A 400/401/403/404 should NOT be retried -- the caller needs the body.
+
+    Common cause: an unknown model name. Retrying just wastes seconds
+    before the user sees the actual reason.
+    """
+    sleeps: list[float] = []
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={("POST", "/completions"): [(401, {"error": "bad key"}, {})]},
+        has_completions=True,
+        max_retries=5,
+        sleeps=sleeps,
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        backend.next_distribution(backend.tokenize("hi"), top_k=1)
+    posts = [c for c in mock.calls if c["url"] == "/completions"]
+    assert len(posts) == 1
+    assert sleeps == []
+
+
+# --------------------------------------------------------------------------- #
+# OpenAICompatBackend: native streaming via /completions
+# --------------------------------------------------------------------------- #
+def _sse_lines(chunks: list[dict]) -> list[bytes]:
+    """Turn JSON chunks into the line-stream httpx's iter_lines yields."""
+    out: list[bytes] = []
+    for ch in chunks:
+        out.append(f"data: {json.dumps(ch)}".encode("utf-8"))
+        out.append(b"")
+    out.append(b"data: [DONE]")
+    return out
+
+
+class _MockStreamResponse:
+    """Stand-in for the response yielded by ``httpx.Client.stream(...)``."""
+
+    def __init__(self, status_code: int, lines: list[bytes], headers: dict | None = None) -> None:
+        self.status_code = status_code
+        self.headers = dict(headers or {})
+        self._lines = lines
+
+    def iter_lines(self):
+        yield from self._lines
+
+    def raise_for_status(self):
+        if not (200 <= self.status_code < 300):
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _MockStreamCM:
+    """Context manager that ``httpx.Client.stream`` semantics expect."""
+
+    def __init__(self, response: _MockStreamResponse) -> None:
+        self._response = response
+
+    def __enter__(self) -> _MockStreamResponse:
+        return self._response
+
+    def __exit__(self, *_excinfo) -> None:
+        return None
+
+
+def _attach_stream_factory(mock: MockHTTPClient, queue: list[_MockStreamResponse]) -> None:
+    """Give the MockHTTPClient a ``.stream(...)`` method that pops responses."""
+
+    @contextmanager
+    def _stream(method, url, **kwargs):
+        mock.calls.append({"method": method, "url": url, "kwargs": kwargs, "stream": True})
+        if not queue:
+            raise AssertionError("MockHTTPClient.stream: no more queued responses")
+        resp = queue.pop(0)
+        yield resp
+
+    mock.stream = _stream  # type: ignore[attr-defined]
+
+
+def test_supports_native_sampler_matrix(monkeypatch) -> None:
+    """Built-ins on /completions backends are mappable; typical/custom are not.
+
+    Chat-only providers always fall back to per-step because the native
+    path requires the raw text-completion endpoint to emit echo-style
+    per-token logprobs.
+    """
+    comp, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    chat, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=False)
+
+    assert comp.supports_native_sampler("greedy", {})
+    assert comp.supports_native_sampler("temperature", {"temperature": 0.7})
+    assert comp.supports_native_sampler("top_p", {"top_p": 0.9})
+    assert comp.supports_native_sampler("top_k", {"top_k": 10})
+    assert comp.supports_native_sampler("min_p", {"min_p": 0.05})
+
+    assert not comp.supports_native_sampler("typical", {"typical_p": 0.95})
+    assert not comp.supports_native_sampler("custom", {})
+
+    # Chat-only path can't do native streaming even for greedy.
+    assert not chat.supports_native_sampler("greedy", {})
+
+
+def test_stream_native_emits_one_genstep_per_token(monkeypatch) -> None:
+    """A 3-token streamed completion becomes 3 GenStep events, last one tagged.
+
+    Asserts (a) the request body translates the sampler correctly,
+    (b) every emitted token is wrapped in a candidate list pulled from
+    that step's ``top_logprobs``, and (c) the terminal ``finish_reason``
+    propagates as the stop_reason on the *last* GenStep only.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, max_top=5
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "text": " Paris",
+                    "logprobs": {
+                        "tokens": [" Paris"],
+                        "token_logprobs": [-0.2],
+                        "top_logprobs": [{" Paris": -0.2, " London": -1.5}],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "text": " is",
+                    "logprobs": {
+                        "tokens": [" is"],
+                        "token_logprobs": [-0.4],
+                        "top_logprobs": [{" is": -0.4, " was": -1.8}],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "text": " warm",
+                    "logprobs": {
+                        "tokens": [" warm"],
+                        "token_logprobs": [-0.6],
+                        "top_logprobs": [{" warm": -0.6, " cold": -2.1}],
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    _attach_stream_factory(
+        mock, [_MockStreamResponse(200, _sse_lines(chunks))]
+    )
+
+    steps = list(
+        backend.stream_native(
+            "The capital of France",
+            sampler_name="top_p",
+            sampler_params={"top_p": 0.85, "temperature": 0.7},
+            max_tokens=3,
+            top_k=5,
+            stop_ids=None,
+        )
+    )
+
+    # Request body was a single POST with translated sampler params.
+    assert len(mock.calls) == 1
+    sent = mock.calls[0]
+    assert sent["url"] == "/completions"
+    body = sent["kwargs"]["json"]
+    assert body["stream"] is True
+    assert body["logprobs"] == 5
+    assert body["max_tokens"] == 3
+    assert body["top_p"] == pytest.approx(0.85)
+    assert body["temperature"] == pytest.approx(0.7)
+
+    # Three GenSteps, one per token, "length" -> "max_tokens" on the last.
+    assert len(steps) == 3
+    assert [gs.decision.token_text for gs in steps] == [" Paris", " is", " warm"]
+    assert steps[0].stop_reason is None
+    assert steps[1].stop_reason is None
+    assert steps[2].stop_reason == "max_tokens"
+    # The note records that sampling happened server-side.
+    assert "server-side" in steps[0].decision.note
+    # tokens_before grows by one each step (the synthetic id of the prior token).
+    assert len(steps[0].tokens_before) + 2 == len(steps[2].tokens_before)
+
+
+def test_stream_native_maps_stop_finish_reason_to_user_stop(monkeypatch) -> None:
+    """``finish_reason=stop`` propagates as ``stop_reason='user_stop'``."""
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    chunks = [
+        {
+            "choices": [
+                {
+                    "text": "X",
+                    "logprobs": {
+                        "tokens": ["X"],
+                        "token_logprobs": [-0.1],
+                        "top_logprobs": [{"X": -0.1}],
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+
+    steps = list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            stop_ids=None,
+        )
+    )
+    assert steps[-1].stop_reason == "user_stop"
+
+
+def test_stream_native_translates_stop_ids_to_text(monkeypatch) -> None:
+    """``stop_ids`` are looked up via ``piece`` and sent as the ``stop`` array.
+
+    Cloud providers don't speak our synthetic integer ids; OpenAI's
+    ``stop`` array is text-based, so we translate. Capped at 4 entries
+    to satisfy the OpenAI spec (some providers 400 on more than that).
+    """
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    tid_a = backend._intern(" END")
+    tid_b = backend._intern("\n\n")
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            stop_ids=[tid_a, tid_b],
+        )
+    )
+    body = mock.calls[0]["kwargs"]["json"]
+    assert body["stop"] == [" END", "\n\n"]
+
+
+def test_stream_native_refuses_when_no_completions(monkeypatch) -> None:
+    """Chat-only providers raise rather than silently picking a wrong path.
+
+    The wire decision lives in
+    :func:`decoding_sandbox.web.streaming._can_use_native_cloud_stream`;
+    this test makes sure that even if someone calls the method directly
+    with a chat-only provider, they get a loud :class:`NotImplementedError`
+    they can branch on.
+    """
+    backend, _mock = _make_oc_backend(monkeypatch, routes={}, has_completions=False)
+    with pytest.raises(NotImplementedError, match="no /completions endpoint"):
+        list(
+            backend.stream_native(
+                "p",
+                sampler_name="greedy",
+                sampler_params={},
+                max_tokens=1,
+                top_k=1,
+            )
+        )
+
+
+def test_stream_native_retries_initial_429(monkeypatch) -> None:
+    """A 429 on the *initial* SSE open is retried using exp-backoff.
+
+    Once bytes start flowing we don't retry mid-stream (the partial
+    output would be wrong to retry), but the opening response code goes
+    through the same retry path the JSON helper does. ``Retry-After``
+    is honored just like for non-streaming endpoints.
+    """
+    sleeps: list[float] = []
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        max_retries=2,
+        sleeps=sleeps,
+    )
+    chunks_after_retry = [
+        {
+            "choices": [
+                {
+                    "text": "T",
+                    "logprobs": {
+                        "tokens": ["T"],
+                        "token_logprobs": [-0.1],
+                        "top_logprobs": [{"T": -0.1}],
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+    ]
+    _attach_stream_factory(
+        mock,
+        [
+            _MockStreamResponse(429, [], headers={"Retry-After": "0.2"}),
+            _MockStreamResponse(200, _sse_lines(chunks_after_retry)),
+        ],
+    )
+
+    steps = list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    assert len(steps) == 1
+    assert sleeps == [pytest.approx(0.2)]
+
+
+# Smoke-test: MockResponse honors its new headers kwarg without breaking
+# anything that used the legacy two-arg constructor.
+def test_mock_response_headers_default_empty() -> None:
+    r = MockResponse(200, {"ok": True})
+    assert r.headers == {}
+    r2 = MockResponse(429, {}, headers={"Retry-After": "1"})
+    assert r2.headers["Retry-After"] == "1"
 
 
 # --------------------------------------------------------------------------- #

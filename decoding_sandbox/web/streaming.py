@@ -101,24 +101,73 @@ def stream_generate(
             )
             # _forward_remote_stream owns the terminating ``done`` frame.
             return
-        rng = random.Random(seed)
-        for gs in core_generate(
-            backend,
-            prompt,
-            sampler,
-            max_tokens=max_tokens,
-            top_k=top_k,
-            rng=rng,
-            stop_ids=stop_ids,
-            respect_eos=respect_eos,
-        ):
-            yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
-            last_reason = gs.stop_reason
+        if _can_use_native_cloud_stream(backend, sampler_name, sampler_params):
+            # Cloud /completions provider + a built-in sampler: replace the
+            # per-token decode loop (one HTTP request per token, the path
+            # that historically tripped Fireworks' per-account RPS limit on
+            # serverless models like glm-5p2) with a SINGLE streaming POST
+            # that asks the provider to run the sampler server-side. Custom
+            # samplers and chat-only providers continue to use the per-step
+            # loop below, which now has its own 429/Retry-After retry from
+            # the backend's _request helper.
+            for gs in backend.stream_native(  # type: ignore[attr-defined]
+                prompt,
+                sampler_name=sampler_name,
+                sampler_params=sampler_params,
+                max_tokens=max_tokens,
+                top_k=top_k,
+                stop_ids=stop_ids,
+            ):
+                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                last_reason = gs.stop_reason
+        else:
+            rng = random.Random(seed)
+            for gs in core_generate(
+                backend,
+                prompt,
+                sampler,
+                max_tokens=max_tokens,
+                top_k=top_k,
+                rng=rng,
+                stop_ids=stop_ids,
+                respect_eos=respect_eos,
+            ):
+                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                last_reason = gs.stop_reason
     except Exception as exc:  # noqa: BLE001
         log.exception("dsbx-web: generate stream errored")
         yield sse_frame({"event": "done", "stop_reason": last_reason, "error": str(exc)})
         return
     yield sse_frame({"event": "done", "stop_reason": last_reason})
+
+
+def _can_use_native_cloud_stream(
+    backend: Backend, sampler_name: str, sampler_params: dict[str, Any]
+) -> bool:
+    """Should we offload this generate to the provider's server-side sampler?
+
+    Returns ``True`` only when the backend is an
+    :class:`~decoding_sandbox.backends.openai_compat.OpenAICompatBackend`
+    that exposes ``/completions`` and the sampler is in the natively
+    mappable set (greedy/temperature/top_k/top_p/min_p). The decision
+    short-circuits to ``False`` for ``RemoteBackend`` (already handled by
+    the remote-forwarding branch above), in-process backends (cheap,
+    no rate limit), and any sampler that doesn't have a clean
+    OpenAI-compat analogue (notably ``typical`` and ``custom``).
+
+    The ``hasattr`` check keeps this loose enough that a future
+    backend can opt into the same path by just implementing the
+    ``stream_native`` / ``supports_native_sampler`` pair, without
+    needing a hard import-time dependency here.
+    """
+    if not hasattr(backend, "supports_native_sampler"):
+        return False
+    if not hasattr(backend, "stream_native"):
+        return False
+    try:
+        return bool(backend.supports_native_sampler(sampler_name, sampler_params))
+    except Exception:  # noqa: BLE001 -- never trust capability checks to not raise
+        return False
 
 
 def _emit_prompt_score(backend: Backend, *, prompt: str, top_k: int) -> Iterator[bytes]:
