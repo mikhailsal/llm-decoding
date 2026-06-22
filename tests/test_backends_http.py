@@ -157,6 +157,20 @@ def test_openai_compat_injects_require_parameters(monkeypatch) -> None:
 
 
 def test_openai_compat_score_prompt_uses_echo_and_records_actual(monkeypatch) -> None:
+    """Per the Backend protocol: prompt rows carry actuals; the trailing
+    row is the model's ``(predict next)`` slot with ``chosen=None``.
+
+    The mock responds as if echo+max_tokens=1 returned 4 tokens for a
+    3-token prompt: ``["The", " cap", "ital", " city"]`` -- the last
+    one is the model's first-generation prediction. After the fix the
+    backend returns 3 ``StepResult``s: positions 1 and 2 carry the
+    actual prompt tokens (" cap", "ital"), and position 3 has
+    ``chosen=None`` because there is no "actual" prompt token at that
+    slot. Its ``candidates`` still carry the model's top-K at the
+    post-prompt position, which the inspect UI renders as ``(predict
+    next)`` and the generate path no longer double-counts in its
+    running-completion view.
+    """
     backend, mock = _make_oc_backend(
         monkeypatch,
         routes={
@@ -164,12 +178,13 @@ def test_openai_compat_score_prompt_uses_echo_and_records_actual(monkeypatch) ->
                 "choices": [
                     {
                         "logprobs": {
-                            "tokens": ["The", " cap", "ital"],
-                            "token_logprobs": [None, -1.0, -2.0],
+                            "tokens": ["The", " cap", "ital", " city"],
+                            "token_logprobs": [None, -1.0, -2.0, -0.5],
                             "top_logprobs": [
                                 None,
                                 {" cap": -1.0, " other": -3.0},
                                 {"ital": -2.0, "stuff": -4.0},
+                                {" city": -0.5, " is": -1.7, " of": -2.1},
                             ],
                         }
                     }
@@ -182,13 +197,21 @@ def test_openai_compat_score_prompt_uses_echo_and_records_actual(monkeypatch) ->
 
     steps = backend.score_prompt("The capital", top_k=3, watch_ids=[])
 
-    assert len(steps) == 2
-    s1, s2 = steps
+    assert len(steps) == 3
+    s1, s2, s3 = steps
+    # First two: real prompt positions, ``chosen`` = actual prompt token.
     assert s1.context_text == "The"
     assert s1.chosen is not None
     assert s1.chosen.text == " cap"
     assert s1.chosen.logprob == pytest.approx(-1.0)
+    assert s2.chosen is not None
     assert s2.chosen.text == "ital"
+    # Trailing prediction row: chosen=None, candidates still populated.
+    assert s3.chosen is None
+    assert s3.position == 3
+    assert s3.context_text == "ital"
+    assert len(s3.candidates) == 3
+    assert s3.candidates[0].text == " city"
     body = mock.calls[-1]["json"]
     assert body["echo"] is True
     assert body["prompt"] == "The capital"

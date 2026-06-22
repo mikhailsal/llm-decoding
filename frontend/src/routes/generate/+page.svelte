@@ -141,15 +141,22 @@
     return probFromLogprob(c.logprob);
   }
 
-  // True iff ``promptSteps`` is an actual per-prompt-token scoring (one
-  // row per prompt token, each carrying a ``chosen`` candidate with a
-  // logprob). For chat-only providers ``promptSteps`` is a one-row
-  // next-token distribution -- still useful as a table but missing the
-  // per-prompt-token data we need to colorize the prefix, so we leave
-  // the prompt rendering plain grey in that case.
-  let promptHasFullTokenization = $derived(
-    promptSteps.length > 1 && promptSteps.every((s) => !!s?.chosen)
-  );
+  // ``promptSteps`` per the ``Backend.score_prompt`` contract is N rows
+  // for an N-token prompt: the first N-1 carry the actual prompt token
+  // as ``chosen``, and the trailing "(predict next)" row has
+  // ``chosen=null`` and merely advertises what the model would emit
+  // next. We render the running-completion prefix from the prompt rows
+  // only -- the trailing prediction belongs in ``steps`` (the actual
+  // generation), so including it here would double-count the first
+  // generated token.
+  let promptPrefixSteps = $derived(promptSteps.filter((s) => !!s?.chosen));
+  // True iff ``promptSteps`` is an actual per-prompt-token scoring
+  // (more than just a single-row chat-only fallback). For chat-only
+  // providers ``promptSteps`` is a one-row next-token distribution --
+  // still useful as a table but missing the per-prompt-token data we
+  // need to colorize the prefix, so we leave the prompt rendering
+  // plain grey in that case.
+  let promptHasFullTokenization = $derived(promptPrefixSteps.length > 1);
 </script>
 
 <Toast message={streamError} onClose={() => (streamError = null)} />
@@ -267,7 +274,7 @@
         </div>
       </div>
       <div class="font-mono text-sm text-slate-200 whitespace-pre-wrap min-h-[2.5rem] leading-relaxed">
-        {#if promptHasFullTokenization}{#each promptSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
+        {#if promptHasFullTokenization}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
               text={ps.chosen?.text ?? ''}
               isSpecial={ps.chosen?.is_special ?? false}
               showMarkers={showMarkers}

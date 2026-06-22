@@ -292,6 +292,24 @@ class OpenAICompatBackend(Backend):
         generic per-prefix fallback in ``Backend.score_prompt`` is meaningless
         here because ``tokenize`` interns the whole text as a single id).
         Callers should branch on ``capabilities.prompt_logprobs`` first.
+
+        Follows the same contract as :meth:`Backend.score_prompt`: for an
+        N-token prompt we return N :class:`StepResult`\\s. The first N-1
+        rows carry ``chosen`` = the actual prompt token at that position;
+        the final row -- the distribution conditioned on the full prompt
+        -- has ``chosen=None`` and answers "what does the model predict
+        comes next?" (so the inspect UI renders it as ``(predict next)``,
+        and ``include_prompt=True`` on the generate path does NOT double
+        up that first generated token in the running completion).
+
+        Mechanically we still request ``max_tokens=1`` because that's
+        what makes the upstream return ``top_logprobs[N]`` -- the model's
+        predicted distribution AT the position after the prompt. The
+        provider's "actual next" emission for that slot (which on some
+        models, e.g. Fireworks minimax-m2p7, is not even argmax of its
+        own ``top_logprobs``) is INTENTIONALLY discarded: there is no
+        "actual" prompt token at that position, and labeling the
+        provider's continuation as one was misleading.
         """
         if not self.provider.supports_prompt_logprobs:
             raise NotImplementedError(
@@ -319,25 +337,44 @@ class OpenAICompatBackend(Backend):
         token_lps = lp.get("token_logprobs") or []
         top_lps = lp.get("top_logprobs") or []
 
+        # With ``max_tokens=1`` the response carries ``len_prompt + 1``
+        # tokens: the last one is the model's continuation, not a prompt
+        # token. We treat the trailing slot as the "predict next" row and
+        # the rest as prompt positions.
+        last_idx = len(tokens) - 1
+
         results: list[StepResult] = []
         # Echo returns the prompt tokens; position 0 has no preceding context.
         for i in range(1, len(tokens)):
             cand_dict = top_lps[i] if i < len(top_lps) and top_lps[i] else {}
             cands = self._cands_from_dict(cand_dict)
-            actual_text = tokens[i]
-            actual_lp = (
-                token_lps[i] if i < len(token_lps) and token_lps[i] is not None else float("nan")
-            )
-            actual_id = self._intern(actual_text)
-            chosen = StepResult(0, cands, False).find(actual_id)
-            if chosen is None:
-                chosen = TokenCandidate(actual_id, actual_text, float(actual_lp), rank=-1)
+            if i < last_idx:
+                # Real prompt position -- record the actual prompt token.
+                actual_text = tokens[i]
+                actual_lp = (
+                    token_lps[i]
+                    if i < len(token_lps) and token_lps[i] is not None
+                    else float("nan")
+                )
+                actual_id = self._intern(actual_text)
+                chosen = StepResult(0, cands, False).find(actual_id)
+                if chosen is None:
+                    chosen = TokenCandidate(
+                        actual_id, actual_text, float(actual_lp), rank=-1
+                    )
+            else:
+                # Trailing "predict next" slot: no actual prompt token. The
+                # candidates still carry the model's top-K at this position;
+                # the renderer reads ``chosen=None`` as a ``(predict next)``
+                # marker and the generate path's running completion no
+                # longer double-counts the first generated token.
+                chosen = None
             step = StepResult(
                 position=i,
                 candidates=cands,
                 is_full_vocab=False,
                 chosen=chosen,
-                context_text=tokens[i - 1],
+                context_text=tokens[i - 1] if i - 1 < len(tokens) else None,
             )
             step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
             results.append(step)
