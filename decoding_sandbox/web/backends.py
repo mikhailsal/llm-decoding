@@ -161,7 +161,10 @@ class BackendRegistry:
         Importantly, NO field in the returned payload contains a URL or a
         secret -- :func:`tests.test_web_info` enforces this.
         """
-        from decoding_sandbox.server.schemas import capabilities_to_wire
+        from decoding_sandbox.server.schemas import (
+            WireCapabilities,
+            capabilities_to_wire,
+        )
 
         out: list[BackendInfo] = []
         for entry in self._entries.values():
@@ -171,6 +174,28 @@ class BackendRegistry:
                     caps = capabilities_to_wire(entry.instance.capabilities)
                 except Exception:  # noqa: BLE001
                     caps = None
+            # For cloud providers we can synthesize the capability envelope
+            # from static ProviderConfig data even before a single request
+            # has loaded the backend. Without this, the UI couldn't enforce
+            # provider-specific limits (Fireworks' 5-logprob ceiling, etc.)
+            # until *after* the first generate call, which was the exact
+            # "silently ignored ``top_k`` field" UX the audit flagged.
+            # The synthetic version omits a stable ``eos_token_ids`` list
+            # because that depends on the tokenizer the upstream uses, but
+            # the fields the UI cares about up front (max_top_logprobs,
+            # prompt_logprobs, full_vocab) come straight from config.
+            if caps is None and entry.family == "cloud":
+                prov = self._cfg.providers.get(entry.name)
+                if prov is not None:
+                    caps = WireCapabilities(
+                        name=f"openai_compat:{entry.name}",
+                        full_vocab=False,
+                        prompt_logprobs=bool(prov.supports_prompt_logprobs),
+                        max_top_logprobs=int(prov.max_top_logprobs),
+                        can_force_token=False,
+                        notes="static caps from provider config (backend not yet loaded)",
+                        eos_token_ids=[],
+                    )
             label = self._public_label(entry)
             loaded_model, suggested, editable = self._public_model_info(entry)
             out.append(

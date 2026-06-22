@@ -27,6 +27,17 @@
     $info.info?.backends.find((b) => b.name === backend) ?? null
   );
 
+  // Cap manual ``top_k`` to the backend's reported ceiling for the same
+  // reason as on the /generate page: Fireworks tops out at 5, asking
+  // for more silently returned 5 alongside empty padding rows. The
+  // server's ``set_top_k`` endpoint also clamps, but surfacing the cap
+  // in the UI tells the user up front rather than after the fact.
+  let topKMax = $derived<number>(backendInfo?.capabilities?.max_top_logprobs ?? 50);
+  $effect(() => {
+    if (topK > topKMax) topK = topKMax;
+    if (topK < 1) topK = 1;
+  });
+
   onMount(async () => {
     if (!$info.info) await info.refresh();
     backend = $info.info?.default_backend ?? '';
@@ -204,7 +215,10 @@
       </div>
       <div>
         <label class="label" for="tk">top_k</label>
-        <input id="tk" type="number" min="1" max="50" class="input w-24" bind:value={topK} />
+        <input id="tk" type="number" min="1" max={topKMax} class="input w-24" bind:value={topK} />
+        <p class="text-[10px] text-slate-500 mt-0.5">
+          max {topKMax} on {backendInfo?.label ?? 'this backend'}
+        </p>
       </div>
       <label class="flex items-center gap-2 text-sm">
         <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />

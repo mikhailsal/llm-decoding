@@ -17,8 +17,14 @@
   let model = $state<string>('');
   let prompt = $state('Once upon a time');
   let maxTokens = $state(20);
-  let topK = $state(8);
-  let altCount = $state(3);
+  // ``alternatives`` is the number of top-k logprobs we both FETCH from
+  // the backend AND show in the table. There was a separate "alts shown"
+  // knob, but offering both invited a confusing failure mode: setting
+  // alts > fetched silently rendered empty rows, and setting fetched
+  // beyond ``capabilities.max_top_logprobs`` was clamped server-side
+  // without telling the user. One knob, one truth -- and we clamp the
+  // input's ``max`` attribute to the live backend's reported ceiling.
+  let alternatives = $state(8);
   let seed = $state(0);
   let stopTexts = $state<string[]>([]);
   let stopIds = $state<string[]>([]);
@@ -66,6 +72,38 @@
   $effect(() => {
     if (respectEosLocked && !respectEos) respectEos = true;
   });
+
+  // ``alternatives`` ceiling comes from the backend's capabilities. Cloud
+  // providers cap aggressively (Fireworks: 5, NIM/OpenRouter: 20,
+  // LM Studio: 10); local backends with a real vocab cap much higher
+  // (we use 200 as a sane upper bound so the input doesn't become a
+  // free-form free-for-all). Without the cap the user could ask for
+  // ``top_k=100`` against Fireworks and silently get 5 back -- the
+  // exact "silently ignored" UX the user pointed at.
+  let altsMax = $derived<number>(backendInfo?.capabilities?.max_top_logprobs ?? 50);
+  $effect(() => {
+    // Whenever the cap shrinks (backend swap or capabilities refresh),
+    // re-clamp the current value. Never grow it automatically -- if
+    // the user picked 3 and the cap is 20, leave it at 3.
+    if (alternatives > altsMax) alternatives = altsMax;
+    if (alternatives < 1) alternatives = 1;
+  });
+
+  // ``seed`` only changes the result when the sampler has randomness to
+  // seed -- greedy is deterministic by definition (argmax of the
+  // distribution), so the seed is a pure no-op there. Rather than let
+  // a user think they're varying the run by editing seed under greedy,
+  // we lock the input and explain why.
+  let seedLocked = $derived<boolean>(sampler === 'greedy');
+
+  // ``include_prompt`` is most useful when the backend supports
+  // per-prompt-token logprobs (HF, llamacpp_py, Fireworks/echo). On
+  // chat-only providers (NIM, OpenRouter, LM Studio chat-only) it
+  // still works but degrades to a single "what comes next?" row --
+  // we leave the toggle enabled but flag the degraded mode.
+  let promptScoreDegraded = $derived<boolean>(
+    backendInfo?.capabilities?.prompt_logprobs === false
+  );
 
   onMount(async () => {
     if (!$info.info) await info.refresh();
@@ -116,7 +154,11 @@
       prompt,
       sampler: { name: sampler, params: samplerParams() },
       max_tokens: maxTokens,
-      top_k: topK,
+      // Single source of truth for "how many top alternatives do we
+      // care about?" -- both the wire ``top_k`` and the table renderer
+      // below read from the same state, capped to the backend's
+      // ``max_top_logprobs`` ceiling.
+      top_k: alternatives,
       stop_texts: stopTexts,
       stop_ids,
       seed,
@@ -203,20 +245,45 @@
     </div>
     <div class="grid grid-cols-2 gap-2">
       <div>
-        <label class="label" for="mt">max</label>
+        <label class="label" for="mt">max tokens</label>
         <input id="mt" type="number" min="1" max="200" class="input" bind:value={maxTokens} />
       </div>
       <div>
-        <label class="label" for="tk">top_k (fetched)</label>
-        <input id="tk" type="number" min="1" max="200" class="input" bind:value={topK} />
+        <label class="label" for="alts">alternatives (top-k)</label>
+        <input
+          id="alts"
+          type="number"
+          min="1"
+          max={altsMax}
+          class="input"
+          bind:value={alternatives}
+        />
+        <p class="text-[10px] text-slate-500 mt-0.5">
+          max {altsMax} on {backendInfo?.label ?? 'this backend'}
+        </p>
       </div>
-      <div>
-        <label class="label" for="alt">alternatives shown</label>
-        <input id="alt" type="number" min="1" max="50" class="input" bind:value={altCount} />
-      </div>
-      <div>
-        <label class="label" for="seed">seed</label>
-        <input id="seed" type="number" class="input" bind:value={seed} />
+      <div class="col-span-2">
+        <label
+          class="label flex items-center gap-2 {seedLocked ? 'text-slate-600' : ''}"
+          for="seed"
+          title={seedLocked
+            ? 'Greedy sampling is deterministic (argmax) -- the seed has no effect.'
+            : ''}
+        >
+          seed
+          {#if seedLocked}
+            <span class="text-[10px] uppercase tracking-wider text-slate-600 normal-case">
+              no effect for greedy
+            </span>
+          {/if}
+        </label>
+        <input
+          id="seed"
+          type="number"
+          class="input"
+          bind:value={seed}
+          disabled={seedLocked}
+        />
       </div>
     </div>
     <div>
@@ -284,9 +351,19 @@
           <span class="text-[10px] uppercase tracking-wider text-slate-600">cloud-only: always on</span>
         {/if}
       </label>
-      <label class="flex items-center gap-2 text-sm">
+      <label
+        class="flex items-center gap-2 text-sm"
+        title={promptScoreDegraded
+          ? 'This backend cannot score whole prompts; you will get a single next-token row instead.'
+          : ''}
+      >
         <input type="checkbox" bind:checked={includePrompt} class="accent-sky-500" />
         include prompt logits
+        {#if promptScoreDegraded && includePrompt}
+          <span class="text-[10px] uppercase tracking-wider text-amber-500/80 normal-case">
+            next-token only (chat-only backend)
+          </span>
+        {/if}
       </label>
       <label class="flex items-center gap-2 text-sm">
         <input type="checkbox" bind:checked={showMarkers} class="accent-sky-500" />
@@ -369,7 +446,7 @@
               <th class="table-cell text-left">previous</th>
               <th class="table-cell text-left">actual next</th>
               <th class="table-cell text-left">prob</th>
-              <th class="table-cell text-left">top alts (rank 1..{altCount})</th>
+              <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
             </tr>
           </thead>
           <tbody>
@@ -393,7 +470,7 @@
                 <td class="table-cell w-40"><ConfidenceBar prob={chosenP} /></td>
                 <td class="table-cell">
                   <div class="flex flex-col gap-0.5">
-                    {#each s.candidates.slice(0, altCount) as c}
+                    {#each s.candidates.slice(0, alternatives) as c}
                       <div class="flex items-center gap-2">
                         <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />
                         <span class="text-xs text-slate-500 tabular-nums">
@@ -419,7 +496,7 @@
               <th class="table-cell text-left">step</th>
               <th class="table-cell text-left">chosen</th>
               <th class="table-cell text-left">prob</th>
-              <th class="table-cell text-left">top alts (rank 1..{altCount})</th>
+              <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
             </tr>
           </thead>
           <tbody>
@@ -434,7 +511,7 @@
                 </td>
                 <td class="table-cell">
                   <div class="flex flex-col gap-0.5">
-                    {#each s.step_result.candidates.slice(0, altCount) as c}
+                    {#each s.step_result.candidates.slice(0, alternatives) as c}
                       <div class="flex items-center gap-2">
                         <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />
                         <span class="text-xs text-slate-500 tabular-nums">

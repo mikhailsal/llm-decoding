@@ -26,6 +26,16 @@
     }
   }
 
+  // Commit pending text whenever the input loses focus. Without this,
+  // a user who typed ``who`` into the Stop-text field and then clicked
+  // ``generate`` would silently lose that entry because the chip was
+  // never committed (Enter wasn't pressed). Click events on buttons
+  // fire AFTER blur on the previously-focused input, so the parent's
+  // ``run()`` handler sees the freshly committed ``values``.
+  function onBlur() {
+    if (pending) add();
+  }
+
   function remove(i: number) {
     values = values.filter((_, k) => k !== i);
   }
@@ -56,6 +66,7 @@
     class="input font-mono"
     bind:value={pending}
     onkeydown={onKey}
+    onblur={onBlur}
     placeholder={placeholder}
   />
   {#if hint}

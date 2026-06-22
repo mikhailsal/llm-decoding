@@ -22,8 +22,11 @@
   let backend = $state<string>('');
   let model = $state<string>('');
   let prompt = $state('The capital of France is Paris');
-  let topK = $state(5);
-  let altCount = $state(5);
+  // Single ``alternatives`` knob (see /generate for the rationale: a
+  // separate "fetched" / "shown" pair invited a confusing failure
+  // mode where the "shown" axis silently rendered empty rows past
+  // the provider-capped "fetched" value).
+  let alternatives = $state(5);
   let watchTexts = $state<string[]>([]);
   let watchIds = $state<string[]>([]);
   let watchEos = $state(false);
@@ -35,6 +38,18 @@
   let backendInfo = $derived<BackendInfo | null>(
     $info.info?.backends.find((b) => b.name === backend) ?? null
   );
+
+  // Cap ``alternatives`` to whatever the active backend can actually
+  // return. Fireworks tops out at 5, NIM/OpenRouter at 20, LM Studio
+  // at 10; local backends with a real vocab go much higher. Without
+  // this, asking for 50 against Fireworks silently returned 5 and
+  // rendered 45 empty rows -- the exact "silently ignored" UX the
+  // dual-knob audit flagged.
+  let altsMax = $derived<number>(backendInfo?.capabilities?.max_top_logprobs ?? 50);
+  $effect(() => {
+    if (alternatives > altsMax) alternatives = altsMax;
+    if (alternatives < 1) alternatives = 1;
+  });
 
   onMount(async () => {
     if (!$info.info) await info.refresh();
@@ -67,7 +82,7 @@
           backend,
           model: model || undefined,
           prompt,
-          top_k: topK,
+          top_k: alternatives,
           watch_texts: watchTexts,
           watch_ids: ids,
           watch_eos: watchEos
@@ -104,15 +119,19 @@
         bind:value={prompt}
       ></textarea>
     </div>
-    <div class="grid grid-cols-2 gap-2">
-      <div>
-        <label class="label" for="topk">top_k (fetched)</label>
-        <input id="topk" type="number" min="1" max="50" class="input" bind:value={topK} />
-      </div>
-      <div>
-        <label class="label" for="alt">alternatives shown</label>
-        <input id="alt" type="number" min="1" max="50" class="input" bind:value={altCount} />
-      </div>
+    <div>
+      <label class="label" for="alts">alternatives (top-k)</label>
+      <input
+        id="alts"
+        type="number"
+        min="1"
+        max={altsMax}
+        class="input"
+        bind:value={alternatives}
+      />
+      <p class="text-[10px] text-slate-500 mt-0.5">
+        max {altsMax} on {backendInfo?.label ?? 'this backend'}
+      </p>
     </div>
     <ChipInput
       bind:values={watchTexts}
@@ -175,7 +194,7 @@
               <th class="table-cell text-left">pos</th>
               <th class="table-cell text-left">token chosen</th>
               <th class="table-cell text-left">prob</th>
-              <th class="table-cell text-left">top candidates (rank 1..{altCount})</th>
+              <th class="table-cell text-left">top candidates (rank 1..{alternatives})</th>
               {#each result.watches as w}
                 <th class="table-cell text-left">{w.label}</th>
               {/each}
@@ -196,7 +215,7 @@
                 <td class="table-cell w-40"><ConfidenceBar prob={chosenP} /></td>
                 <td class="table-cell">
                   <div class="space-y-0.5">
-                    {#each step.candidates.slice(0, altCount) as c, j}
+                    {#each step.candidates.slice(0, alternatives) as c, j}
                       <div class="flex items-center gap-2">
                         <span class="text-xs text-slate-500 font-mono w-6 text-right">{j + 1}.</span>
                         <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />

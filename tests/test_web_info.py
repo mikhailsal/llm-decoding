@@ -75,6 +75,37 @@ def test_info_lists_remote_provider_local_backends(app) -> None:
     assert {"hf", "llamacpp", "llamacpp-py"} <= names
 
 
+def test_info_reports_static_caps_for_unloaded_cloud_backends(app) -> None:
+    """Cloud backends advertise their capability envelope BEFORE first use.
+
+    The UI clamps inputs like ``alternatives (top-k)`` to
+    ``capabilities.max_top_logprobs``. Cloud backends are lazy-loaded, so
+    without synthesizing caps from the static :class:`ProviderConfig` the
+    listing returns ``capabilities=null`` and the UI falls back to a
+    generic max -- letting users set top_k=50 on Fireworks (capped to 5
+    upstream). This test pins the static caps so a future refactor
+    can't silently regress to "no caps until loaded".
+    """
+    with make_authed_client(app) as c:
+        r = c.get("/api/v1/info")
+    by_name = {b["name"]: b for b in r.json()["backends"]}
+
+    fw = by_name["fireworks"]
+    assert fw["capabilities"] is not None
+    # ``make_test_config`` pins all provider caps to 5 to keep tests stable;
+    # the production config differentiates (Fireworks=5, NIM/OpenRouter=20,
+    # LM Studio=10) and the same plumbing surfaces those values too.
+    assert fw["capabilities"]["max_top_logprobs"] == 5
+    # Test fixture sets ``supports_prompt_logprobs=True`` only for fireworks.
+    assert fw["capabilities"]["prompt_logprobs"] is True
+    assert fw["capabilities"]["full_vocab"] is False
+
+    nim = by_name["nim"]
+    assert nim["capabilities"] is not None
+    assert nim["capabilities"]["max_top_logprobs"] == 5
+    assert nim["capabilities"]["prompt_logprobs"] is False
+
+
 def test_info_marks_cloud_without_key_as_unavailable(env_with_secret, monkeypatch) -> None:
     # Build a fresh app where NIM has no key set.
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
