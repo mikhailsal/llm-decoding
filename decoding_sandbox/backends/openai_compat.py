@@ -1083,24 +1083,31 @@ class OpenAICompatBackend(Backend):
         note = ", ".join(note_parts)
 
         # Collect ALL positions first, then split into prompt-echo +
-        # emitted-token streams once we know how many positions belong
-        # to which side. The split point comes from the provider's
-        # echoed prompt length (or ``echo_last`` when set): everything
-        # before ``split_at`` is prompt echo, everything after is
-        # emitted output.
+        # emitted-token streams. Fireworks streams ONE position per
+        # SSE chunk (regardless of whether it's an echoed prompt
+        # token or a freshly generated one), so we can't use
+        # "first chunk = all echo, rest = emit" heuristic. Instead
+        # we use a three-tier signal, strongest first:
         #
-        # We can't infer the split point from the prompt's local
-        # tokenization (the cloud tokenizer may add a BOS we don't
-        # know about), so we use the position of the FIRST chunk that
-        # arrives without an echo-style fully-populated content[]
-        # block. Concretely: chunk #1 typically carries the full echo
-        # in one shot; subsequent chunks carry 1 emitted token each.
-        # If that pattern doesn't hold for a given deployment, the
-        # smoke script flags it and we keep the two-request fallback.
+        # 1. ``text_offset`` (NewLogProbs): an echo entry has
+        #    ``text_offset < len(prompt)``; the first emit entry
+        #    starts at ``text_offset == len(prompt)``. This is the
+        #    OpenAI-documented field and Fireworks honors it.
+        # 2. ``sampling_mask_count`` / ``sampling_logprob`` presence:
+        #    Fireworks omits both for echoed positions (they were
+        #    never actually sampled) and populates them for emitted
+        #    positions. Acts as a backup when the upstream omits
+        #    ``text_offset`` (some providers do).
+        # 3. Cumulative ``text`` length: accumulate the token strings
+        #    and switch as soon as the running total exceeds
+        #    ``len(prompt)``. Used as a last-resort fallback when
+        #    neither of the above is available.
         #
         # Entry shape: (token_id_or_None, text, logprob, top_payload,
-        # sampling_mask_count, is_first_in_chunk_marker).
-        all_positions: list[tuple[int | None, str, float, Any, int | None, bool]] = []
+        # sampling_mask_count, text_offset, has_sampling_signal).
+        all_positions: list[
+            tuple[int | None, str, float, Any, int | None, int | None, bool]
+        ] = []
         last_finish_reason: str | None = None
         for chunk_idx, chunk in enumerate(
             self._iter_completions_stream(body, extra_headers=extra_headers)
@@ -1124,7 +1131,6 @@ class OpenAICompatBackend(Backend):
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
-            first_in_chunk = True
             if self.provider.supports_new_logprobs and "content" in lp_obj:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
@@ -1136,14 +1142,33 @@ class OpenAICompatBackend(Backend):
                     lp = float(lp_raw) if lp_raw is not None else float("nan")
                     smc_raw = entry.get("sampling_mask_count")
                     smc = int(smc_raw) if smc_raw is not None else None
-                    all_positions.append(
-                        (tid, tok, lp, entry.get("top_logprobs", []), smc, first_in_chunk)
+                    text_off_raw = entry.get("text_offset")
+                    text_off: int | None = (
+                        int(text_off_raw) if text_off_raw is not None else None
                     )
-                    first_in_chunk = False
+                    # ``sampling_logprob`` exists (even if null) ONLY
+                    # for emitted positions on Fireworks; on echo
+                    # positions the key is absent entirely.
+                    has_signal = (
+                        "sampling_logprob" in entry
+                        or "sampling_mask_count" in entry
+                    )
+                    all_positions.append(
+                        (
+                            tid,
+                            tok,
+                            lp,
+                            entry.get("top_logprobs", []),
+                            smc,
+                            text_off,
+                            has_signal,
+                        )
+                    )
             else:
                 chunk_tokens = lp_obj.get("tokens") or []
                 chunk_lps = lp_obj.get("token_logprobs") or []
                 chunk_tops = lp_obj.get("top_logprobs") or []
+                offsets = lp_obj.get("text_offset") or []
                 for i, tok in enumerate(chunk_tokens):
                     lp = (
                         float(chunk_lps[i])
@@ -1151,23 +1176,44 @@ class OpenAICompatBackend(Backend):
                         else float("nan")
                     )
                     top_entry = chunk_tops[i] if i < len(chunk_tops) else None
-                    all_positions.append(
-                        (None, tok, lp, top_entry, None, first_in_chunk)
+                    text_off = (
+                        int(offsets[i]) if i < len(offsets) and offsets[i] is not None else None
                     )
-                    first_in_chunk = False
+                    all_positions.append(
+                        (None, tok, lp, top_entry, None, text_off, False)
+                    )
             fr = ch.get("finish_reason")
             if fr is not None:
                 last_finish_reason = str(fr)
 
-        # Split point: the prompt-echo block is always the *first chunk's*
-        # batch (Fireworks emits all echoed positions in one go before
-        # the first generated token). After the first chunk, every
-        # ``is_first_in_chunk`` marker corresponds to a newly emitted
-        # token's chunk. We split at the FIRST marker that isn't at
-        # index 0.
+        # Split point: walk all positions and classify each as echo or
+        # emit using the three-tier signal. The split is the FIRST
+        # emit index found; everything before is echo (and we trust
+        # the upstream to maintain order, since OpenAI-style completions
+        # always echo-then-emit).
+        prompt_len = len(prompt)
         split_at = len(all_positions)
-        for idx, item in enumerate(all_positions[1:], start=1):
-            if item[5]:  # first_in_chunk
+        running_text_len = 0
+        for idx, (_, tok_text, _, _, _, text_off, has_signal) in enumerate(
+            all_positions
+        ):
+            is_emit = False
+            if text_off is not None:
+                # Primary signal: text_offset >= len(prompt) means the
+                # position starts AT or AFTER the end of the prompt
+                # (the first emitted token has text_offset == prompt_len
+                # in Fireworks; some providers use > so we accept both).
+                is_emit = text_off >= prompt_len
+            elif has_signal:
+                # Secondary: sampling_logprob/mask_count presence.
+                is_emit = True
+            else:
+                # Tertiary: cumulative text accounting. Once we've
+                # echoed at least the full prompt the next position
+                # must be the first emit.
+                running_text_len += len(tok_text)
+                is_emit = running_text_len > prompt_len
+            if is_emit:
                 split_at = idx
                 break
 
@@ -1177,9 +1223,15 @@ class OpenAICompatBackend(Backend):
         # Build StepResults for prompt-echo positions. ``chosen`` is the
         # token that actually appears at this prompt position; rank
         # comes from looking it up inside the chunk's top_logprobs.
-        for pos_idx, (tok_id_real, tok_text, tok_lp, top_entry, smc, _) in enumerate(
-            prompt_records
-        ):
+        for pos_idx, (
+            tok_id_real,
+            tok_text,
+            tok_lp,
+            top_entry,
+            smc,
+            _text_off,
+            _has_signal,
+        ) in enumerate(prompt_records):
             if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
                 cands = self._cands_from_new_logprobs(top_entry)
             else:
@@ -1214,9 +1266,15 @@ class OpenAICompatBackend(Backend):
         tokens_before: list[int] = self.tokenize(prompt)
         step_idx = 0
         total = len(emit_records)
-        for i, (tok_id_real, tok_text, tok_lp, top_entry, smc, _) in enumerate(
-            emit_records
-        ):
+        for i, (
+            tok_id_real,
+            tok_text,
+            tok_lp,
+            top_entry,
+            smc,
+            _text_off,
+            _has_signal,
+        ) in enumerate(emit_records):
             if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
                 cands = self._cands_from_new_logprobs(top_entry)
             else:

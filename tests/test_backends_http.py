@@ -1646,6 +1646,191 @@ def test_stream_native_with_echo_splits_prompt_and_generation(monkeypatch) -> No
     assert gen_steps[-1].stop_reason == "max_tokens"
 
 
+def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
+    """Real Fireworks streams one position per SSE chunk; the split
+    must use ``text_offset`` (or fall back to cumulative length /
+    sampling-signal presence) rather than chunk boundaries.
+
+    The original implementation assumed "first chunk = all echo, rest
+    = emit" -- which collapses to "1 echo + N emit" on real Fireworks
+    where every position arrives in its own chunk. The Chrome MCP
+    manual check caught this regression: a 4-token prompt rendered
+    only 1 row in the prompt-logits table. This pin reproduces the
+    exact wire shape (one entry per chunk, with text_offset, with
+    sampling_logprob on emit positions only) so any future drift in
+    the split heuristic fails loudly.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.types import StepResult
+
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_combined_echo_stream=True,
+    )
+
+    def _echo_entry(text: str, tid: int, lp: float, offset: int) -> dict:
+        return {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": text,
+                                "token_id": tid,
+                                "logprob": lp,
+                                "text_offset": offset,
+                                "top_logprobs": [
+                                    {"token": text, "token_id": tid, "logprob": lp}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    def _emit_entry(
+        text: str, tid: int, lp: float, offset: int, finish: str | None = None
+    ) -> dict:
+        return {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": text,
+                                "token_id": tid,
+                                "logprob": lp,
+                                "text_offset": offset,
+                                "sampling_logprob": lp,
+                                "sampling_mask_count": 100,
+                                "top_logprobs": [
+                                    {"token": text, "token_id": tid, "logprob": lp}
+                                ],
+                            }
+                        ]
+                    },
+                    "finish_reason": finish,
+                }
+            ]
+        }
+
+    # Prompt "Hi friend" = 9 chars, tokens: ["Hi", " friend"] at offsets 0, 2.
+    # Emit: "!" at offset 9, "." at offset 10.
+    chunks = [
+        _echo_entry("Hi", 100, 0.0, 0),
+        _echo_entry(" friend", 200, -1.0, 2),
+        _emit_entry("!", 300, -0.5, 9),
+        _emit_entry(".", 400, -0.8, 10, finish="length"),
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    out = list(
+        backend.stream_native_with_echo(
+            "Hi friend",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=2,
+            top_k=1,
+        )
+    )
+    step_results = [x for x in out if isinstance(x, StepResult)]
+    gen_steps = [x for x in out if isinstance(x, GenStep)]
+    # The fix: BOTH echo positions land in prompt_score, BOTH emit
+    # positions land in the gen stream. Pre-fix only the first chunk
+    # contributed to prompt_score, so this would have asserted 1/3
+    # instead of the correct 2/2.
+    assert [s.chosen.token_id for s in step_results] == [100, 200]
+    assert [g.decision.token_id for g in gen_steps] == [300, 400]
+    # Sampling-mask data only on emit positions (Fireworks behavior).
+    assert all(s.chosen.sampling_mask_count is None for s in step_results)
+    assert all(
+        g.step_result.chosen.sampling_mask_count == 100 for g in gen_steps
+    )
+
+
+def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
+    """Fallback split signal: ``sampling_mask_count`` presence.
+
+    When the provider omits ``text_offset`` (and the cumulative-text
+    fallback doesn't help because tokens contain weird unicode), we
+    fall back to "first entry that carries a non-null
+    ``sampling_logprob`` / ``sampling_mask_count`` starts the emit
+    block". Pinned here so the secondary signal can't silently
+    regress.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.types import StepResult
+
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_combined_echo_stream=True,
+    )
+    chunks = [
+        # Echo entries: NO text_offset, NO sampling_logprob/mask.
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": "X",
+                                "token_id": 1,
+                                "logprob": 0.0,
+                                "top_logprobs": [],
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        # Emit entry: sampling_mask_count present.
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": "Y",
+                                "token_id": 2,
+                                "logprob": -0.1,
+                                "sampling_mask_count": 50,
+                                "top_logprobs": [],
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    # Use a prompt whose char length doesn't help split (single ascii
+    # token would make the cumulative-text heuristic fire too early or
+    # too late depending on prompt). A 5-char prompt + 1-char echo
+    # token leaves running_text_len=1<5 after the echo, so the
+    # cumulative-text path would NOT split there -- only the
+    # sampling-signal path puts the boundary in the right place.
+    out = list(
+        backend.stream_native_with_echo(
+            "12345",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    step_results = [x for x in out if isinstance(x, StepResult)]
+    gen_steps = [x for x in out if isinstance(x, GenStep)]
+    assert [s.chosen.token_id for s in step_results] == [1]
+    assert [g.decision.token_id for g in gen_steps] == [2]
+
+
 def test_stream_native_with_echo_forwards_echo_last(monkeypatch) -> None:
     """``echo_last`` reaches the wire when the provider opts in."""
     backend, mock = _make_oc_backend(

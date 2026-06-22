@@ -103,6 +103,71 @@
   type LogitBiasRow = { id: string; tokenId: string; bias: string };
   let logitBiasRows = $state<LogitBiasRow[]>([]);
 
+  // ``tokenCache`` is an id->text dictionary populated from every
+  // ``prompt_score`` and ``step`` SSE frame across the lifetime of
+  // the page. It powers two UX wins:
+  //
+  //   1. Tokens rendered in the prompt-logits and generation-steps
+  //      tables become clickable. One tap adds the token (with a
+  //      sensible default bias) to the ``logit bias`` editor, so the
+  //      user doesn't have to copy the numeric id by hand.
+  //   2. The ``token_id`` input inside the bias editor is backed by
+  //      an HTML ``<datalist>`` whose options are every cached
+  //      (id, text) pair. Typing ``" Pa"`` autocompletes to the
+  //      Paris token id (etc.), making manual entry usable.
+  //
+  // The cache only grows for the active session and is wiped on a
+  // full page reload, which is fine -- token vocabularies differ per
+  // backend and persisting them across reloads invites confusing
+  // suggestions when the user swaps backends mid-flow.
+  let tokenCache = $state<Record<number, string>>({});
+
+  function rememberToken(id: number | null | undefined, text: string): void {
+    if (id === null || id === undefined) return;
+    if (!Number.isFinite(id)) return;
+    // Synthetic intern ids (>= 1<<24) come from local backends that
+    // can't expose real model ids; biasing on them would be a no-op
+    // upstream because the cloud /completions endpoint never sees
+    // them. Skip caching synthetics to keep the suggestion list
+    // useful.
+    if (id >= 1 << 24) return;
+    if (tokenCache[id] !== undefined) return;
+    tokenCache = { ...tokenCache, [id]: text };
+  }
+
+  function rememberFromStep(s: StepResult | null | undefined): void {
+    if (!s) return;
+    if (s.chosen) rememberToken(s.chosen.token_id, s.chosen.text);
+    for (const c of s.candidates ?? []) rememberToken(c.token_id, c.text);
+  }
+
+  /**
+   * Add a token to the logit_bias editor. If a row for this id
+   * already exists we don't add a duplicate -- we just leave the
+   * existing row in place (the user can edit its bias). Default
+   * bias of -100 mirrors the Fireworks "ban this token" idiom; the
+   * user can flip the sign in the row's bias input if they wanted
+   * to nudge UP instead.
+   */
+  function addToBias(tokenId: number, defaultBias: number = -100): void {
+    const tidStr = String(tokenId);
+    if (logitBiasRows.some((r) => r.tokenId === tidStr)) return;
+    logitBiasRows = [
+      ...logitBiasRows,
+      { id: crypto.randomUUID(), tokenId: tidStr, bias: String(defaultBias) }
+    ];
+  }
+
+  // Cached sorted view for the <datalist>: numeric ascending so the
+  // dropdown reads predictably (the user picks IDs by text 90% of
+  // the time anyway -- the alphabetical-by-text option would shuffle
+  // every time the cache grew, which is jarring).
+  let tokenCacheEntries = $derived(
+    Object.entries(tokenCache)
+      .map(([id, text]) => ({ id: Number(id), text }))
+      .sort((a, b) => a.id - b.id)
+  );
+
   let backendInfo = $derived<BackendInfo | null>(
     $info.info?.backends.find((b) => b.name === backend) ?? null
   );
@@ -286,10 +351,17 @@
     try {
       for await (const evt of stream.events) {
         if (evt.event === 'step') {
-          steps = [...steps, evt.step as GenStep];
+          const gs = evt.step as GenStep;
+          steps = [...steps, gs];
+          // Populate the token-id cache from this step so the bias
+          // editor's autocomplete and the click-to-bias buttons can
+          // reference this token on the next iteration.
+          rememberFromStep(gs.step_result);
+          rememberToken(gs.decision?.token_id, gs.decision?.token_text ?? '');
         } else if (evt.event === 'prompt_score') {
           promptSteps = (evt as { steps: StepResult[] }).steps ?? [];
           promptNote = (evt as { note?: string }).note ?? '';
+          for (const s of promptSteps) rememberFromStep(s);
         } else if (evt.event === 'perf') {
           const p = (evt as { metrics?: PerfMetricsPayload }).metrics;
           perf = p && typeof p === 'object' ? p : null;
@@ -352,6 +424,37 @@
 </script>
 
 <Toast message={streamError} onClose={() => (streamError = null)} />
+
+<!--
+  ``biasable`` is the "click a token to add it to the logit_bias
+  editor" snippet used by every prompt-logits / generation-steps
+  table cell. Defined here once and rendered with
+  ``{@render biasable(token_id, text, isSpecial, classes)}`` further
+  down. When the backend doesn't support logit_bias OR the token id
+  is synthetic (>= 1<<24, intern-only), we fall through to a plain
+  ``TokenText`` so chat-only backends don't grow useless click
+  affordances and biasing on a synthetic id (a no-op upstream) is
+  prevented at the UI level.
+-->
+{#snippet biasable(
+  tokenId: number | null | undefined,
+  text: string,
+  isSpecial: boolean,
+  classes: string
+)}
+  {#if logitBiasSupported && tokenId !== null && tokenId !== undefined && Number.isFinite(tokenId) && tokenId < 1 << 24}
+    <button
+      type="button"
+      class="bias-add-btn"
+      title={`token id ${tokenId} — click to add to logit_bias (default −100)`}
+      onclick={() => addToBias(tokenId)}
+    >
+      <TokenText text={text} isSpecial={isSpecial} className={classes} />
+    </button>
+  {:else}
+    <TokenText text={text} isSpecial={isSpecial} className={classes} />
+  {/if}
+{/snippet}
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
   <div class="card lg:col-span-1 space-y-3">
@@ -511,13 +614,30 @@
         {#if logitBiasRows.length}
           <div class="space-y-1">
             {#each logitBiasRows as row (row.id)}
+              {@const cachedText =
+                Number.isFinite(Number.parseInt(row.tokenId, 10))
+                  ? tokenCache[Number.parseInt(row.tokenId, 10)]
+                  : undefined}
               <div class="flex items-center gap-2">
-                <input
-                  type="number"
-                  class="input flex-1 font-mono text-xs"
-                  placeholder="token_id"
-                  bind:value={row.tokenId}
-                />
+                <div class="flex-1 min-w-0">
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    list="token-id-suggestions"
+                    autocomplete="off"
+                    class="input w-full font-mono text-xs"
+                    placeholder="token_id (autocomplete: type id or text)"
+                    title={cachedText !== undefined
+                      ? `id ${row.tokenId} = ${JSON.stringify(cachedText)}`
+                      : 'pick from the autocomplete list or type a numeric id'}
+                    bind:value={row.tokenId}
+                  />
+                  {#if cachedText !== undefined}
+                    <div class="text-[10px] text-slate-500 font-mono truncate" title={cachedText}>
+                      = {cachedText}
+                    </div>
+                  {/if}
+                </div>
                 <input
                   type="number"
                   step="0.5"
@@ -542,8 +662,19 @@
           </div>
         {:else}
           <div class="text-xs text-slate-500">
-            no entries -- click <em>add</em> to bias a token (e.g. -100 to ban, +5 to nudge past top_p).
+            no entries — click any token in the
+            <em>prompt logits</em> / <em>generation steps</em> tables
+            to add it (default bias <span class="font-mono">−100</span>,
+            i.e. ban), or hit <em>add</em> and type a numeric id
+            (autocomplete shows tokens seen so far).
           </div>
+        {/if}
+        {#if tokenCacheEntries.length}
+          <datalist id="token-id-suggestions">
+            {#each tokenCacheEntries as e (e.id)}
+              <option value={String(e.id)} label={`${e.id} · ${e.text}`}></option>
+            {/each}
+          </datalist>
         {/if}
       </div>
     {/if}
@@ -623,6 +754,16 @@
           <option value="default">default (shared serverless pool)</option>
           <option value="priority">priority (dedicated lane)</option>
         </select>
+        <p class="mt-1 text-[11px] text-slate-500 leading-snug">
+          On Fireworks, <span class="font-mono">priority</span> routes
+          the request to a dedicated, lower-latency inference pool
+          (higher per-token cost, no rate-limit sharing).
+          <span class="font-mono">default</span> uses the shared
+          serverless pool — cheaper, but subject to occasional cold
+          starts and rate caps. Pick <span class="font-mono">priority</span>
+          for latency-sensitive experiments (ttft matters) or when the
+          default pool returns 429s under load.
+        </p>
       </div>
     {/if}
     <div class="flex gap-2">
@@ -818,7 +959,7 @@
                 </td>
                 <td class="table-cell">
                   {#if s.chosen}
-                    <TokenText text={s.chosen.text} isSpecial={s.chosen.is_special} className="font-mono" />
+                    {@render biasable(s.chosen.token_id, s.chosen.text, s.chosen.is_special, 'font-mono')}
                   {:else}
                     <span class="text-slate-500">?</span>
                   {/if}
@@ -833,7 +974,7 @@
                   <div class="flex flex-col gap-0.5">
                     {#each s.candidates.slice(0, alternatives) as c}
                       <div class="flex items-center gap-2">
-                        <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />
+                        {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
                         <span class="text-xs text-slate-500 tabular-nums">
                           {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
                         </span>
@@ -872,7 +1013,12 @@
               <tr class="border-b border-slate-800/60" data-token-row>
                 <td class="table-cell font-mono text-slate-400">{s.step}</td>
                 <td class="table-cell">
-                  <TokenText text={s.decision.token_text} className="font-mono" />
+                  {@render biasable(
+                    s.decision.token_id,
+                    s.decision.token_text,
+                    false,
+                    'font-mono'
+                  )}
                 </td>
                 <td class="table-cell w-40">
                   <ConfidenceBar prob={chosenProb(s)} />
@@ -886,7 +1032,7 @@
                   <div class="flex flex-col gap-0.5">
                     {#each s.step_result.candidates.slice(0, alternatives) as c}
                       <div class="flex items-center gap-2">
-                        <TokenText text={c.text} isSpecial={c.is_special} className="font-mono text-xs" />
+                        {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
                         <span class="text-xs text-slate-500 tabular-nums">
                           {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
                         </span>
@@ -902,3 +1048,33 @@
     {/if}
   </div>
 </div>
+
+<style>
+  /* "Click a token to bias it" affordance used in every prompt-logits
+     and generation-steps table cell. We keep it visually almost
+     identical to the surrounding TokenText so the tables don't turn
+     into a sea of buttons -- a faint underline on hover plus a tiny
+     border-bottom hint that the token is clickable. The button
+     resets default browser styling (background, padding, font) so
+     ``TokenText`` can render the token glyphs unchanged. */
+  .bias-add-btn {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-bottom: 1px dotted rgb(71 85 105 / 0.6);
+    border-radius: 0;
+    line-height: inherit;
+  }
+  .bias-add-btn:hover {
+    border-bottom-color: rgb(56 189 248);
+    background: rgb(56 189 248 / 0.08);
+  }
+  .bias-add-btn:focus-visible {
+    outline: 2px solid rgb(56 189 248);
+    outline-offset: 2px;
+  }
+</style>
