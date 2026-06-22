@@ -71,7 +71,14 @@ def make_test_config(
             "local": {},
             "remote": {n: {"base_url": u} for n, u in remotes.items()},
             "providers": {},
-            "web": {"api_token": web_token},
+            # ``web.logging.enabled = False`` keeps build_test_app() from
+            # opening a SQLite file during every test; the upstream-request
+            # logging path has its own dedicated tests that build the DB
+            # explicitly against ``:memory:``.
+            "web": {
+                "api_token": web_token,
+                "logging": {"enabled": False},
+            },
         },
         config_path=None,
         secrets_env_file=secrets_env_file,

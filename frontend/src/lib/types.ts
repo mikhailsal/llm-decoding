@@ -214,3 +214,73 @@ export interface ProbeResponse {
   fresh: boolean;
   cached_at: number | null;
 }
+
+/**
+ * Upstream-request log shapes -- mirror ``decoding_sandbox.web.logs_api``.
+ *
+ * Every outgoing HTTP call the middleware makes to a real backend (dsbx-host dsbx
+ * server, Fireworks/NIM/OpenRouter, local llama-server) lands as one row.
+ * Streaming responses are merged into a single ``response_body`` plus a list
+ * of the raw frames in ``stream_chunks``.
+ */
+export interface LogSummary {
+  id: string;
+  // ISO-8601 timestamp string; the UI parses it with Date(...) when needed.
+  timestamp: string;
+  backend_name: string;
+  backend_family: string;
+  provider_name: string | null;
+  method: string;
+  upstream_path: string;
+  response_status_code: number | null;
+  is_streaming: boolean;
+  latency_ms: number | null;
+  ttft_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  model_resolved: string | null;
+  // List-page snippet (truncated server-side to ~240 chars). Use ``getLog``
+  // to fetch the full untruncated text.
+  completion_text: string | null;
+  stop_reason: string | null;
+  error_message: string | null;
+}
+
+export interface LogDetail extends LogSummary {
+  upstream_url: string;
+  request_headers: Record<string, string> | null;
+  request_body: unknown;
+  request_body_text: string | null;
+  response_headers: Record<string, string> | null;
+  response_body: unknown;
+  response_body_text: string | null;
+  stream_chunks: unknown[] | null;
+}
+
+export interface LogListResponse {
+  items: LogSummary[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+export interface LogStats {
+  total: number;
+  streaming: number;
+  non_streaming: number;
+  error_count: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  avg_latency_ms: number | null;
+  avg_ttft_ms: number | null;
+}
+
+export interface LogListParams {
+  cursor?: string | null;
+  limit?: number;
+  backend?: string | null;
+  provider?: string | null;
+  status_code?: number | null;
+  is_error?: boolean | null;
+  since?: string | null;
+}

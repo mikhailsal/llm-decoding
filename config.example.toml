@@ -169,3 +169,20 @@ cors_origins = ["http://localhost:5173"]
 # How long an idle manual-decoding session lives on the middleware before it
 # gets evicted (seconds). 1h is a reasonable default for a single-user box.
 manual_session_ttl = 3600
+
+# Upstream-request logging: every outgoing HTTP call the middleware makes
+# (RemoteBackend -> dsbx-host, OpenAICompatBackend -> Fireworks/NIM/..., HTTP
+# llama-server) is captured and persisted to a SQLite file. The frontend's
+# ``/logs`` tab reads from this DB. Set ``enabled = false`` to opt out
+# entirely; the rest of the keys are tunables.
+[web.logging]
+enabled = true
+# Where the SQLite file lives. ``~`` and environment variables are expanded.
+# The parent directory is created on first write.
+db_path = "~/.local/share/dsbx/logs.db"
+# Background-flush knobs. The writer wakes up either when ``batch_size`` rows
+# have piled up or after ``flush_interval_seconds`` of quiet, whichever comes
+# first. SQLite is local so even sustained 10 RPS finishes a batch well
+# under a second.
+batch_size = 50
+flush_interval_seconds = 5.0

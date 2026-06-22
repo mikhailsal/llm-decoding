@@ -25,7 +25,8 @@
     { href: '/generate', label: 'Generate' },
     { href: '/manual', label: 'Manual' },
     { href: '/spec', label: 'Speculative' },
-    { href: '/status', label: 'Status' }
+    { href: '/status', label: 'Status' },
+    { href: '/logs', label: 'Logs' }
   ];
 
   function logout() {

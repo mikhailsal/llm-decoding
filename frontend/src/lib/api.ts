@@ -13,6 +13,12 @@
 import { get } from 'svelte/store';
 import { auth } from './stores/auth';
 import { streamSseEvents, type SseFrame } from './sse';
+import type {
+  LogDetail,
+  LogListParams,
+  LogListResponse,
+  LogStats
+} from './types';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -110,4 +116,65 @@ export function apiStream(
     events: eventStream,
     cancel: () => controller.abort()
   };
+}
+
+// --------------------------------------------------------------------------- //
+// Upstream-request log API
+// --------------------------------------------------------------------------- //
+function logsQueryString(params: LogListParams | undefined): string {
+  if (!params) return '';
+  const usp = new URLSearchParams();
+  if (params.cursor) usp.set('cursor', params.cursor);
+  if (params.limit !== undefined && params.limit !== null) {
+    usp.set('limit', String(params.limit));
+  }
+  if (params.backend) usp.set('backend', params.backend);
+  if (params.provider) usp.set('provider', params.provider);
+  if (params.status_code !== undefined && params.status_code !== null) {
+    usp.set('status_code', String(params.status_code));
+  }
+  if (params.is_error !== undefined && params.is_error !== null) {
+    usp.set('is_error', params.is_error ? 'true' : 'false');
+  }
+  if (params.since) usp.set('since', params.since);
+  const qs = usp.toString();
+  return qs ? `?${qs}` : '';
+}
+
+/** Fetch one page of log rows, newest first. */
+export function listLogs(params?: LogListParams): Promise<LogListResponse> {
+  return apiFetch<LogListResponse>(`/api/v1/logs${logsQueryString(params)}`);
+}
+
+/** Fetch one full log row including bodies and stream chunks. */
+export function getLog(id: string): Promise<LogDetail> {
+  return apiFetch<LogDetail>(`/api/v1/logs/${encodeURIComponent(id)}`);
+}
+
+/** LIKE search across URL / model / error / body text columns. */
+export function searchLogs(q: string, limit = 50): Promise<LogListResponse> {
+  const usp = new URLSearchParams({ q, limit: String(limit) });
+  return apiFetch<LogListResponse>(`/api/v1/logs/search?${usp.toString()}`);
+}
+
+/** Dashboard-style counters (totals, error count, average latency). */
+export function getLogStats(): Promise<LogStats> {
+  return apiFetch<LogStats>('/api/v1/logs/stats');
+}
+
+/** Delete one row, all rows older than ``before``, or every row. */
+export function deleteLogs(opts: {
+  log_id?: string;
+  before?: string;
+  all?: boolean;
+}): Promise<{ deleted: number }> {
+  const usp = new URLSearchParams();
+  if (opts.log_id) usp.set('log_id', opts.log_id);
+  if (opts.before) usp.set('before', opts.before);
+  if (opts.all) usp.set('all', 'true');
+  const qs = usp.toString();
+  return apiFetch<{ deleted: number }>(
+    `/api/v1/logs${qs ? `?${qs}` : ''}`,
+    { method: 'DELETE' }
+  );
 }

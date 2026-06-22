@@ -55,10 +55,21 @@ class RemoteBackend(Backend):
         *,
         client: httpx.Client | None = None,
         timeout: float = 120.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
-        self._client = client or httpx.Client(base_url=self.base_url, timeout=timeout)
+        if client is not None:
+            # An explicit client overrides the transport kwarg -- the
+            # test path uses this to inject a ``TestClient`` or
+            # ``MockTransport`` directly. The web layer always uses the
+            # ``transport=`` form so logging is uniform across backends.
+            self._client = client
+        else:
+            client_kwargs: dict[str, object] = {"base_url": self.base_url, "timeout": timeout}
+            if transport is not None:
+                client_kwargs["transport"] = transport
+            self._client = httpx.Client(**client_kwargs)  # type: ignore[arg-type]
         info = self._get_info()
         self._capabilities = _capabilities_from_dict(info["capabilities"])
         self._backend_kind: str = str(info.get("backend_kind", "unknown"))

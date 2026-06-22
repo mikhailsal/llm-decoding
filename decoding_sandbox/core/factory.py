@@ -24,8 +24,13 @@ through OpenAICompatBackend.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.config import Config
+
+if TYPE_CHECKING:  # avoid a hard httpx import here; the type is only used in signatures
+    import httpx
 
 LOCAL_BACKENDS = ("hf", "llamacpp", "llamacpp-py")
 
@@ -36,7 +41,23 @@ def _normalize(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
-def build_backend(name: str, cfg: Config, model: str | None = None) -> Backend:
+def build_backend(
+    name: str,
+    cfg: Config,
+    model: str | None = None,
+    *,
+    transport: "httpx.BaseTransport | None" = None,
+) -> Backend:
+    """Construct one backend instance by name.
+
+    ``transport`` is an optional :class:`httpx.BaseTransport` the caller
+    (typically :mod:`decoding_sandbox.web.backends`) wants installed on
+    every HTTP client built inside this function. Passing it here keeps
+    the CLI path unchanged (default ``None`` -> httpx's default
+    transport) while letting the web middleware uniformly route
+    upstream calls through a :class:`LoggingTransport`. In-process
+    backends (``hf``, ``llamacpp-py``) simply ignore it.
+    """
     norm = _normalize(name)
     if norm == "hf":
         from decoding_sandbox.backends.hf import HFBackend
@@ -53,7 +74,10 @@ def build_backend(name: str, cfg: Config, model: str | None = None) -> Backend:
         from decoding_sandbox.backends.llamacpp import LlamaCppBackend
 
         lc = cfg.get("local", "llamacpp", default={})
-        return LlamaCppBackend(lc.get("base_url", "http://127.0.0.1:8080"))
+        return LlamaCppBackend(
+            lc.get("base_url", "http://127.0.0.1:8080"),
+            transport=transport,
+        )
 
     if norm in ("llamacpp-py", "llamacpp-python", "llama-py"):
         from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
@@ -75,7 +99,7 @@ def build_backend(name: str, cfg: Config, model: str | None = None) -> Backend:
     # underscores), fall back to the lowered original.
     for candidate in (norm, name.lower()):
         if candidate in cfg.remotes:
-            return _build_remote(cfg.remotes[candidate])
+            return _build_remote(cfg.remotes[candidate], transport=transport)
 
     if norm == "remote":
         # Generic ``--backend remote`` picks the single configured entry.
@@ -95,19 +119,23 @@ def build_backend(name: str, cfg: Config, model: str | None = None) -> Backend:
                 "``--backend <NAME>`` to pick one."
             )
         only = next(iter(cfg.remotes.values()))
-        return _build_remote(only)
+        return _build_remote(only, transport=transport)
 
     for candidate in (norm, name.lower()):
         if candidate in cfg.providers:
             from decoding_sandbox.backends.openai_compat import OpenAICompatBackend
 
-            return OpenAICompatBackend(cfg.provider(candidate), model=model)
+            return OpenAICompatBackend(
+                cfg.provider(candidate),
+                model=model,
+                transport=transport,
+            )
 
     available = list(LOCAL_BACKENDS) + sorted(cfg.remotes) + sorted(cfg.providers)
     raise ValueError(f"Backend '{name}' not available. Choose from: {available}")
 
 
-def _build_remote(rc) -> Backend:
+def _build_remote(rc, *, transport: "httpx.BaseTransport | None" = None) -> Backend:
     """Build a ``RemoteBackend`` from a :class:`RemoteConfig` entry.
 
     Kept in a helper so the factory has a single import point for the
@@ -117,4 +145,4 @@ def _build_remote(rc) -> Backend:
     """
     from decoding_sandbox.backends.remote import RemoteBackend
 
-    return RemoteBackend(rc.base_url, timeout=rc.timeout)
+    return RemoteBackend(rc.base_url, timeout=rc.timeout, transport=transport)

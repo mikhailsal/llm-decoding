@@ -103,20 +103,28 @@ class OpenAICompatBackend(Backend):
         max_retries: int = _MAX_RETRIES,
         base_backoff_s: float = _BASE_BACKOFF_S,
         sleep: Any = time.sleep,
+        transport: httpx.BaseTransport | None = None,
     ):
         # ``sleep`` is injectable so tests can drive retry behaviour without
         # actually waiting wall-clock seconds. Default is ``time.sleep`` in
         # production. ``max_retries`` / ``base_backoff_s`` are knobs the
         # ProviderConfig could pipe through later, but defaulting them here
-        # keeps the config schema unchanged.
+        # keeps the config schema unchanged. ``transport`` is the
+        # logging hook the web layer installs (see
+        # ``decoding_sandbox.web.logging.transport``); leaving it
+        # ``None`` keeps the CLI path on httpx's default transport.
         self.provider = provider
         self.model = model or provider.default_model
         key = provider.api_key() or "not-needed"
-        self._client = httpx.Client(
-            base_url=provider.base_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            timeout=timeout,
-        )
+        self._transport = transport
+        client_kwargs: dict[str, object] = {
+            "base_url": provider.base_url.rstrip("/"),
+            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "timeout": timeout,
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        self._client = httpx.Client(**client_kwargs)  # type: ignore[arg-type]
         self._id_to_text: dict[int, str] = {}
         self._text_to_id: dict[str, int] = {}
         self._max_retries = max(0, int(max_retries))
@@ -837,11 +845,16 @@ class OpenAICompatBackend(Backend):
         out: list[str] = []
         next_token = ""
         # A separate client so the Bearer header reaches the non-compat host.
-        with httpx.Client(
-            base_url=base,
-            headers=dict(self._client.headers),
-            timeout=timeout,
-        ) as client:
+        # We thread the same logging transport through so catalogue fetches
+        # show up in the upstream-request log alongside chat/completions calls.
+        client_kwargs: dict[str, object] = {
+            "base_url": base,
+            "headers": dict(self._client.headers),
+            "timeout": timeout,
+        }
+        if self._transport is not None:
+            client_kwargs["transport"] = self._transport
+        with httpx.Client(**client_kwargs) as client:  # type: ignore[arg-type]
             while True:
                 suffix = f"&pageToken={next_token}" if next_token else ""
                 r = client.get(url + suffix)

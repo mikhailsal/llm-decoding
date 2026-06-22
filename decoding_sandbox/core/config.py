@@ -85,10 +85,24 @@ _DEFAULTS: dict[str, Any] = {
     # misconfigured deployment fails loudly at startup rather than serving
     # an unauthenticated API. Override via [web] in config.toml or
     # $DSBX_WEB_TOKEN / --token at the CLI.
+    #
+    # The nested ``[web.logging]`` table controls the upstream-request log
+    # store (see decoding_sandbox/web/logging/). When ``enabled`` is true
+    # every outgoing HTTP call from RemoteBackend / OpenAICompatBackend /
+    # LlamaCppBackend lands as one row in the SQLite database at
+    # ``db_path``, which the SvelteKit ``/logs`` tab reads back. The flush
+    # task batches up to ``batch_size`` entries or flushes every
+    # ``flush_interval_seconds`` seconds, whichever comes first.
     "web": {
         "api_token": "",
         "cors_origins": ["http://localhost:5173"],
         "manual_session_ttl": 3600,
+        "logging": {
+            "enabled": True,
+            "db_path": "~/.local/share/dsbx/logs.db",
+            "batch_size": 50,
+            "flush_interval_seconds": 5.0,
+        },
     },
     "providers": {
         "fireworks": {

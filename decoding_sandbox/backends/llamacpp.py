@@ -20,10 +20,18 @@ class LlamaCppBackend(Backend):
         *,
         max_top_logprobs: int = 40,
         timeout: float = 120.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._max_top = max_top_logprobs
-        self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        # ``transport`` is optional so the CLI path keeps using httpx's
+        # default transport (no SQLAlchemy / aiosqlite dependency). The
+        # web middleware injects a ``LoggingTransport`` here so every
+        # /tokenize / /completion call lands in the upstream-request log.
+        client_kwargs: dict[str, object] = {"base_url": self.base_url, "timeout": timeout}
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        self._client = httpx.Client(**client_kwargs)  # type: ignore[arg-type]
         self._piece_cache: dict[int, str] = {}
         self._model_name = self._fetch_model_name()
 

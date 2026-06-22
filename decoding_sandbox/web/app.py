@@ -28,6 +28,7 @@ the heavy lifting living in :mod:`backends`, :mod:`sessions`, and
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -69,18 +70,67 @@ def make_web_app(
     """Build the FastAPI app. See module docstring for the full contract."""
     auth = AuthConfig(token=token, server_label=server_label)
     require_bearer = make_require_bearer(auth)
-    registry = BackendRegistry(cfg)
+    # Read the [web.logging] table now so the registry knows whether to
+    # build LoggingTransports for new backends. The event loop reference
+    # gets attached during the lifespan startup hook below.
+    log_cfg = (cfg.get("web", "logging", default={}) or {})
+    logging_enabled = bool(log_cfg.get("enabled", True))
+    registry = BackendRegistry(cfg, logging_enabled=logging_enabled)
     sessions = ManualSessionRegistry(ttl_seconds=manual_ttl_seconds)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Startup is a no-op (we built ``registry`` already so the app is
-        # ready to serve immediately). Shutdown closes every backend the
-        # registry ever loaded so e.g. httpx clients to dsbx-host get a clean
-        # disconnect and HF models release VRAM.
-        yield
-        log.info("dsbx-web: shutting down -- closing %d backends", len(registry.names()))
-        registry.close_all()
+        # Startup: bring up the upstream-request log store and bind the
+        # asyncio loop reference into the BackendRegistry. The registry
+        # was constructed synchronously above (before any loop existed),
+        # so attaching now is the earliest moment we can give its
+        # transports a way to schedule enqueues from worker threads.
+        if logging_enabled:
+            from decoding_sandbox.web.logging import (
+                dispose_engine,
+                init_engine,
+                start_logging_service,
+                stop_logging_service,
+            )
+
+            db_path = str(log_cfg.get("db_path", "~/.local/share/dsbx/logs.db"))
+            batch_size = int(log_cfg.get("batch_size", 50))
+            flush_interval = float(log_cfg.get("flush_interval_seconds", 5.0))
+            try:
+                await init_engine(db_path)
+                start_logging_service(batch_size=batch_size, flush_interval=flush_interval)
+                registry.attach_loop(asyncio.get_running_loop())
+                log.info("dsbx-web: upstream-request log store online (%s)", db_path)
+            except Exception:  # noqa: BLE001
+                # Logging is a tooling feature; if the DB can't open we
+                # still want the proxied API to keep working. Log the
+                # failure loudly and continue with logging effectively
+                # disabled for this run (no service running -> enqueue
+                # is a no-op).
+                log.exception("dsbx-web: log store init failed; continuing without logging")
+
+        try:
+            yield
+        finally:
+            # Shutdown order:
+            # 1. close backends so httpx clients stop emitting requests.
+            # 2. stop the flush task so it sees no more enqueues.
+            # 3. dispose the engine (closes the SQLite connection).
+            log.info(
+                "dsbx-web: shutting down -- closing %d backends", len(registry.names())
+            )
+            registry.close_all()
+            if logging_enabled:
+                try:
+                    from decoding_sandbox.web.logging import (
+                        dispose_engine,
+                        stop_logging_service,
+                    )
+
+                    await stop_logging_service()
+                    await dispose_engine()
+                except Exception:  # noqa: BLE001
+                    log.exception("dsbx-web: error during log store shutdown")
 
     app = FastAPI(
         title="dsbx web",
@@ -111,6 +161,14 @@ def make_web_app(
     app.state.sessions = sessions
     app.state.cfg = cfg
     app.state.auth = auth
+
+    # Upstream-request logs router. Mounted only when logging is enabled
+    # so a [web.logging].enabled = false deployment doesn't expose 503s
+    # under /api/v1/logs/*.
+    if logging_enabled:
+        from decoding_sandbox.web.logs_api import make_logs_router
+
+        app.include_router(make_logs_router(require_bearer))
 
     # --------------------------------------------------------------- health
     @app.get("/api/v1/health", response_model=S.HealthResponse, tags=["meta"])

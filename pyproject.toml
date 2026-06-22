@@ -57,14 +57,24 @@ server = [
 web = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Async SQLite for the upstream-request log store. SQLAlchemy 2.x is the
+    # async ORM; aiosqlite is the driver. Both pure-Python; SQLite itself
+    # ships with the stdlib.
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.23",
     "ruff>=0.6",
     # Tests for the server endpoints + RemoteBackend round-trip need
     # FastAPI's TestClient; pull the [server] extras in for the dev env.
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # The upstream-request log store; tests exercise its SQLAlchemy layer
+    # against an in-memory aiosqlite DB.
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
 ]
 
 [project.scripts]
@@ -76,3 +86,10 @@ include = ["decoding_sandbox*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.pytest.ini_options]
+# Auto-mode lets us write ``async def test_*`` without @pytest.mark.asyncio
+# noise on every test. The upstream-request logging tests live entirely in
+# asyncio land (SQLAlchemy async engine + queue + flush task), so this is
+# the right default.
+asyncio_mode = "auto"

@@ -28,6 +28,7 @@ Public listing rules:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -110,9 +111,24 @@ class BackendRegistry:
 
     Use as a context manager so all loaded instances are closed cleanly on
     shutdown (releases httpx clients for remote backends, VRAM for HF, etc.).
+
+    ``logging_enabled`` controls whether outgoing HTTP calls from
+    ``RemoteBackend`` / ``OpenAICompatBackend`` / ``LlamaCppBackend`` are
+    captured into the upstream-request log. When True the registry
+    builds a fresh :class:`LoggingTransport` per backend (tagged with
+    the backend name / family / provider) and threads it through
+    :func:`build_backend`. ``loop`` is the asyncio event loop those
+    transports should schedule their enqueues on; captured here because
+    the actual httpx call site runs on a worker thread.
     """
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        logging_enabled: bool = False,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
         self._cfg = cfg
         self._entries: dict[str, _BackendEntry] = {}
         self._models_cache: dict[str, ModelListEntry] = {}
@@ -120,7 +136,55 @@ class BackendRegistry:
         # generate stream (holding a per-backend lock) doesn't block a
         # browser asking "what models are available?".
         self._models_lock = threading.Lock()
+        self._logging_enabled = bool(logging_enabled)
+        self._loop = loop
         self._enumerate()
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Bind the asyncio loop after construction.
+
+        ``make_web_app`` builds the registry synchronously (before the
+        FastAPI lifespan fires), so the actual event loop reference
+        becomes available only later. Calling this from the startup
+        hook lets every transport built afterwards know where to
+        schedule enqueues. Transports built BEFORE the attach receive
+        ``loop=None`` and fall back to a private ``asyncio.run`` -- only
+        the registry constructor cares about this distinction.
+        """
+        self._loop = loop
+
+    def _build_transport(self, entry: _BackendEntry):
+        """Build a fresh :class:`LoggingTransport` tagged for this backend.
+
+        Returns ``None`` when logging is disabled so the caller can pass
+        the result straight to ``build_backend(..., transport=...)``
+        without a branch. The transport carries the registered backend
+        name, family, provider name (when cloud), and the upstream base
+        URL so the log row's UI shows them without an extra join.
+        """
+        if not self._logging_enabled:
+            return None
+        # Local import: keeping the import lazy lets the CLI keep working
+        # without SQLAlchemy installed (the ``web`` extra brings it in).
+        from decoding_sandbox.web.logging.transport import LoggingTransport
+
+        base_url = ""
+        if entry.family == "remote":
+            rc = self._cfg.remotes.get(entry.name)
+            base_url = rc.base_url if rc is not None else ""
+        elif entry.family == "cloud":
+            prov = self._cfg.providers.get(entry.name)
+            base_url = prov.base_url if prov is not None else ""
+        elif entry.name == "llamacpp":
+            base_url = self._cfg.get("local", "llamacpp", "base_url", default="") or ""
+
+        return LoggingTransport(
+            backend_name=entry.name,
+            backend_family=entry.family,
+            provider_name=entry.name if entry.family == "cloud" else None,
+            upstream_base_url=base_url,
+            loop=self._loop,
+        )
 
     # ------------------------------------------------------- discovery
     def _enumerate(self) -> None:
@@ -335,8 +399,10 @@ class BackendRegistry:
             # reusing entry.instance / one of entry.cloud_variants: the
             # catalogue endpoint is per-provider, not per-model, so the
             # cached chat client is irrelevant here. Construction is cheap
-            # (one httpx.Client) and we close it immediately.
-            probe = OpenAICompatBackend(prov)
+            # (one httpx.Client) and we close it immediately. The probe
+            # also gets a logging transport so catalogue fetches end up
+            # in the same upstream-request log as chat/completions calls.
+            probe = OpenAICompatBackend(prov, transport=self._build_transport(entry))
             try:
                 live = probe.fetch_available_models()
             finally:
@@ -451,13 +517,17 @@ class BackendRegistry:
                 name,
                 model,
             )
-            inst = build_backend(name, self._cfg, model=model)
+            inst = build_backend(
+                name, self._cfg, model=model, transport=self._build_transport(entry)
+            )
             entry.cloud_variants[model] = inst
             return inst
 
         if entry.instance is None:
             log.info("dsbx-web: building backend %r on first use", name)
-            entry.instance = build_backend(name, self._cfg, model=None)
+            entry.instance = build_backend(
+                name, self._cfg, model=None, transport=self._build_transport(entry)
+            )
         return entry.instance
 
     def use(self, name: str, model: str | None = None) -> "_LockedBackend":

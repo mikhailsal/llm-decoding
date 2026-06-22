@@ -29,7 +29,7 @@ def test_build_backend_lowercases_name() -> None:
     called: dict = {}
 
     class _Stub:
-        def __init__(self, provider, model=None):
+        def __init__(self, provider, model=None, **_kwargs):
             called["provider"] = provider
             called["model"] = model
 
@@ -51,7 +51,7 @@ def test_build_backend_llamacpp_alias() -> None:
     constructed: dict = {}
 
     class _Stub:
-        def __init__(self, base_url):
+        def __init__(self, base_url, **_kwargs):
             constructed["base_url"] = base_url
 
     orig = lc.LlamaCppBackend
@@ -193,7 +193,7 @@ def test_build_backend_routes_provider_to_openai_compat(monkeypatch) -> None:
     seen: dict = {}
 
     class _Stub:
-        def __init__(self, provider, model=None):
+        def __init__(self, provider, model=None, **_kwargs):
             seen["name"] = provider.name
 
     monkeypatch.setattr(oc, "OpenAICompatBackend", _Stub)
@@ -219,7 +219,7 @@ def test_build_backend_routes_remote_alias(monkeypatch) -> None:
     captured: dict = {}
 
     class _Stub:
-        def __init__(self, base_url, *, timeout=120.0):
+        def __init__(self, base_url, *, timeout=120.0, **_kwargs):
             captured["base_url"] = base_url
             captured["timeout"] = timeout
 
@@ -241,7 +241,7 @@ def test_build_backend_bare_remote_picks_single_alias(monkeypatch) -> None:
     monkeypatch.setattr(
         rmod,
         "RemoteBackend",
-        lambda base_url, *, timeout=120.0: captured.update(base_url=base_url),
+        lambda base_url, *, timeout=120.0, **_kwargs: captured.update(base_url=base_url),
     )
     factory_mod.build_backend("remote", cfg)
     assert captured["base_url"] == "http://x:1"
