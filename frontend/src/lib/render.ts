@@ -24,7 +24,7 @@ export interface TokenSegment {
   text: string;
 }
 
-const SPACE = '\u2423'; // ␣
+const SPACE = '\u2423\u200B'; // ␣ + zero-width space
 const NEWLINE = '\u21B5'; // ↵
 const TAB = '\u2192'; // →
 
