@@ -238,6 +238,34 @@ class PromptScoreEvent(BaseModel):
     note: str = ""
 
 
+class UsageEvent(BaseModel):
+    """Per-run resource accounting, emitted immediately BEFORE ``done``.
+
+    Lets the UI surface how heavy a generate call actually was: number
+    of HTTP requests against an upstream provider (so the spamming-the-
+    cloud pattern that historically tripped Fireworks's per-account RPS
+    limit on glm-5p2 is visible at a glance), and the prompt/completion
+    token totals reported by the provider's billing layer when available.
+
+    Token fields are nullable so backends that can't measure a quantity
+    leave them ``None`` and the UI renders ``—``. ``notes`` carries
+    advisory lines a backend may want the user to see -- for example,
+    "this cloud provider always halts on EOS" when the caller asked
+    for ``respect_eos=False`` against a Fireworks model.
+
+    The frame is intentionally separate from ``done`` so existing
+    consumers that key off the terminal event don't have to learn a
+    new shape; the wire order is unchanged otherwise.
+    """
+
+    event: Literal["usage"] = "usage"
+    requests: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class DoneEvent(BaseModel):
     event: Literal["done"] = "done"
     stop_reason: str | None = None
@@ -412,6 +440,7 @@ __all__ = [
     "GenerateRequest",
     "StepEvent",
     "PromptScoreEvent",
+    "UsageEvent",
     "DoneEvent",
     "ManualCreateRequest",
     "ManualSnapshot",

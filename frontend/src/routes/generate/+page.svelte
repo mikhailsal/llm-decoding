@@ -11,7 +11,7 @@
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
   import { probFromLogprob, tokenBackgroundClass } from '$lib/render';
-  import type { GenStep, StepResult, TokenCandidate, BackendInfo } from '$lib/types';
+  import type { GenStep, StepResult, TokenCandidate, BackendInfo, UsagePayload } from '$lib/types';
 
   let backend = $state<string>('');
   let model = $state<string>('');
@@ -45,6 +45,12 @@
   let streamError = $state<string | null>(null);
   let busy = $state(false);
   let cancelFn: (() => void) | null = null;
+  // Per-run usage badge under "running completion": shows how many HTTP
+  // requests this run consumed (so the historical "20 requests for 20
+  // tokens" pattern is visible at a glance) plus prompt/completion
+  // token totals reported by the provider (or computed locally for
+  // non-cloud backends). Cleared at the start of each new run.
+  let usage = $state<UsagePayload | null>(null);
 
   let backendInfo = $derived<BackendInfo | null>(
     $info.info?.backends.find((b) => b.name === backend) ?? null
@@ -88,6 +94,7 @@
     promptSteps = [];
     promptNote = '';
     stopReason = null;
+    usage = null;
     busy = true;
     const stop_ids = stopIds
       .map((s) => Number.parseInt(s, 10))
@@ -113,6 +120,15 @@
         } else if (evt.event === 'prompt_score') {
           promptSteps = (evt as { steps: StepResult[] }).steps ?? [];
           promptNote = (evt as { note?: string }).note ?? '';
+        } else if (evt.event === 'usage') {
+          const u = evt as unknown as UsagePayload & { event: 'usage' };
+          usage = {
+            requests: u.requests ?? 0,
+            prompt_tokens: u.prompt_tokens ?? null,
+            completion_tokens: u.completion_tokens ?? null,
+            total_tokens: u.total_tokens ?? null,
+            notes: Array.isArray(u.notes) ? u.notes : []
+          };
         } else if (evt.event === 'done') {
           stopReason = (evt as { stop_reason?: string | null }).stop_reason ?? null;
           const err = (evt as { error?: string | null }).error;
@@ -289,6 +305,26 @@
       </div>
       {#if stopReason}
         <div class="text-xs text-slate-500 mt-2">stopped: <span class="font-mono">{stopReason}</span></div>
+      {/if}
+      {#if usage}
+        <div class="text-xs text-slate-500 mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>
+            <span class="font-mono tabular-nums {usage.requests > 1 ? 'text-amber-400' : 'text-slate-300'}">{usage.requests}</span>
+            request{usage.requests === 1 ? '' : 's'}
+          </span>
+          <span>
+            in <span class="font-mono tabular-nums text-slate-300">{usage.prompt_tokens ?? '—'}</span>
+            ·
+            out <span class="font-mono tabular-nums text-slate-300">{usage.completion_tokens ?? '—'}</span>
+            tokens
+            {#if usage.total_tokens !== null}
+              <span class="text-slate-600">(total <span class="font-mono tabular-nums">{usage.total_tokens}</span>)</span>
+            {/if}
+          </span>
+          {#each usage.notes as note}
+            <span class="text-amber-400 normal-case">⚠ {note}</span>
+          {/each}
+        </div>
       {/if}
     </div>
 

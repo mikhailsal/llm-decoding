@@ -707,6 +707,209 @@ def test_mock_response_headers_default_empty() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# OpenAICompatBackend: seed / respect_eos / usage accounting
+# --------------------------------------------------------------------------- #
+def test_stream_native_body_carries_seed_and_include_usage(monkeypatch) -> None:
+    """``seed`` and ``stream_options.include_usage`` are wired into the body.
+
+    Both used to be silently dropped on the native cloud path: the UI
+    collected a seed value, ``GenerateRequest`` validated it, the web
+    layer passed it to ``stream_generate`` -- and the openai-compat
+    backend never put it on the wire. ``include_usage`` is new: it's
+    what makes the provider return the final ``usage`` chunk we now
+    surface to the user as the ``usage`` SSE event.
+    """
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            stop_ids=None,
+            seed=42,
+            respect_eos=True,
+        )
+    )
+
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["seed"] == 42
+    assert body["stream_options"] == {"include_usage": True}
+
+
+def test_stream_native_respect_eos_false_adds_advisory_note(monkeypatch) -> None:
+    """Cloud providers can't honor ``respect_eos=False``, so we say so.
+
+    There is no documented OpenAI-compat field that asks the server
+    to keep generating past EOS; every provider halts on the model's
+    EOS token. Rather than silently lying about the flag, we leave a
+    one-line note on the active usage sink so the UI can surface it
+    next to the request counter.
+    """
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    sink = {"requests": 0, "notes": []}
+    backend.set_active_usage(sink)
+
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            respect_eos=False,
+        )
+    )
+
+    assert sink["notes"]
+    assert any("respect_eos" in n for n in sink["notes"])
+
+
+def test_request_counts_each_attempt_into_active_usage(monkeypatch) -> None:
+    """``_request`` writes one to ``requests`` per HTTP attempt, retries included.
+
+    The semantics we want for the UI is "how much did this run press
+    on the provider's RPS budget". A 429-then-200 retry shows up as
+    ``requests=2`` here, matching what the upstream load-balancer
+    counted; the user can then visually correlate "weird latency" with
+    "the backend retried this run twice".
+    """
+    sleeps: list[float] = []
+    success_payload = {
+        "choices": [
+            {"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}
+        ]
+    }
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): [
+                (429, {}, {"Retry-After": "0.01"}),
+                (200, success_payload, {}),
+            ]
+        },
+        has_completions=True,
+        max_retries=2,
+        sleeps=sleeps,
+    )
+    sink = {"requests": 0}
+    backend.set_active_usage(sink)
+
+    backend.next_distribution(backend.tokenize("hi"), top_k=2)
+
+    # Initial 429 + successful retry = 2 attempts = 2 increments.
+    assert sink["requests"] == 2
+
+
+def test_post_records_provider_reported_token_usage(monkeypatch) -> None:
+    """A ``usage`` block in the JSON response feeds the active sink.
+
+    Most OpenAI-compat providers attach a ``usage`` object to every
+    completion (counts they bill against). Surfacing it lets the UI
+    display real provider-side prompt/completion token counts instead
+    of our best-effort local estimate.
+    """
+    payload = {
+        "choices": [
+            {"logprobs": {"top_logprobs": [{" hi": -0.1}]}}
+        ],
+        "usage": {"prompt_tokens": 13, "completion_tokens": 1, "total_tokens": 14},
+    }
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={("POST", "/completions"): payload},
+        has_completions=True,
+    )
+    sink = {"requests": 0, "prompt_tokens": None, "completion_tokens": None}
+    backend.set_active_usage(sink)
+
+    backend.next_distribution(backend.tokenize("p"), top_k=1)
+
+    assert sink["prompt_tokens"] == 13
+    assert sink["completion_tokens"] == 1
+    assert sink["total_tokens"] == 14
+
+
+def test_stream_native_records_usage_from_final_chunk(monkeypatch) -> None:
+    """The terminal SSE chunk's ``usage`` object lands in the active sink.
+
+    With ``stream_options.include_usage=True`` upstream providers send
+    a final chunk that has an empty ``choices`` array but a populated
+    ``usage`` block. ``stream_native`` reads that out of band and
+    forwards it via :func:`record_tokens` -- the per-token loop must
+    NOT try to interpret that chunk as another emitted token.
+    """
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    chunks = [
+        {
+            "choices": [
+                {
+                    "text": "X",
+                    "logprobs": {
+                        "tokens": ["X"],
+                        "token_logprobs": [-0.05],
+                        "top_logprobs": [{"X": -0.05}],
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+        # Final SSE chunk that ``include_usage`` triggers.
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}},
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    sink = {"requests": 0, "prompt_tokens": None, "completion_tokens": None}
+    backend.set_active_usage(sink)
+
+    steps = list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+
+    assert len(steps) == 1  # the empty-choices usage chunk did NOT become a step
+    assert steps[0].decision.token_text == "X"
+    assert sink["prompt_tokens"] == 5
+    assert sink["completion_tokens"] == 1
+    assert sink["total_tokens"] == 6
+
+
+def test_set_active_usage_clear_stops_accounting(monkeypatch) -> None:
+    """Once the caller clears the sink, subsequent calls don't accrete onto it.
+
+    The web layer clears ``backend.set_active_usage(None)`` in its
+    ``finally`` so a later request can't see counters from a previous
+    run. Reading from a cleared backend must be a clean no-op.
+    """
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [{"logprobs": {"top_logprobs": [{" hi": -0.1}]}}]
+            }
+        },
+        has_completions=True,
+    )
+    sink = {"requests": 0}
+    backend.set_active_usage(sink)
+    backend.next_distribution(backend.tokenize("p"), top_k=1)
+    assert sink["requests"] == 1
+
+    # Clear and run again -- the sink must stay at 1.
+    backend.set_active_usage(None)
+    backend.next_distribution(backend.tokenize("p"), top_k=1)
+    assert sink["requests"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # LlamaCppBackend
 # --------------------------------------------------------------------------- #
 def _make_llamacpp_backend(

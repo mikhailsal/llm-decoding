@@ -29,6 +29,7 @@ import random
 from collections.abc import Iterator
 from typing import Any
 
+from decoding_sandbox.core import usage as usage_mod
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.engine import generate as core_generate
 from decoding_sandbox.core.samplers import Sampler
@@ -83,12 +84,31 @@ def stream_generate(
     """
     use_remote_stream = hasattr(backend, "stream_generate")
 
+    # Per-run usage accounting. Backends implementing
+    # :class:`decoding_sandbox.core.usage.UsageAware` (OpenAICompatBackend
+    # today) write HTTP attempt counts and provider-reported token
+    # totals into this sink; we emit the populated dict as a dedicated
+    # ``usage`` SSE frame immediately before the terminating ``done``
+    # so the UI can show "how many requests / tokens did this run
+    # actually cost?". The sink is bound to the backend by setting
+    # ``backend.set_active_usage(usage)``; we clear it again in a
+    # ``finally`` so a later call on the same backend instance can't
+    # accidentally accrete onto our dict. The per-backend lock held by
+    # :mod:`decoding_sandbox.web.backends` makes this concurrency-safe.
+    usage: usage_mod.UsageSink = usage_mod.make_sink()
+    completion_steps = 0  # local fallback counter (one increment per emitted step)
+    error: str | None = None
+    bound_usage = False
+    if isinstance(backend, usage_mod.UsageAware):
+        backend.set_active_usage(usage)
+        bound_usage = True
+
     last_reason: str | None = None
     try:
         if include_prompt:
             yield from _emit_prompt_score(backend, prompt=prompt, top_k=top_k)
         if use_remote_stream:
-            yield from _forward_remote_stream(
+            for gs in _iter_remote_stream(
                 backend,
                 prompt=prompt,
                 sampler_name=sampler_name,
@@ -98,10 +118,11 @@ def stream_generate(
                 stop_ids=stop_ids,
                 seed=seed,
                 respect_eos=respect_eos,
-            )
-            # _forward_remote_stream owns the terminating ``done`` frame.
-            return
-        if _can_use_native_cloud_stream(backend, sampler_name, sampler_params):
+            ):
+                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                completion_steps += 1
+                last_reason = gs.stop_reason
+        elif _can_use_native_cloud_stream(backend, sampler_name, sampler_params):
             # Cloud /completions provider + a built-in sampler: replace the
             # per-token decode loop (one HTTP request per token, the path
             # that historically tripped Fireworks' per-account RPS limit on
@@ -117,8 +138,11 @@ def stream_generate(
                 max_tokens=max_tokens,
                 top_k=top_k,
                 stop_ids=stop_ids,
+                seed=seed,
+                respect_eos=respect_eos,
             ):
                 yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                completion_steps += 1
                 last_reason = gs.stop_reason
         else:
             rng = random.Random(seed)
@@ -133,10 +157,50 @@ def stream_generate(
                 respect_eos=respect_eos,
             ):
                 yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                completion_steps += 1
                 last_reason = gs.stop_reason
     except Exception as exc:  # noqa: BLE001
         log.exception("dsbx-web: generate stream errored")
-        yield sse_frame({"event": "done", "stop_reason": last_reason, "error": str(exc)})
+        error = str(exc)
+    finally:
+        # Always release the sink so the next call on this backend
+        # starts clean. Doing it in ``finally`` covers the error path
+        # too -- we still want the usage frame to reflect the partial
+        # run, but no subsequent call should see a half-populated dict
+        # mistaken for "its own" accounting.
+        if bound_usage and isinstance(backend, usage_mod.UsageAware):
+            backend.set_active_usage(None)
+
+    # Fill in the token counters from the local view when the backend
+    # didn't report them. For the OpenAI-compat path the cloud server
+    # already wrote authoritative numbers into ``usage`` above; for
+    # local backends (HF / llamacpp_py) we use the backend's tokenizer
+    # for the prompt and the emitted-step count for the completion.
+    # We skip the prompt-tokens fallback for OpenAI-compat because its
+    # ``tokenize`` is synthetic (one id per whole-text intern) and would
+    # report nonsense.
+    if usage.get("completion_tokens") is None:
+        usage["completion_tokens"] = int(completion_steps)
+    is_openai_compat = backend.__class__.__name__ == "OpenAICompatBackend"
+    if usage.get("prompt_tokens") is None and not is_openai_compat:
+        try:
+            usage["prompt_tokens"] = int(len(backend.tokenize(prompt)))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("dsbx-web: prompt token count fallback failed: %s", exc)
+    # Round out total_tokens when both pieces are present and the
+    # provider didn't supply its own grand total.
+    if (
+        usage.get("total_tokens") is None
+        and usage.get("prompt_tokens") is not None
+        and usage.get("completion_tokens") is not None
+    ):
+        usage["total_tokens"] = int(usage["prompt_tokens"]) + int(usage["completion_tokens"])
+
+    # Emit ``usage`` BEFORE ``done`` so consumers that already key off
+    # ``done`` as the terminator don't have to special-case ordering.
+    yield sse_frame({"event": "usage", **usage})
+    if error is not None:
+        yield sse_frame({"event": "done", "stop_reason": last_reason, "error": error})
         return
     yield sse_frame({"event": "done", "stop_reason": last_reason})
 
@@ -223,7 +287,7 @@ def _emit_prompt_score(backend: Backend, *, prompt: str, top_k: int) -> Iterator
     )
 
 
-def _forward_remote_stream(
+def _iter_remote_stream(
     backend: Backend,
     *,
     prompt: str,
@@ -234,39 +298,30 @@ def _forward_remote_stream(
     stop_ids: list[int],
     seed: int,
     respect_eos: bool,
-) -> Iterator[bytes]:
-    """Pull ``GenStep`` objects from a remote backend, re-encode for the wire.
+):
+    """Yield ``GenStep`` objects from a remote backend.
 
-    The remote already framed each step as SSE on the wire; ``RemoteBackend``
-    parses those into ``GenStep`` instances for us. We just need to
-    re-serialize each one into the wire shape *this* server promises.
+    Previously this helper also owned the terminating ``done`` SSE frame
+    and the error-to-``done.error`` translation, which made it awkward
+    to add per-run usage accounting (the wrapper needed to count emitted
+    steps and emit a ``usage`` frame between the last step and ``done``).
+    The new shape pushes encoding + done/error responsibility back to the
+    caller so :func:`stream_generate` can keep its single, centralized
+    ``usage`` + ``done`` finalizer for all three paths. Any
+    ``RemoteBackendError`` raised here propagates naturally and is
+    handled by the caller's ``except`` block.
     """
-    from decoding_sandbox.backends.remote import RemoteBackendError
-
-    last_reason: str | None = None
-    try:
-        iterator = backend.stream_generate(  # type: ignore[attr-defined]
-            prompt,
-            sampler_name=sampler_name,
-            sampler_params=sampler_params,
-            max_tokens=max_tokens,
-            top_k=top_k,
-            stop_ids=stop_ids,
-            seed=seed,
-            respect_eos=respect_eos,
-        )
-        for gs in iterator:
-            yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
-            last_reason = gs.stop_reason
-    except RemoteBackendError as exc:
-        log.warning("dsbx-web: remote generate stream errored: %s", exc)
-        yield sse_frame({"event": "done", "stop_reason": last_reason, "error": str(exc)})
-        return
-    except Exception as exc:  # noqa: BLE001
-        log.exception("dsbx-web: remote generate stream errored unexpectedly")
-        yield sse_frame({"event": "done", "stop_reason": last_reason, "error": str(exc)})
-        return
-    yield sse_frame({"event": "done", "stop_reason": last_reason})
+    iterator = backend.stream_generate(  # type: ignore[attr-defined]
+        prompt,
+        sampler_name=sampler_name,
+        sampler_params=sampler_params,
+        max_tokens=max_tokens,
+        top_k=top_k,
+        stop_ids=stop_ids,
+        seed=seed,
+        respect_eos=respect_eos,
+    )
+    yield from iterator
 
 
 def stream_spec(

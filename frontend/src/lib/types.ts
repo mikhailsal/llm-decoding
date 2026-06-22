@@ -123,6 +123,24 @@ export interface PromptScorePayload {
   note: string;
 }
 
+export interface UsagePayload {
+  // HTTP calls against an upstream provider this run consumed.
+  // Includes retries on purpose: a 429-then-200 retry counts as 2,
+  // matching what the provider's rate-limit bucket saw.
+  requests: number;
+  // Provider-reported counts (preferred) or local fallback for
+  // backends without an upstream tokenizer. ``null`` means
+  // "unknown" -- e.g. chat-streaming providers that don't report
+  // a usage block.
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  // Short human-readable advisories the backend wanted the user to
+  // see, e.g. "respect_eos=False is unsupported by this cloud
+  // provider". Rendered next to the counters.
+  notes: string[];
+}
+
 export type SSEEvent =
   | { event: 'step'; step: GenStep }
   | {
@@ -132,6 +150,7 @@ export type SSEEvent =
       prompt_logprobs: boolean;
       note: string;
     }
+  | ({ event: 'usage' } & UsagePayload)
   | { event: 'done'; stop_reason: string | null; error?: string | null }
   | { event: 'round'; round: SpecRound }
   | {

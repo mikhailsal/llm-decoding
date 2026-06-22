@@ -236,7 +236,16 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
             return name in {"greedy", "top_p"}
 
         def stream_native(
-            self, prompt, *, sampler_name, sampler_params, max_tokens, top_k, stop_ids=None
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
         ):
             self.native_calls.append(
                 {
@@ -246,6 +255,8 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
                     "max_tokens": max_tokens,
                     "top_k": top_k,
                     "stop_ids": list(stop_ids or []),
+                    "seed": seed,
+                    "respect_eos": respect_eos,
                 }
             )
             cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
@@ -350,6 +361,128 @@ def test_generate_stream_falls_back_to_per_step_when_native_says_no() -> None:
     assert len([e for e in events if e["event"] == "step"]) == 2
     assert native_calls["n"] == 0
     assert next_dist_calls["n"] == 2
+
+
+def test_generate_stream_emits_usage_event_before_done(client) -> None:
+    """Every generate stream now ends with ``usage`` then ``done``.
+
+    For the local (HF/llamacpp_py/dsbx-host-py) path the backend doesn't
+    implement :class:`UsageAware`, so ``requests`` stays 0 and the
+    stream layer fills ``prompt_tokens`` from ``backend.tokenize`` and
+    ``completion_tokens`` from the number of emitted steps. We pin
+    the wire shape here so the UI's counter renderer can rely on it.
+    """
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 2,
+        "top_k": 5,
+        "stop_ids": [],
+        "seed": 0,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    events = _parse_sse(r.text)
+    # The terminator is still exactly one ``done`` -- the new ``usage``
+    # frame goes immediately before it.
+    assert events[-1]["event"] == "done"
+    assert events[-2]["event"] == "usage"
+    u = events[-2]
+    # Non-UsageAware backend: zero HTTP requests, tokens computed locally.
+    assert u["requests"] == 0
+    assert u["prompt_tokens"] == 2  # "ab" -> [97, 98]
+    assert u["completion_tokens"] == 2  # max_tokens=2, both emitted
+    assert u["total_tokens"] == 4
+    assert isinstance(u.get("notes"), list)
+
+
+def test_generate_stream_usage_event_records_native_backend_requests() -> None:
+    """A :class:`UsageAware` backend writes ``requests`` into the sink.
+
+    Mirrors what ``OpenAICompatBackend`` does in production: as each
+    HTTP attempt fires (success or 429-retry), the backend bumps the
+    counter on the bound sink. After the stream completes the web
+    layer emits the populated sink as a ``usage`` event so the user
+    sees real provider RPS pressure instead of "0 requests" for what
+    might be a 20-token storm of per-step calls.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import StepResult, TokenCandidate
+
+    class _AwareFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"hi": [1, 2]},
+                pieces={1: "h", 2: "i", 10: "X"},
+                distributions={(1, 2): [cand(10, "X", 0.99, 0)]},
+            )
+            self._sink = None
+
+        def set_active_usage(self, sink):
+            self._sink = sink
+
+        def supports_native_sampler(self, name, params):
+            return name == "greedy"
+
+        def stream_native(
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
+        ):
+            # Simulate two HTTP attempts (e.g. 429 -> 200) and a server-
+            # reported usage block. Both must land in the bound sink.
+            if self._sink is not None:
+                self._sink["requests"] = self._sink.get("requests", 0) + 2
+                self._sink["prompt_tokens"] = (self._sink.get("prompt_tokens") or 0) + 7
+                self._sink["completion_tokens"] = (self._sink.get("completion_tokens") or 0) + 1
+            cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2],
+                step_result=StepResult(
+                    position=2, candidates=[cand_x], is_full_vocab=False, chosen=cand_x
+                ),
+                decision=SamplerDecision(
+                    token_id=10, token_text="X", kept=[], greedy_token_id=10, note=""
+                ),
+                stop_reason="max_tokens",
+            )
+
+    backend = _AwareFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "hi",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 1,
+                "top_k": 5,
+            },
+        )
+    events = _parse_sse(r.text)
+    assert events[-1]["event"] == "done"
+    assert events[-2]["event"] == "usage"
+    u = events[-2]
+    # Backend's writes win over local fallbacks where present.
+    assert u["requests"] == 2
+    assert u["prompt_tokens"] == 7
+    assert u["completion_tokens"] == 1
+    # ``total_tokens`` is computed by the streamer when the backend
+    # didn't supply it explicitly.
+    assert u["total_tokens"] == 8
+    # The sink must be unbound after the call so the next stream
+    # doesn't accrete onto our dict.
+    assert backend._sink is None
 
 
 def test_generate_stream_runtime_error_lands_in_done() -> None:

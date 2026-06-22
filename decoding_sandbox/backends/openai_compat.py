@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 
+from decoding_sandbox.core import usage as usage_mod
 from decoding_sandbox.core.backend import Backend, candidates_from_logprobs
 from decoding_sandbox.core.config import ProviderConfig
 from decoding_sandbox.core.engine import GenStep
@@ -121,6 +122,28 @@ class OpenAICompatBackend(Backend):
         self._max_retries = max(0, int(max_retries))
         self._base_backoff_s = max(0.0, float(base_backoff_s))
         self._sleep = sleep
+        # The web layer sets this immediately before invoking a method
+        # and clears it after, while holding the per-backend lock from
+        # :mod:`decoding_sandbox.web.backends`. While it's set, every
+        # HTTP call here records itself into the sink (request count +
+        # provider-reported token usage). ``None`` means the caller
+        # doesn't want accounting -- e.g. CLI ``dsbx generate`` -- so
+        # the helpers are no-ops.
+        self._active_usage: usage_mod.UsageSink | None = None
+
+    def set_active_usage(self, sink: usage_mod.UsageSink | None) -> None:
+        """Bind a usage sink for the duration of the next backend call(s).
+
+        See :class:`decoding_sandbox.core.usage.UsageAware`. The per-
+        backend lock in the web registry serializes concurrent callers,
+        so a plain instance attribute is sufficient -- and avoids the
+        :mod:`contextvars` pitfalls around starlette's
+        ``iterate_in_threadpool`` (which propagates the calling task's
+        context to each worker thread COPY but doesn't propagate worker
+        mutations back, breaking any per-stream contextvar set inside
+        the body generator).
+        """
+        self._active_usage = sink
 
     # -- synthetic token-id space ----------------------------------------- #
     def _intern(self, text: str) -> int:
@@ -180,7 +203,22 @@ class OpenAICompatBackend(Backend):
         if self.provider.require_parameters:
             body.setdefault("provider", {})["require_parameters"] = True
         r = self._request("post", path, json=body)
-        return r.json()
+        data = r.json()
+        # If the provider returned a token-usage block (most do for both
+        # /completions and /chat/completions), forward it to the active
+        # usage sink so the UI can show real provider-side token counts.
+        # Falls through silently when no sink is active or no usage was
+        # reported, which is the right default for the test/script paths
+        # that don't care.
+        u = data.get("usage") if isinstance(data, dict) else None
+        if isinstance(u, dict):
+            usage_mod.record_tokens(
+                self._active_usage,
+                prompt_tokens=u.get("prompt_tokens"),
+                completion_tokens=u.get("completion_tokens"),
+                total_tokens=u.get("total_tokens"),
+            )
+        return data
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         """HTTP call with 429/5xx retry that honors ``Retry-After``.
@@ -206,6 +244,12 @@ class OpenAICompatBackend(Backend):
         """
         last_response: Any = None
         for attempt in range(self._max_retries + 1):
+            # Count every HTTP attempt (not just successful ones) so the
+            # usage sink reflects actual pressure on the provider's RPS
+            # budget. A 429-then-200 retry shows up as ``requests=2`` --
+            # which is the metric the user wants to see when diagnosing
+            # rate-limit issues.
+            usage_mod.record_request(self._active_usage)
             response = getattr(self._client, method)(path, **kwargs)
             last_response = response
             status = int(getattr(response, "status_code", 0))
@@ -390,6 +434,8 @@ class OpenAICompatBackend(Backend):
         max_tokens: int,
         top_k: int,
         stop_ids: list[int] | None = None,
+        seed: int = 0,
+        respect_eos: bool = True,
     ) -> Iterator[GenStep]:
         """Stream tokens via a single ``/completions`` SSE call.
 
@@ -418,6 +464,28 @@ class OpenAICompatBackend(Backend):
         caller's "stopped on EOS" / "stopped on max_tokens" footer keeps
         working.
 
+        ``seed`` is forwarded as the standard OpenAI ``seed`` field so
+        runs that the provider considers reproducible (typically dense
+        models on a single replica) actually are. Cloud MoE serving
+        notoriously isn't bit-deterministic even with a fixed seed
+        because of batch-dependent expert routing; we forward it
+        anyway because it removes the sampler-side noise even when the
+        kernel-side jitter remains, and the user can see this on the
+        ``usage.notes`` channel below.
+
+        ``respect_eos=False`` is genuinely unsupported on cloud
+        providers (they always halt when the model emits EOS, with no
+        documented escape hatch). When the caller asks for that mode we
+        run the request as if ``respect_eos=True`` and tack a
+        human-readable note onto the active usage sink so the UI can
+        say "the cloud ignored this flag" rather than silently lying.
+
+        ``stream_options.include_usage`` asks the provider to attach a
+        ``usage`` block to the final SSE chunk; we read those numbers
+        and feed them to :mod:`decoding_sandbox.core.usage` so the web
+        layer can render real prompt/completion token counts even
+        though we never tokenized the prompt locally.
+
         Raises :class:`NotImplementedError` if called on a chat-only
         provider; callers should branch on
         :meth:`supports_native_sampler` first.
@@ -428,6 +496,16 @@ class OpenAICompatBackend(Backend):
                 "streaming requires the raw text-completion path. Fall back "
                 "to the per-step decode loop via core.engine.generate."
             )
+        if not respect_eos:
+            # Surface, don't fail. Some users explicitly want to inspect
+            # what a base model would emit past EOS; on cloud the server
+            # simply won't let us. The note shows up in the ``usage``
+            # frame so the UI can render it next to the request counter.
+            usage_mod.add_note(
+                self._active_usage,
+                f"{self.provider.name!r} (cloud) always halts on EOS; "
+                "respect_eos=False has no effect on this backend",
+            )
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
@@ -435,6 +513,15 @@ class OpenAICompatBackend(Backend):
             "max_tokens": int(max_tokens),
             "logprobs": top,
             "stream": True,
+            # ``include_usage`` is a recent OpenAI addition supported by
+            # Fireworks and LM Studio; servers that don't recognize it
+            # ignore the extra key, so passing it unconditionally is safe.
+            "stream_options": {"include_usage": True},
+            # ``seed`` is a no-op for providers that don't implement it
+            # (their request validator just ignores unknown keys); when
+            # they DO implement it, we get reduced (not eliminated)
+            # sampling jitter for free.
+            "seed": int(seed),
         }
         body.update(self._sampler_to_api_params(sampler_name, sampler_params))
         if stop_ids:
@@ -471,6 +558,18 @@ class OpenAICompatBackend(Backend):
         last_finish_reason: str | None = None
 
         for chunk in self._iter_completions_stream(body):
+            # The final SSE chunk in an ``include_usage`` stream has an
+            # empty ``choices`` array and a populated ``usage`` block;
+            # we handle that case first so the per-token loop below
+            # doesn't have to special-case empty chunks.
+            u = chunk.get("usage") if isinstance(chunk, dict) else None
+            if isinstance(u, dict):
+                usage_mod.record_tokens(
+                    self._active_usage,
+                    prompt_tokens=u.get("prompt_tokens"),
+                    completion_tokens=u.get("completion_tokens"),
+                    total_tokens=u.get("total_tokens"),
+                )
             choices = chunk.get("choices") or []
             if not choices:
                 continue
