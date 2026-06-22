@@ -112,6 +112,27 @@ _DEFAULTS: dict[str, Any] = {
             "max_top_logprobs": 5,
             "supports_prompt_logprobs": True,
             "has_completions": True,
+            # Fireworks supports every /v1/completions extension we care
+            # about; turn them ALL on by default per the "always-on for
+            # Fireworks" decision in the implementation plan. The actual
+            # request body only carries each field when the caller (or
+            # ``stream_native``) decides it's relevant, so wire size is
+            # not affected for callers that don't ask for the feature.
+            "supports_ignore_eos": True,
+            "supports_perf_metrics": True,
+            "supports_raw_output": True,
+            "supports_sampling_mask": True,
+            "supports_return_token_ids": True,
+            "supports_echo_last": True,
+            "supports_mirostat": True,
+            "supports_typical_p_native": True,
+            "supports_repetition_penalty": True,
+            "supports_prompt_cache_key": True,
+            "supports_service_tier": True,
+            "supports_session_affinity": True,
+            "supports_new_logprobs": True,
+            "supports_logit_bias": True,
+            "supports_combined_echo_stream": True,
             "models": [
                 "accounts/fireworks/models/gpt-oss-120b",
                 "accounts/fireworks/models/gpt-oss-20b",
@@ -204,6 +225,51 @@ class ProviderConfig:
     # a UX convenience: spelling out the most useful 3-5 names per provider
     # so the browser doesn't have to know the provider's catalogue.
     models: list[str] = field(default_factory=list)
+    # -- provider-specific /completions extension flags ---------------------
+    # These map 1:1 to optional fields in the Fireworks CompletionRequest
+    # schema (https://docs.fireworks.ai/api-reference/post-completions).
+    # Default ``False`` so non-Fireworks providers stay on the conservative
+    # OpenAI-compatible subset; we flip each one to ``True`` for Fireworks
+    # in ``_DEFAULTS`` / ``config.example.toml``. The OpenAICompatBackend
+    # reads them to decide what to ship on the wire, and Capabilities
+    # surfaces them so the UI can adapt (e.g. unlock the ``respect EOS``
+    # checkbox once we know we can ship ``ignore_eos`` to the upstream).
+    supports_ignore_eos: bool = False  # ``ignore_eos: true``
+    supports_perf_metrics: bool = False  # ``perf_metrics_in_response: true``
+    supports_raw_output: bool = False  # ``raw_output: true`` -> RawOutput object
+    supports_sampling_mask: bool = False  # ``sampling_mask: "count"`` in NewLogProbs
+    supports_return_token_ids: bool = False  # ``return_token_ids: true``
+    supports_echo_last: bool = False  # ``echo_last: N`` (cheaper than ``echo: true``)
+    supports_mirostat: bool = False  # ``mirostat_target`` + ``mirostat_lr``
+    supports_typical_p_native: bool = False  # ``typical_p`` server-side
+    supports_repetition_penalty: bool = False  # ``repetition_penalty``
+    supports_prompt_cache_key: bool = False  # ``prompt_cache_key`` for KV-cache hits
+    supports_service_tier: bool = False  # ``service_tier: priority`` (etc.)
+    supports_session_affinity: bool = False  # ``x-session-affinity`` + R3 multi-turn id
+    # NewLogProbs (``logprobs: true`` + ``top_logprobs: N``) vs legacy
+    # (``logprobs: N``). The new format carries real token_id, bytes,
+    # sampling_logprob, sampling_mask_count per position; legacy returns
+    # ``top_logprobs[i]`` as ``{token_text: logprob}`` dicts. Fireworks
+    # supports the new format; LM Studio does too. NIM/OpenRouter are
+    # chat-only here so their next_distribution uses /chat/completions
+    # which already speaks the new format -- this flag specifically
+    # controls the /completions path. Default False keeps legacy behaviour
+    # for anything we haven't explicitly verified.
+    supports_new_logprobs: bool = False
+    # OpenAI Completions has always accepted ``logit_bias``; we still
+    # gate the UI editor on this flag so providers that quietly ignore
+    # the field don't expose a knob that does nothing.
+    supports_logit_bias: bool = False
+    # Fireworks documents ``echo=true`` + ``stream=true`` + ``logprobs``
+    # as a supported combination; when this flag is on the web layer
+    # uses :meth:`OpenAICompatBackend.stream_native_with_echo` to do
+    # ``include_prompt`` mode in ONE network round trip instead of two
+    # (separate ``score_prompt`` + ``stream_native`` requests). Off by
+    # default for safety: if a deployment doesn't tolerate the combo,
+    # the user keeps the two-request fallback. Run
+    # ``scripts/smoke_fireworks_echo_stream.py`` to confirm chunk order
+    # before flipping this on against a non-Fireworks provider.
+    supports_combined_echo_stream: bool = False
 
     def api_key(self) -> str | None:
         return os.environ.get(self.api_key_env)
@@ -336,6 +402,23 @@ def load_config(
             require_parameters=bool(pdata.get("require_parameters", False)),
             has_completions=bool(pdata.get("has_completions", False)),
             models=list(pdata.get("models", [])),
+            supports_ignore_eos=bool(pdata.get("supports_ignore_eos", False)),
+            supports_perf_metrics=bool(pdata.get("supports_perf_metrics", False)),
+            supports_raw_output=bool(pdata.get("supports_raw_output", False)),
+            supports_sampling_mask=bool(pdata.get("supports_sampling_mask", False)),
+            supports_return_token_ids=bool(pdata.get("supports_return_token_ids", False)),
+            supports_echo_last=bool(pdata.get("supports_echo_last", False)),
+            supports_mirostat=bool(pdata.get("supports_mirostat", False)),
+            supports_typical_p_native=bool(pdata.get("supports_typical_p_native", False)),
+            supports_repetition_penalty=bool(pdata.get("supports_repetition_penalty", False)),
+            supports_prompt_cache_key=bool(pdata.get("supports_prompt_cache_key", False)),
+            supports_service_tier=bool(pdata.get("supports_service_tier", False)),
+            supports_session_affinity=bool(pdata.get("supports_session_affinity", False)),
+            supports_new_logprobs=bool(pdata.get("supports_new_logprobs", False)),
+            supports_logit_bias=bool(pdata.get("supports_logit_bias", False)),
+            supports_combined_echo_stream=bool(
+                pdata.get("supports_combined_echo_stream", False)
+            ),
         )
 
     remotes: dict[str, RemoteConfig] = {}

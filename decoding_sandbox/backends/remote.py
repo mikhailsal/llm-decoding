@@ -263,12 +263,14 @@ def _candidate_from_dict(d: dict) -> TokenCandidate:
     """
     raw_lp = d.get("logprob")
     logprob = float(raw_lp) if raw_lp is not None else math.nan
+    smc = d.get("sampling_mask_count")
     return TokenCandidate(
         token_id=int(d["token_id"]),
         text=str(d.get("text", "")),
         logprob=logprob,
         rank=int(d.get("rank", -1)),
         is_special=bool(d.get("is_special", False)),
+        sampling_mask_count=int(smc) if smc is not None else None,
     )
 
 
@@ -299,6 +301,15 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         can_force_token=bool(d.get("can_force_token", False)),
         notes=str(d.get("notes", "")),
         eos_token_ids=tuple(int(i) for i in d.get("eos_token_ids", [])),
+        supports_ignore_eos=bool(d.get("supports_ignore_eos", False)),
+        supports_perf_metrics=bool(d.get("supports_perf_metrics", False)),
+        supports_service_tier=bool(d.get("supports_service_tier", False)),
+        supports_sampling_mask=bool(d.get("supports_sampling_mask", False)),
+        supports_raw_output=bool(d.get("supports_raw_output", False)),
+        supports_logit_bias=bool(d.get("supports_logit_bias", False)),
+        supports_combined_echo_stream=bool(
+            d.get("supports_combined_echo_stream", False)
+        ),
     )
 
 

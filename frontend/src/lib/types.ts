@@ -15,6 +15,28 @@ export interface Capabilities {
   can_force_token: boolean;
   notes: string;
   eos_token_ids: number[];
+  // Provider-specific /v1/completions extension flags. Surfaced so the
+  // UI can adapt without hard-coding provider names: ``supports_ignore_eos``
+  // unlocks the "respect EOS" checkbox for Fireworks; ``supports_perf_metrics``
+  // shows the server-timings panel; ``supports_sampling_mask`` adds the
+  // "eligible after filters" column to the steps table;
+  // ``supports_raw_output`` surfaces the "what the model saw" panel;
+  // ``supports_service_tier`` exposes the priority/default selector.
+  supports_ignore_eos: boolean;
+  supports_perf_metrics: boolean;
+  supports_service_tier: boolean;
+  supports_sampling_mask: boolean;
+  supports_raw_output: boolean;
+  supports_logit_bias: boolean;
+  /**
+   * When true, ``include_prompt`` runs as a single ``echo=true`` +
+   * ``stream=true`` request instead of two separate calls
+   * (``score_prompt`` + per-token stream). Halves provider RPS for
+   * the include-prompt path. The UI uses this flag to expose the
+   * ``echo_last`` knob (only meaningful when the combined path is
+   * actually used).
+   */
+  supports_combined_echo_stream: boolean;
 }
 
 export interface BackendInfo {
@@ -59,6 +81,15 @@ export interface TokenCandidate {
   logprob: number | null;
   rank: number;
   is_special: boolean;
+  /**
+   * Number of tokens that survived the server-side sampling filter
+   * stack (Fireworks `sampling_mask=count`). Only meaningful for the
+   * full distribution at a position -- the value is replicated onto
+   * every candidate at that position by the backend so the UI can
+   * read `candidates[0].sampling_mask_count` indiscriminately.
+   * `null` on backends that don't report it.
+   */
+  sampling_mask_count?: number | null;
 }
 
 export interface Watched {
@@ -141,6 +172,44 @@ export interface UsagePayload {
   notes: string[];
 }
 
+/**
+ * Server-side performance metrics, surfaced via the ``perf`` SSE frame.
+ *
+ * Populated only for backends that advertise ``supports_perf_metrics``
+ * (Fireworks today). The shape is opaque -- keys come straight from the
+ * upstream's ``perf_metrics`` block in the response body / final stream
+ * chunk. The UI renders known keys with friendly labels and falls back
+ * to ``key: value`` for anything unknown.
+ *
+ * Typical keys (Fireworks):
+ * - ``prompt-tokens`` / ``cached-prompt-tokens``
+ * - ``server-time-to-first-token`` (seconds)
+ * - ``server-processing-time`` (seconds)
+ * - ``prefill-duration`` / ``generation-duration``
+ * - ``speculation-acceptance`` (per-position acceptance, dedicated only)
+ * - ``backend-host`` / ``deployment`` (dedicated deployments only)
+ */
+export interface PerfMetricsPayload {
+  // Free-form: keys depend on the provider and deployment kind. Stored
+  // as ``unknown`` so consumers must check the type at render time.
+  [key: string]: unknown;
+}
+
+/**
+ * Provider-side "what the model actually saw" diagnostics.
+ *
+ * Mirrors the Fireworks `raw_output` block 1:1; we type the well-known
+ * keys (`prompt_fragments`, `prompt_token_ids`, `grammar`) so the UI
+ * can render them with structure, and keep the rest as `unknown` so a
+ * provider adding a new key doesn't force a wire-schema bump.
+ */
+export interface RawOutputPayload {
+  prompt_fragments?: string[] | null;
+  prompt_token_ids?: number[] | null;
+  grammar?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
 export type SSEEvent =
   | { event: 'step'; step: GenStep }
   | {
@@ -150,6 +219,8 @@ export type SSEEvent =
       prompt_logprobs: boolean;
       note: string;
     }
+  | { event: 'perf'; metrics: PerfMetricsPayload }
+  | { event: 'raw_output'; payload: RawOutputPayload }
   | ({ event: 'usage' } & UsagePayload)
   | { event: 'done'; stop_reason: string | null; error?: string | null }
   | { event: 'round'; round: SpecRound }

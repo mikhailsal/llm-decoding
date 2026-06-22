@@ -355,6 +355,11 @@ def make_web_app(
                     seed=int(req.seed),
                     respect_eos=bool(req.respect_eos),
                     include_prompt=bool(req.include_prompt),
+                    service_tier=req.service_tier,
+                    prompt_cache_key=req.prompt_cache_key,
+                    session_id=req.session_id,
+                    logit_bias=_coerce_logit_bias(req.logit_bias),
+                    echo_last=req.echo_last,
                 )
 
         return StreamingResponse(
@@ -602,6 +607,28 @@ def make_web_app(
 # --------------------------------------------------------------------------- #
 # Internal helpers
 # --------------------------------------------------------------------------- #
+def _coerce_logit_bias(raw: dict[str, float] | None) -> dict[int, float] | None:
+    """Turn a wire-shaped logit-bias dict (str keys) into ``{int: float}``.
+
+    The wire shape uses string keys (JSON requirement); the backend
+    expects int. Bad keys are silently dropped here so the request
+    still goes through with the valid entries instead of crashing the
+    whole stream on a single typo. The provider-side validator
+    further filters out NaN / out-of-range values in
+    :meth:`OpenAICompatBackend.stream_native` -- this layer is purely
+    string-to-int coercion plus a "drop garbage" pass.
+    """
+    if not raw:
+        return None
+    out: dict[int, float] = {}
+    for k, v in raw.items():
+        try:
+            out[int(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
 def _use_backend(registry: BackendRegistry, name: str, model: str | None = None):
     """``with _use_backend(...) as backend:`` -- lock + load.
 

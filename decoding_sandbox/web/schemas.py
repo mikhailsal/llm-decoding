@@ -216,6 +216,34 @@ class GenerateRequest(BaseModel):
     # that don't support prompt logprobs fall back to a single next-token
     # row, matching the inspect-page convention.
     include_prompt: bool = False
+    # Provider-specific knobs forwarded to OpenAICompatBackend.stream_native
+    # when the active backend's capabilities advertise support. Ignored
+    # otherwise. See ProviderConfig.supports_* fields and the Fireworks
+    # docs for what each does. ``session_id`` -- a stable per-session
+    # identifier -- becomes the ``x-session-affinity`` /
+    # ``x-multi-turn-session-id`` headers when the provider advertises
+    # session affinity; primarily used by the manual-decoding mode to
+    # keep KV-cache + MoE expert routing pinned to one replica.
+    service_tier: str | None = None
+    prompt_cache_key: str | None = None
+    session_id: str | None = None
+    # Per-request OpenAI-style logit bias map: ``{token_id: bias}``,
+    # where bias is in [-100, 100]. Forwarded to the provider when
+    # ``Capabilities.supports_logit_bias`` is true. Keys can arrive as
+    # strings or ints from JSON; the backend coerces and validates.
+    # Skipped entirely on backends that don't advertise support so a
+    # stale UI knob never silently lies. Use cases this turns into one-
+    # liners: banning a token (``bias=-100``), boosting a rare option
+    # past top_p truncation (``bias=+5..+15``), forcing a token in a
+    # constrained-grammar setup (``bias=+100``).
+    logit_bias: dict[str, float] | None = None
+    # ``echo_last=N`` (Fireworks; gated by
+    # ``ProviderConfig.supports_echo_last``) tells the provider to
+    # echo logprobs for only the LAST N prompt tokens instead of every
+    # one. Saves wire bytes + parsing CPU on long prompts when the
+    # user really only cares about the trailing context. ``None`` ==
+    # echo the whole prompt (the historical default).
+    echo_last: int | None = None
 
 
 class StepEvent(BaseModel):
@@ -236,6 +264,60 @@ class PromptScoreEvent(BaseModel):
     is_full_vocab: bool
     prompt_logprobs: bool
     note: str = ""
+
+
+class PerfMetricsEvent(BaseModel):
+    """Server-side performance metrics, emitted before ``usage`` / ``done``.
+
+    Populated only by providers that advertise
+    ``Capabilities.supports_perf_metrics`` and that returned a
+    ``perf_metrics`` block in the response body (or final streaming
+    chunk). See Fireworks' /v1/completions docs for the full schema --
+    we wrap it in an opaque ``metrics`` dict so adding a new key on the
+    upstream doesn't force a wire-schema bump.
+
+    Typical fields rendered by the UI:
+
+    - ``server-time-to-first-token``: TTFT in seconds
+    - ``prompt-tokens`` / ``cached-prompt-tokens``: prompt size + cache
+      hit count
+    - ``prefill-duration`` / ``generation-duration``: time split between
+      forward-pass phases
+    - ``speculation-acceptance``: per-position acceptance rates when
+      Fireworks ran speculative decoding under the hood
+    - ``backend-host``: which replica served us (dedicated deployments
+      only); useful when investigating "this run was slow but the next
+      was fast" on a multi-replica deployment.
+    """
+
+    event: Literal["perf"] = "perf"
+    metrics: dict = Field(default_factory=dict)
+
+
+class RawOutputEvent(BaseModel):
+    """Server-side "what the model actually saw" diagnostics.
+
+    Emitted between ``perf`` and ``usage`` (so order is ``step* ->
+    perf? -> raw_output? -> usage -> done``) when the provider
+    advertises ``supports_raw_output`` and returned a non-empty
+    ``raw_output`` block. The payload is a verbatim copy of the
+    provider's dict so the browser's "what the model saw" panel can
+    render every key the provider chose to include without us having
+    to type each one. Typical keys (Fireworks):
+
+    - ``prompt_fragments`` -- the prompt broken into the chunks the
+      templating engine fed to the model. Sanity-check for chat
+      templates that silently drop role tags.
+    - ``prompt_token_ids`` -- the actual tokenized prompt including
+      injected BOS / system tokens. Surfaces silent tokenizer
+      mismatches between the UI text and what the model saw.
+    - ``grammar`` -- compiled grammar object when response_format /
+      json mode is active; tells you which constrained-decoding FSM
+      ran.
+    """
+
+    event: Literal["raw_output"] = "raw_output"
+    payload: dict = Field(default_factory=dict)
 
 
 class UsageEvent(BaseModel):
@@ -440,6 +522,8 @@ __all__ = [
     "GenerateRequest",
     "StepEvent",
     "PromptScoreEvent",
+    "PerfMetricsEvent",
+    "RawOutputEvent",
     "UsageEvent",
     "DoneEvent",
     "ManualCreateRequest",

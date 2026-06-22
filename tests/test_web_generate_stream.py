@@ -246,6 +246,10 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
             stop_ids=None,
             seed=0,
             respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
         ):
             self.native_calls.append(
                 {
@@ -436,6 +440,10 @@ def test_generate_stream_usage_event_records_native_backend_requests() -> None:
             stop_ids=None,
             seed=0,
             respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
         ):
             # Simulate two HTTP attempts (e.g. 429 -> 200) and a server-
             # reported usage block. Both must land in the bound sink.
@@ -483,6 +491,331 @@ def test_generate_stream_usage_event_records_native_backend_requests() -> None:
     # The sink must be unbound after the call so the next stream
     # doesn't accrete onto our dict.
     assert backend._sink is None
+
+
+def test_generate_stream_emits_perf_event_before_usage() -> None:
+    """A perf_metrics dict on the sink lands as a dedicated ``perf`` frame.
+
+    Order: prompt_score? -> step* -> perf? -> usage -> done. The
+    consumer keys off ``usage`` for token counts and off ``perf`` for
+    server timings; emitting them as separate frames lets a minimal
+    client ignore ``perf`` entirely without having to learn the
+    provider's metric schema.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import StepResult, TokenCandidate
+
+    class _PerfFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"hi": [1, 2]},
+                pieces={1: "h", 2: "i", 10: "X"},
+                distributions={(1, 2): [cand(10, "X", 0.99, 0)]},
+            )
+            self._sink = None
+
+        def set_active_usage(self, sink):
+            self._sink = sink
+
+        def supports_native_sampler(self, name, params):
+            return name == "greedy"
+
+        def stream_native(
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
+        ):
+            if self._sink is not None:
+                self._sink["perf_metrics"] = {
+                    "server-time-to-first-token": 0.042,
+                    "prefill-duration": 0.011,
+                    "generation-duration": 0.031,
+                    "prompt-tokens": 2,
+                }
+            cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2],
+                step_result=StepResult(
+                    position=2, candidates=[cand_x], is_full_vocab=False, chosen=cand_x
+                ),
+                decision=SamplerDecision(
+                    token_id=10, token_text="X", kept=[], greedy_token_id=10, note=""
+                ),
+                stop_reason="max_tokens",
+            )
+
+    backend = _PerfFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "hi",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 1,
+                "top_k": 5,
+            },
+        )
+    events = _parse_sse(r.text)
+    assert events[-1]["event"] == "done"
+    assert events[-2]["event"] == "usage"
+    assert events[-3]["event"] == "perf"
+    perf_event = events[-3]
+    metrics = perf_event["metrics"]
+    assert metrics["server-time-to-first-token"] == pytest.approx(0.042)
+    assert metrics["prompt-tokens"] == 2
+    # Critical: ``perf_metrics`` MUST be popped from the usage frame so
+    # the schema (UsageEvent) doesn't accidentally carry an opaque
+    # provider-specific dict alongside the standard token counters.
+    usage_event = events[-2]
+    assert "perf_metrics" not in usage_event
+
+
+def test_generate_stream_uses_combined_echo_path_when_supported() -> None:
+    """include_prompt + combined_echo_stream backend -> ONE call, one stream.
+
+    The legacy two-request path emits a prompt_score frame from a
+    separate ``score_prompt`` call before the per-token loop. The
+    Phase-5 combined path runs ``stream_native_with_echo`` instead --
+    one call, same wire shape (one prompt_score then a sequence of
+    step frames). We pin that:
+
+    1. score_prompt is NOT called.
+    2. stream_native_with_echo IS called exactly once.
+    3. The SSE wire order is unchanged
+       (prompt_score -> step* -> usage -> done).
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import (
+        Capabilities,
+        StepResult,
+        TokenCandidate,
+    )
+
+    class _ComboFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"the cap of": [1, 2, 3]},
+                pieces={1: "the", 2: " cap", 3: " of", 10: "France", 11: " is"},
+                distributions={(1, 2, 3): [cand(10, "France", 0.99, 0)]},
+            )
+            self.score_prompt_called = 0
+            self.echo_stream_called = 0
+
+        @property
+        def capabilities(self) -> Capabilities:
+            base = super().capabilities
+            return Capabilities(
+                name=base.name,
+                full_vocab=base.full_vocab,
+                prompt_logprobs=base.prompt_logprobs,
+                max_top_logprobs=base.max_top_logprobs,
+                can_force_token=base.can_force_token,
+                notes=base.notes,
+                supports_combined_echo_stream=True,
+            )
+
+        def supports_native_sampler(self, name, params):
+            return name == "greedy"
+
+        def score_prompt(self, prompt, *, top_k, watch_ids=()):
+            self.score_prompt_called += 1
+            return super().score_prompt(prompt, top_k=top_k, watch_ids=watch_ids)
+
+        def stream_native_with_echo(
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
+            echo_last=None,
+        ):
+            self.echo_stream_called += 1
+            # 3 prompt-echo StepResults then 1 emitted GenStep.
+            yield StepResult(
+                position=0,
+                candidates=[TokenCandidate(1, "the", -0.1, 0)],
+                is_full_vocab=False,
+                chosen=TokenCandidate(1, "the", -0.1, 0),
+                context_text="the",
+            )
+            yield StepResult(
+                position=1,
+                candidates=[TokenCandidate(2, " cap", -0.1, 0)],
+                is_full_vocab=False,
+                chosen=TokenCandidate(2, " cap", -0.1, 0),
+                context_text=" cap",
+            )
+            yield StepResult(
+                position=2,
+                candidates=[TokenCandidate(3, " of", -0.1, 0)],
+                is_full_vocab=False,
+                chosen=TokenCandidate(3, " of", -0.1, 0),
+                context_text=" of",
+            )
+            cand_fr = TokenCandidate(10, "France", -0.01, 0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2, 3],
+                step_result=StepResult(
+                    position=3, candidates=[cand_fr], is_full_vocab=False, chosen=cand_fr
+                ),
+                decision=SamplerDecision(
+                    token_id=10, token_text="France", kept=[], greedy_token_id=10, note=""
+                ),
+                stop_reason="max_tokens",
+            )
+
+    backend = _ComboFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "the cap of",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 1,
+                "top_k": 1,
+                "include_prompt": True,
+            },
+        )
+    events = _parse_sse(r.text)
+    assert backend.score_prompt_called == 0, "legacy two-request path was hit"
+    assert backend.echo_stream_called == 1, "combined path should fire exactly once"
+    # Wire order: prompt_score -> step -> usage -> done.
+    assert events[0]["event"] == "prompt_score"
+    assert len(events[0]["steps"]) == 3
+    assert events[1]["event"] == "step"
+    assert events[1]["step"]["decision"]["token_id"] == 10
+    assert events[-1]["event"] == "done"
+    assert events[-2]["event"] == "usage"
+
+
+def test_generate_stream_emits_raw_output_event_and_forwards_logit_bias() -> None:
+    """``raw_output`` lands as a dedicated SSE frame; ``logit_bias`` flows to backend.
+
+    Two things in one test because they share a fake backend setup:
+
+    1. When the active backend stashes ``raw_output`` on the sink (the
+       Fireworks path does this from the final stream chunk), the web
+       layer must flush it as a ``raw_output`` SSE frame BEFORE the
+       ``usage`` / ``done`` frames so the browser's "what the model
+       saw" panel can render it alongside the same-run perf timings.
+    2. The ``logit_bias`` field on ``GenerateRequest`` must reach the
+       backend's ``stream_native`` with int keys (not the stringified
+       JSON keys), so a follow-up backend test for the wire shape has
+       something real to assert against.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import StepResult, TokenCandidate
+
+    raw_payload = {
+        "prompt_fragments": ["<|system|>", "be useful", "<|user|>", "hi"],
+        "prompt_token_ids": [1, 200, 5, 300],
+        "grammar": None,
+    }
+
+    class _RawFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"hi": [1, 2]},
+                pieces={1: "h", 2: "i", 10: "X"},
+                distributions={(1, 2): [cand(10, "X", 0.99, 0)]},
+            )
+            self._sink: dict | None = None
+            self.seen_logit_bias: dict | None = None
+
+        def set_active_usage(self, sink):
+            self._sink = sink
+
+        def supports_native_sampler(self, name, params):
+            return name == "greedy"
+
+        def stream_native(
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
+        ):
+            self.seen_logit_bias = logit_bias
+            if self._sink is not None:
+                self._sink["raw_output"] = dict(raw_payload)
+            cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2],
+                step_result=StepResult(
+                    position=2, candidates=[cand_x], is_full_vocab=False, chosen=cand_x
+                ),
+                decision=SamplerDecision(
+                    token_id=10, token_text="X", kept=[], greedy_token_id=10, note=""
+                ),
+                stop_reason="max_tokens",
+            )
+
+    backend = _RawFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "hi",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 1,
+                "top_k": 5,
+                # Wire uses string keys (JSON requirement); the app
+                # layer coerces to ints before passing through.
+                "logit_bias": {"100": 5.0, "200": -3.0},
+            },
+        )
+    events = _parse_sse(r.text)
+    assert events[-1]["event"] == "done"
+    assert events[-2]["event"] == "usage"
+    assert events[-3]["event"] == "raw_output"
+    raw_event = events[-3]
+    assert raw_event["payload"] == raw_payload
+    # ``raw_output`` MUST be popped from the usage frame so UsageEvent
+    # stays free of opaque provider diagnostics.
+    assert "raw_output" not in events[-2]
+    # Backend receives ``logit_bias`` with INT keys (not strings).
+    assert backend.seen_logit_bias == {100: 5.0, 200: -3.0}
 
 
 def test_generate_stream_runtime_error_lands_in_done() -> None:

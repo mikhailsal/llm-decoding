@@ -61,14 +61,13 @@ _MAX_RETRIES = 3
 # parallel callers (relevant when several browser tabs hit the same backend).
 _BASE_BACKOFF_S = 1.0
 
-# Mappable samplers for native server-side generation. The decode loop in
-# core.engine treats every step as a fresh ``next_distribution`` call; when
-# the user picks one of these standard samplers we instead emit a single
-# streaming /completions call with the equivalent server-side params, which
-# turns N HTTP requests into 1 SSE response. ``typical`` is not in this set
-# because OpenAI-compat doesn't have a typical_p analogue; ``custom``
-# obviously can't run remotely either, so both fall back to the per-step
-# loop (which still benefits from _request retries).
+# Universally mappable samplers (every OpenAI-compat /completions
+# endpoint understands these). For ``typical`` and ``mirostat`` we
+# additionally check ProviderConfig.supports_typical_p_native /
+# supports_mirostat at request time -- those are Fireworks-extensions
+# and we don't want to silently ship dead params to providers that
+# would either 400 the request or accept-and-ignore the field.
+# ``custom`` obviously can't run remotely.
 _NATIVE_SAMPLERS: frozenset[str] = frozenset(
     {"greedy", "temperature", "top_k", "top_p", "min_p"}
 )
@@ -154,9 +153,15 @@ class OpenAICompatBackend(Backend):
         self._active_usage = sink
 
     # -- synthetic token-id space ----------------------------------------- #
+    # Offset so synthetic intern ids never collide with real model token
+    # ids returned by NewLogProbs (Fireworks vocabs top out around
+    # ~256K for the biggest models). Using a clear bit pattern makes
+    # synthetic ids visually obvious in debug output too.
+    _INTERN_ID_BASE: int = 1 << 24  # 16 777 216
+
     def _intern(self, text: str) -> int:
         if text not in self._text_to_id:
-            tid = len(self._text_to_id)
+            tid = self._INTERN_ID_BASE + len(self._text_to_id)
             self._text_to_id[text] = tid
             self._id_to_text[tid] = text
         return self._text_to_id[text]
@@ -184,6 +189,17 @@ class OpenAICompatBackend(Backend):
                 if self.provider.supports_prompt_logprobs
                 else ("raw /completions" if self.provider.has_completions else "chat-only top-k")
             ),
+            # Provider extension flags surfaced to the UI so the browser
+            # can adapt without hard-coding provider names.
+            supports_ignore_eos=bool(self.provider.supports_ignore_eos),
+            supports_perf_metrics=bool(self.provider.supports_perf_metrics),
+            supports_service_tier=bool(self.provider.supports_service_tier),
+            supports_sampling_mask=bool(self.provider.supports_sampling_mask),
+            supports_raw_output=bool(self.provider.supports_raw_output),
+            supports_logit_bias=bool(self.provider.supports_logit_bias),
+            supports_combined_echo_stream=bool(
+                self.provider.supports_combined_echo_stream
+            ),
         )
 
     # -- requests ---------------------------------------------------------- #
@@ -191,25 +207,49 @@ class OpenAICompatBackend(Backend):
         """Can we offload this sampler to the provider's server side?
 
         ``True`` means a single streaming ``/completions`` call with the
-        equivalent ``temperature`` / ``top_p`` / ``top_k`` / ``min_p`` params
-        replaces the per-step decode loop -- one HTTP request instead of
-        ``max_tokens`` of them, so we stop tripping per-account RPS limits.
+        equivalent body params replaces the per-step decode loop -- one
+        HTTP request instead of ``max_tokens`` of them, so we stop
+        tripping per-account RPS limits.
 
         Native streaming requires the provider to expose ``/completions``
         (Fireworks, LM Studio); chat-only paths (NIM, OpenRouter) keep
         running through the per-step loop, which still benefits from the
-        retry/backoff added to :meth:`_post`. ``typical_p`` has no
-        OpenAI-compat analogue and ``custom`` can't run remotely, so both
-        intentionally land on the per-step fallback too.
+        retry/backoff added to :meth:`_post`. ``typical`` and
+        ``mirostat`` are Fireworks-extensions: we only claim native
+        support when the provider's config explicitly opts in
+        (``supports_typical_p_native`` / ``supports_mirostat``). The
+        per-step fallback continues to work either way -- and uses the
+        local mirostat-v2 / typical implementations in
+        :mod:`decoding_sandbox.core.samplers`. ``custom`` can never run
+        remotely (no remote code execution).
         """
         del sampler_params  # currently unused; kept for forward-compat
         if not self.provider.has_completions:
             return False
-        return sampler_name in _NATIVE_SAMPLERS
+        if sampler_name in _NATIVE_SAMPLERS:
+            return True
+        if sampler_name == "typical" and self.provider.supports_typical_p_native:
+            return True
+        if sampler_name == "mirostat" and self.provider.supports_mirostat:
+            return True
+        return False
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         if self.provider.require_parameters:
             body.setdefault("provider", {})["require_parameters"] = True
+        # Always ask Fireworks for perf_metrics in the response body. The
+        # cost is a small object; the benefit is a server-timings panel
+        # (TTFT, prefill, generation, speculation acceptance, cached
+        # prompt tokens) that turns the educational sandbox into a
+        # proper "where is the time going" debugger. Cheap to send; the
+        # server ignores the field when unsupported.
+        if self.provider.supports_perf_metrics:
+            body.setdefault("perf_metrics_in_response", True)
+        # Same justification for ``raw_output``: cheap diagnostics on
+        # every Fireworks call. The web layer flushes it via a dedicated
+        # SSE frame so consumers that don't care just skip it.
+        if self.provider.supports_raw_output:
+            body.setdefault("raw_output", True)
         r = self._request("post", path, json=body)
         data = r.json()
         # If the provider returned a token-usage block (most do for both
@@ -226,6 +266,12 @@ class OpenAICompatBackend(Backend):
                 completion_tokens=u.get("completion_tokens"),
                 total_tokens=u.get("total_tokens"),
             )
+        perf = data.get("perf_metrics") if isinstance(data, dict) else None
+        if isinstance(perf, dict):
+            usage_mod.record_perf_metrics(self._active_usage, perf)
+        raw_out = data.get("raw_output") if isinstance(data, dict) else None
+        if isinstance(raw_out, dict):
+            usage_mod.record_raw_output(self._active_usage, raw_out)
         return data
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -300,23 +346,85 @@ class OpenAICompatBackend(Backend):
         triples = [(self._intern(i["token"]), i["token"], float(i["logprob"])) for i in items]
         return candidates_from_logprobs(triples)
 
+    def _cands_from_new_logprobs(self, items: list[dict]) -> list[TokenCandidate]:
+        """Parse a NewLogProbs ``top_logprobs[i]`` array into candidates.
+
+        NewLogProbs (Fireworks) carries real model token ids, the token
+        text, logprob, and (for the chosen position only) a
+        ``sampling_logprob`` representing the post-filter probability.
+        Items are ordered by descending probability per the server, so
+        we can take the input list's index as the candidate rank
+        without re-sorting.
+
+        Crucially: we use the REAL ``token_id`` instead of calling
+        :meth:`_intern`. That's the whole reason we ship
+        ``logprobs: true`` -- so ``--watch-id`` references map to the
+        same id the model actually emitted, and so the per-token id
+        list on each ``GenStep.tokens_before`` is meaningful instead
+        of being a stream of synthetic intern hashes. We do still
+        populate ``_id_to_text`` for ``piece`` / ``detokenize`` so the
+        TUI/web renderer keeps working unchanged.
+        """
+        out: list[TokenCandidate] = []
+        for rank, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            tid_raw = item.get("token_id")
+            if tid_raw is None:
+                # Some upstreams omit token_id for the runner-ups but
+                # include the text. Fall back to intern so the
+                # candidate still appears in the table; the warning
+                # only fires once per session via the dedup'd cache.
+                text = str(item.get("token", ""))
+                tid = self._intern(text)
+            else:
+                tid = int(tid_raw)
+                text = str(item.get("token", ""))
+                if text:
+                    self._id_to_text.setdefault(tid, text)
+            lp = item.get("logprob")
+            logprob = float(lp) if lp is not None else float("nan")
+            out.append(
+                TokenCandidate(
+                    token_id=tid,
+                    text=text,
+                    logprob=logprob,
+                    rank=rank,
+                )
+            )
+        return out
+
     def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
         text = self.detokenize(token_ids)
         top = max(1, min(top_k, self.provider.max_top_logprobs))
+        sampling_mask_count: int | None = None
         if self.provider.has_completions:
-            data = self._post(
-                "/completions",
-                {
-                    "model": self.model,
-                    "prompt": text,
-                    "max_tokens": 1,
-                    "temperature": 0,
-                    "logprobs": top,
-                },
-            )
+            body: dict[str, Any] = {
+                "model": self.model,
+                "prompt": text,
+                "max_tokens": 1,
+                "temperature": 0,
+            }
+            self._attach_logprobs_request(body, top_k=top)
+            data = self._post("/completions", body)
             lp = (data.get("choices") or [{}])[0].get("logprobs") or {}
-            top_lps = lp.get("top_logprobs") or []
-            cands = self._cands_from_dict(top_lps[0]) if top_lps else []
+            if self.provider.supports_new_logprobs and "content" in lp:
+                # NewLogProbs (Fireworks): logprobs.content[0].top_logprobs[]
+                # carries real token_ids; the per-position
+                # ``sampling_mask_count`` rides on the same content entry.
+                content = lp.get("content") or []
+                if content:
+                    entry = content[0]
+                    cands = self._cands_from_new_logprobs(entry.get("top_logprobs", []))
+                    smc = entry.get("sampling_mask_count")
+                    if smc is not None:
+                        sampling_mask_count = int(smc)
+                else:
+                    cands = []
+            else:
+                # Legacy /completions shape: top_logprobs[i] is a dict.
+                top_lps = lp.get("top_logprobs") or []
+                cands = self._cands_from_dict(top_lps[0]) if top_lps else []
         else:
             data = self._post(
                 "/chat/completions",
@@ -331,7 +439,35 @@ class OpenAICompatBackend(Backend):
             )
             content = ((data.get("choices") or [{}])[0].get("logprobs") or {}).get("content") or []
             cands = self._cands_from_list(content[0].get("top_logprobs", [])) if content else []
+        # Stamp the per-position mask count onto every candidate at this
+        # step so the renderer can read it without a separate plumbing
+        # channel. None values are simply ignored downstream.
+        if sampling_mask_count is not None:
+            for c in cands:
+                c.sampling_mask_count = sampling_mask_count
         return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
+
+    def _attach_logprobs_request(self, body: dict[str, Any], *, top_k: int) -> None:
+        """Add the logprobs-related fields to ``body`` in the right shape.
+
+        Branches on ``provider.supports_new_logprobs``: when on we ship
+        ``logprobs: true`` + ``top_logprobs: N`` (NewLogProbs) plus the
+        ``sampling_mask: 'count'`` field when ``supports_sampling_mask``;
+        otherwise we fall back to the legacy ``logprobs: N`` integer
+        form. Centralized here so every callsite (next_distribution,
+        score_prompt, stream_native) stays in sync.
+        """
+        if self.provider.supports_new_logprobs:
+            body["logprobs"] = True
+            body["top_logprobs"] = int(top_k)
+            if self.provider.supports_sampling_mask:
+                # 'count' asks the server to report how many vocab
+                # entries survived the sampler filter at each position;
+                # alternative values like 'mask' would return a full
+                # boolean tensor which is overkill for the sandbox.
+                body["sampling_mask"] = "count"
+        else:
+            body["logprobs"] = int(top_k)
 
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None
@@ -373,35 +509,34 @@ class OpenAICompatBackend(Backend):
 
         watch_ids = watch_ids or []
         top = max(1, min(top_k, self.provider.max_top_logprobs))
-        data = self._post(
-            "/completions",
-            {
-                "model": self.model,
-                "prompt": prompt,
-                "max_tokens": 1,
-                "temperature": 0,
-                "logprobs": top,
-                "echo": True,
-            },
-        )
+        body: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "max_tokens": 1,
+            "temperature": 0,
+            "echo": True,
+        }
+        self._attach_logprobs_request(body, top_k=top)
+        data = self._post("/completions", body)
         lp = (data.get("choices") or [{}])[0].get("logprobs") or {}
+
+        if self.provider.supports_new_logprobs and "content" in lp:
+            return self._score_prompt_new_logprobs(lp, watch_ids)
+        return self._score_prompt_legacy(lp, watch_ids)
+
+    def _score_prompt_legacy(
+        self, lp: dict[str, Any], watch_ids: list[int]
+    ) -> list[StepResult]:
+        """Old echo format: ``tokens[]`` + ``token_logprobs[]`` + ``top_logprobs[]``."""
         tokens = lp.get("tokens") or []
         token_lps = lp.get("token_logprobs") or []
         top_lps = lp.get("top_logprobs") or []
-
-        # With ``max_tokens=1`` the response carries ``len_prompt + 1``
-        # tokens: the last one is the model's continuation, not a prompt
-        # token. We treat the trailing slot as the "predict next" row and
-        # the rest as prompt positions.
         last_idx = len(tokens) - 1
-
         results: list[StepResult] = []
-        # Echo returns the prompt tokens; position 0 has no preceding context.
         for i in range(1, len(tokens)):
             cand_dict = top_lps[i] if i < len(top_lps) and top_lps[i] else {}
             cands = self._cands_from_dict(cand_dict)
             if i < last_idx:
-                # Real prompt position -- record the actual prompt token.
                 actual_text = tokens[i]
                 actual_lp = (
                     token_lps[i]
@@ -415,11 +550,6 @@ class OpenAICompatBackend(Backend):
                         actual_id, actual_text, float(actual_lp), rank=-1
                     )
             else:
-                # Trailing "predict next" slot: no actual prompt token. The
-                # candidates still carry the model's top-K at this position;
-                # the renderer reads ``chosen=None`` as a ``(predict next)``
-                # marker and the generate path's running completion no
-                # longer double-counts the first generated token.
                 chosen = None
             step = StepResult(
                 position=i,
@@ -427,6 +557,59 @@ class OpenAICompatBackend(Backend):
                 is_full_vocab=False,
                 chosen=chosen,
                 context_text=tokens[i - 1] if i - 1 < len(tokens) else None,
+            )
+            step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
+            results.append(step)
+        return results
+
+    def _score_prompt_new_logprobs(
+        self, lp: dict[str, Any], watch_ids: list[int]
+    ) -> list[StepResult]:
+        """NewLogProbs echo format: ``content[]`` carries per-position entries.
+
+        Each entry: ``{token, token_id, logprob, sampling_mask_count,
+        top_logprobs: [...]}``. Trailing entry is the "predict next"
+        slot (``chosen=None``); preceding entries are real prompt
+        positions whose ``chosen`` IS a top-k member with the correct
+        real token_id (no intern fallback).
+        """
+        content = lp.get("content") or []
+        last_idx = len(content) - 1
+        results: list[StepResult] = []
+        for i in range(1, len(content)):
+            entry = content[i] if isinstance(content[i], dict) else {}
+            cands = self._cands_from_new_logprobs(entry.get("top_logprobs", []))
+            smc_raw = entry.get("sampling_mask_count")
+            smc = int(smc_raw) if smc_raw is not None else None
+            if smc is not None:
+                for c in cands:
+                    c.sampling_mask_count = smc
+            if i < last_idx:
+                actual_text = str(entry.get("token", ""))
+                actual_tid_raw = entry.get("token_id")
+                actual_id = int(actual_tid_raw) if actual_tid_raw is not None else self._intern(
+                    actual_text
+                )
+                if actual_text and actual_id not in self._id_to_text:
+                    self._id_to_text[actual_id] = actual_text
+                actual_lp = entry.get("logprob")
+                actual_lp_f = float(actual_lp) if actual_lp is not None else float("nan")
+                chosen = StepResult(0, cands, False).find(actual_id)
+                if chosen is None:
+                    chosen = TokenCandidate(
+                        actual_id, actual_text, actual_lp_f, rank=-1,
+                        sampling_mask_count=smc,
+                    )
+            else:
+                chosen = None
+            prev_entry = content[i - 1] if 0 <= (i - 1) < len(content) else {}
+            prev_text = str(prev_entry.get("token", "")) if isinstance(prev_entry, dict) else None
+            step = StepResult(
+                position=i,
+                candidates=cands,
+                is_full_vocab=False,
+                chosen=chosen,
+                context_text=prev_text,
             )
             step.watched = {wid: self.lookup_watch(step, wid) for wid in watch_ids}
             results.append(step)
@@ -444,6 +627,10 @@ class OpenAICompatBackend(Backend):
         stop_ids: list[int] | None = None,
         seed: int = 0,
         respect_eos: bool = True,
+        service_tier: str | None = None,
+        prompt_cache_key: str | None = None,
+        session_id: str | None = None,
+        logit_bias: dict[int, float] | None = None,
     ) -> Iterator[GenStep]:
         """Stream tokens via a single ``/completions`` SSE call.
 
@@ -481,12 +668,31 @@ class OpenAICompatBackend(Backend):
         kernel-side jitter remains, and the user can see this on the
         ``usage.notes`` channel below.
 
-        ``respect_eos=False`` is genuinely unsupported on cloud
-        providers (they always halt when the model emits EOS, with no
-        documented escape hatch). When the caller asks for that mode we
-        run the request as if ``respect_eos=True`` and tack a
-        human-readable note onto the active usage sink so the UI can
-        say "the cloud ignored this flag" rather than silently lying.
+        ``respect_eos=False`` is honored on providers that opt into
+        the Fireworks-style ``ignore_eos`` field (see
+        ``provider.supports_ignore_eos``): we ship ``ignore_eos: true``
+        and the model keeps emitting tokens past its EOS. On providers
+        without that flag (NIM / OpenRouter / LM Studio chat-only) the
+        request silently degrades to ``respect_eos=True`` and we tack
+        an advisory note onto the active usage sink so the UI can say
+        "the cloud ignored this flag" rather than silently lying.
+
+        ``service_tier`` is forwarded when ``provider.supports_service_tier``
+        is true (Fireworks: ``priority`` upgrades the request out of the
+        shared serverless pool; default ``default``).
+
+        ``prompt_cache_key`` is forwarded when
+        ``provider.supports_prompt_cache_key`` is true. Requests sharing
+        the same key are routed to the same backend replica to maximize
+        KV-cache hit rates -- great for manual decoding where the prompt
+        prefix barely changes between steps.
+
+        ``session_id``, when ``provider.supports_session_affinity`` is
+        true, becomes two HTTP headers Fireworks recognises:
+        ``x-session-affinity`` (sticky routing) and
+        ``x-multi-turn-session-id`` (MoE Router Replay / R3 -- the
+        expert-routing trace is replayed across turns, making MoE
+        generations bit-deterministic across a multi-step session).
 
         ``stream_options.include_usage`` asks the provider to attach a
         ``usage`` block to the final SSE chunk; we read those numbers
@@ -504,22 +710,11 @@ class OpenAICompatBackend(Backend):
                 "streaming requires the raw text-completion path. Fall back "
                 "to the per-step decode loop via core.engine.generate."
             )
-        if not respect_eos:
-            # Surface, don't fail. Some users explicitly want to inspect
-            # what a base model would emit past EOS; on cloud the server
-            # simply won't let us. The note shows up in the ``usage``
-            # frame so the UI can render it next to the request counter.
-            usage_mod.add_note(
-                self._active_usage,
-                f"{self.provider.name!r} (cloud) always halts on EOS; "
-                "respect_eos=False has no effect on this backend",
-            )
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "max_tokens": int(max_tokens),
-            "logprobs": top,
             "stream": True,
             # ``include_usage`` is a recent OpenAI addition supported by
             # Fireworks and LM Studio; servers that don't recognize it
@@ -531,6 +726,68 @@ class OpenAICompatBackend(Backend):
             # sampling jitter for free.
             "seed": int(seed),
         }
+        # Logprobs shape (legacy ``logprobs: N`` vs NewLogProbs
+        # ``logprobs: true`` + ``top_logprobs: N`` + ``sampling_mask:
+        # 'count'``) is decided by the provider's capabilities.
+        self._attach_logprobs_request(body, top_k=top)
+        if not respect_eos:
+            if self.provider.supports_ignore_eos:
+                # The provider has the Fireworks-style escape hatch:
+                # ship ``ignore_eos: true`` and the model keeps emitting
+                # tokens past its EOS. The UI's "respect EOS" checkbox
+                # is now meaningful instead of being a silent lie.
+                body["ignore_eos"] = True
+            else:
+                # No documented OpenAI-compat field on this provider; the
+                # request will still halt on the model's EOS. Surface
+                # that to the UI via the usage advisory channel.
+                usage_mod.add_note(
+                    self._active_usage,
+                    f"{self.provider.name!r} has no ignore_eos field; "
+                    "respect_eos=False has no effect on this backend",
+                )
+        if self.provider.supports_perf_metrics:
+            # Same justification as _post: cheap to request, gives the UI
+            # a server-timings panel. Ignored by providers that don't
+            # implement it.
+            body["perf_metrics_in_response"] = True
+        if self.provider.supports_raw_output:
+            # Always-on for Fireworks: ``raw_output: true`` makes the
+            # provider attach a diagnostics block (prompt_fragments,
+            # prompt_token_ids, grammar, ...) describing what the model
+            # actually saw vs the text we typed. The "what the model
+            # saw" UI panel reads this back via the dedicated
+            # ``raw_output`` SSE frame; the cost is "one extra
+            # smallish dict per request", well worth it for a learning
+            # / debugging sandbox where the answer to "why did it pick
+            # this token?" often is "because the chat template ate your
+            # system prompt".
+            body["raw_output"] = True
+        if service_tier and self.provider.supports_service_tier:
+            body["service_tier"] = str(service_tier)
+        if prompt_cache_key and self.provider.supports_prompt_cache_key:
+            body["prompt_cache_key"] = str(prompt_cache_key)
+        if logit_bias and self.provider.supports_logit_bias:
+            # OpenAI-shaped: {"<token_id>": float in [-100, 100]}.
+            # Filter out NaN / out-of-range / non-int keys here rather
+            # than at the wire-encoding boundary so we surface a clear
+            # error to the user instead of a cryptic 400 from the
+            # provider.
+            cleaned: dict[str, float] = {}
+            for k, v in logit_bias.items():
+                try:
+                    tid = int(k)
+                    bias = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if bias != bias or bias < -100.0 or bias > 100.0:
+                    # Skip NaN and out-of-spec values silently; the user
+                    # editor in the UI is responsible for catching these
+                    # before they hit the wire.
+                    continue
+                cleaned[str(tid)] = bias
+            if cleaned:
+                body["logit_bias"] = cleaned
         body.update(self._sampler_to_api_params(sampler_name, sampler_params))
         if stop_ids:
             stop_texts: list[str] = []
@@ -545,6 +802,14 @@ class OpenAICompatBackend(Backend):
         if self.provider.require_parameters:
             body.setdefault("provider", {})["require_parameters"] = True
 
+        # Build per-request HTTP headers for session affinity / MoE R3.
+        # Empty dict short-circuits a no-op down the stack so we don't
+        # have to special-case "is there anything to send?" later.
+        extra_headers: dict[str, str] = {}
+        if session_id and self.provider.supports_session_affinity:
+            extra_headers["x-session-affinity"] = str(session_id)
+            extra_headers["x-multi-turn-session-id"] = str(session_id)
+
         # Compose a short, faithful note so the UI can show what knobs
         # were active server-side. The full sampler_params dict is too
         # noisy for a one-liner.
@@ -558,14 +823,15 @@ class OpenAICompatBackend(Backend):
         # step. Subsequent steps append the emitted token id.
         tokens_before: list[int] = self.tokenize(prompt)
         step_idx = 0
-        # Buffer of (text, lp, top_dict_or_list) per emitted token across
-        # all chunks; we flush them as GenStep events. SSE chunks can
-        # carry 0, 1, or more tokens depending on the provider's
-        # streaming granularity.
-        pending: list[tuple[str, float, Any]] = []
+        # Buffer of per-token records flushed as GenStep events at the
+        # end. Each entry: (token_id_or_None, text, logprob, top_payload,
+        # sampling_mask_count). The ``token_id_or_None`` is the REAL
+        # model token id when the provider speaks NewLogProbs, else
+        # ``None`` (legacy path falls back to ``self._intern(text)``).
+        pending: list[tuple[int | None, str, float, Any, int | None]] = []
         last_finish_reason: str | None = None
 
-        for chunk in self._iter_completions_stream(body):
+        for chunk in self._iter_completions_stream(body, extra_headers=extra_headers):
             # The final SSE chunk in an ``include_usage`` stream has an
             # empty ``choices`` array and a populated ``usage`` block;
             # we handle that case first so the per-token loop below
@@ -578,22 +844,54 @@ class OpenAICompatBackend(Backend):
                     completion_tokens=u.get("completion_tokens"),
                     total_tokens=u.get("total_tokens"),
                 )
+            # ``perf_metrics`` lands in the final chunk under the same
+            # name as in non-streaming responses (Fireworks doc says so
+            # explicitly). Forward to the usage sink so the web layer
+            # can emit a dedicated ``perf`` SSE frame.
+            perf = chunk.get("perf_metrics") if isinstance(chunk, dict) else None
+            if isinstance(perf, dict):
+                usage_mod.record_perf_metrics(self._active_usage, perf)
+            # ``raw_output`` is also a final-chunk thing (Fireworks
+            # emits it once, alongside the closing usage/perf block).
+            # Stash on the sink so the web layer can flush a dedicated
+            # ``raw_output`` SSE frame.
+            raw_out = chunk.get("raw_output") if isinstance(chunk, dict) else None
+            if isinstance(raw_out, dict):
+                usage_mod.record_raw_output(self._active_usage, raw_out)
             choices = chunk.get("choices") or []
             if not choices:
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
-            chunk_tokens = lp_obj.get("tokens") or []
-            chunk_lps = lp_obj.get("token_logprobs") or []
-            chunk_tops = lp_obj.get("top_logprobs") or []
-            for i, tok in enumerate(chunk_tokens):
-                lp = (
-                    float(chunk_lps[i])
-                    if i < len(chunk_lps) and chunk_lps[i] is not None
-                    else float("nan")
-                )
-                top_entry = chunk_tops[i] if i < len(chunk_tops) else None
-                pending.append((tok, lp, top_entry))
+            if self.provider.supports_new_logprobs and "content" in lp_obj:
+                # NewLogProbs streaming: each chunk carries a content[]
+                # of per-position entries with real token_ids and
+                # sampling_mask_count. The legacy parallel-arrays
+                # path below remains the fallback for providers we
+                # haven't explicitly opted in.
+                for entry in lp_obj.get("content") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    tok = str(entry.get("token", ""))
+                    tid_raw = entry.get("token_id")
+                    tid: int | None = int(tid_raw) if tid_raw is not None else None
+                    lp_raw = entry.get("logprob")
+                    lp = float(lp_raw) if lp_raw is not None else float("nan")
+                    smc_raw = entry.get("sampling_mask_count")
+                    smc = int(smc_raw) if smc_raw is not None else None
+                    pending.append((tid, tok, lp, entry.get("top_logprobs", []), smc))
+            else:
+                chunk_tokens = lp_obj.get("tokens") or []
+                chunk_lps = lp_obj.get("token_logprobs") or []
+                chunk_tops = lp_obj.get("top_logprobs") or []
+                for i, tok in enumerate(chunk_tokens):
+                    lp = (
+                        float(chunk_lps[i])
+                        if i < len(chunk_lps) and chunk_lps[i] is not None
+                        else float("nan")
+                    )
+                    top_entry = chunk_tops[i] if i < len(chunk_tops) else None
+                    pending.append((None, tok, lp, top_entry, None))
             fr = ch.get("finish_reason")
             if fr is not None:
                 last_finish_reason = str(fr)
@@ -602,15 +900,28 @@ class OpenAICompatBackend(Backend):
         # delay finishing until here so we know ``finish_reason`` for the
         # terminal step (the provider sends it in the *last* chunk).
         total = len(pending)
-        for i, (tok_text, tok_lp, top_entry) in enumerate(pending):
-            cands = self._candidates_from_top_entry(top_entry)
-            tok_id = self._intern(tok_text)
+        for i, (tok_id_real, tok_text, tok_lp, top_entry, smc) in enumerate(pending):
+            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+                cands = self._cands_from_new_logprobs(top_entry)
+            else:
+                cands = self._candidates_from_top_entry(top_entry)
+            if tok_id_real is not None:
+                tok_id = tok_id_real
+                if tok_text and tok_id not in self._id_to_text:
+                    self._id_to_text[tok_id] = tok_text
+            else:
+                tok_id = self._intern(tok_text)
+            if smc is not None:
+                for c in cands:
+                    c.sampling_mask_count = smc
             chosen = next((c for c in cands if c.token_id == tok_id), None)
             if chosen is None:
                 # The emitted token didn't make the top_k cut. Synthesize
                 # a candidate with rank=-1 so the UI still has something
                 # to show; this matches what ``score_prompt`` does.
-                chosen = TokenCandidate(tok_id, tok_text, tok_lp, rank=-1)
+                chosen = TokenCandidate(
+                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
+                )
             greedy_id = cands[0].token_id if cands else tok_id
             sr = StepResult(
                 position=len(tokens_before),
@@ -639,13 +950,337 @@ class OpenAICompatBackend(Backend):
             tokens_before.append(tok_id)
             step_idx += 1
 
-    def _iter_completions_stream(self, body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    def stream_native_with_echo(
+        self,
+        prompt: str,
+        *,
+        sampler_name: str,
+        sampler_params: dict[str, Any],
+        max_tokens: int,
+        top_k: int,
+        stop_ids: list[int] | None = None,
+        seed: int = 0,
+        respect_eos: bool = True,
+        service_tier: str | None = None,
+        prompt_cache_key: str | None = None,
+        session_id: str | None = None,
+        logit_bias: dict[int, float] | None = None,
+        echo_last: int | None = None,
+    ) -> Iterator[StepResult | GenStep]:
+        """Combined ``echo=true`` + ``stream=true`` path -- ONE round trip.
+
+        This is the Phase 5 payoff: when the caller wants both the
+        per-prompt-token distribution AND the generated stream (the
+        "include prompt logits" mode), the two-request fallback
+        (``score_prompt`` + ``stream_native``) becomes a single
+        streaming POST.
+
+        The yielded values are heterogeneous on purpose:
+
+        * Items of type :class:`StepResult` -- one per echoed prompt
+          position. The caller (typically ``web.streaming``) emits
+          these as a ``prompt_score`` frame BEFORE any ``step`` frame
+          to preserve the wire order the two-request fallback
+          produced.
+        * Items of type :class:`GenStep` -- one per emitted token,
+          shape-identical to what :meth:`stream_native` yields.
+
+        Switching points are determined entirely by chunk position: the
+        Fireworks-documented order is "all echoed positions first, then
+        emitted tokens, possibly interleaved across chunks". We rely on
+        the fact that the first emitted position's text matches the
+        chunk's ``text`` field's first character of the *new*
+        continuation (not present in the original prompt).
+
+        ``echo_last`` is forwarded as the provider-specific field; the
+        first N echoed positions correspond to the last N tokens of the
+        prompt rather than the whole prompt. ``None`` means "echo the
+        whole prompt" (standard ``echo=true``).
+
+        Only callable when ``provider.supports_combined_echo_stream`` is
+        true; raises :class:`NotImplementedError` otherwise. Callers
+        should branch on that capability and fall back to the two-step
+        path.
+        """
+        if not self.provider.has_completions:
+            raise NotImplementedError(
+                f"{self.provider.name!r} has no /completions endpoint; "
+                "stream_native_with_echo requires the raw text-completion path."
+            )
+        if not self.provider.supports_combined_echo_stream:
+            raise NotImplementedError(
+                f"{self.provider.name!r} doesn't advertise "
+                "supports_combined_echo_stream; use score_prompt + "
+                "stream_native as two separate calls."
+            )
+        top = max(1, min(top_k, self.provider.max_top_logprobs))
+        body: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "max_tokens": int(max_tokens),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "seed": int(seed),
+            "echo": True,
+        }
+        self._attach_logprobs_request(body, top_k=top)
+        if echo_last is not None and self.provider.supports_echo_last:
+            # ``echo_last=N`` (Fireworks) returns logprobs only for the
+            # last N tokens of the prompt instead of every position.
+            # Saves wire bytes + parsing CPU when the user really only
+            # cares about the recent context.
+            body["echo_last"] = int(echo_last)
+        if not respect_eos:
+            if self.provider.supports_ignore_eos:
+                body["ignore_eos"] = True
+            else:
+                usage_mod.add_note(
+                    self._active_usage,
+                    f"{self.provider.name!r} has no ignore_eos field; "
+                    "respect_eos=False has no effect on this backend",
+                )
+        if self.provider.supports_perf_metrics:
+            body["perf_metrics_in_response"] = True
+        if self.provider.supports_raw_output:
+            body["raw_output"] = True
+        if service_tier and self.provider.supports_service_tier:
+            body["service_tier"] = str(service_tier)
+        if prompt_cache_key and self.provider.supports_prompt_cache_key:
+            body["prompt_cache_key"] = str(prompt_cache_key)
+        if logit_bias and self.provider.supports_logit_bias:
+            cleaned: dict[str, float] = {}
+            for k, v in logit_bias.items():
+                try:
+                    tid = int(k)
+                    bias = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if bias != bias or bias < -100.0 or bias > 100.0:
+                    continue
+                cleaned[str(tid)] = bias
+            if cleaned:
+                body["logit_bias"] = cleaned
+        body.update(self._sampler_to_api_params(sampler_name, sampler_params))
+        if stop_ids:
+            stop_texts: list[str] = []
+            for sid in stop_ids:
+                txt = self.piece(int(sid))
+                if txt:
+                    stop_texts.append(txt)
+            if stop_texts:
+                body["stop"] = stop_texts[:4]
+        if self.provider.require_parameters:
+            body.setdefault("provider", {})["require_parameters"] = True
+        extra_headers: dict[str, str] = {}
+        if session_id and self.provider.supports_session_affinity:
+            extra_headers["x-session-affinity"] = str(session_id)
+            extra_headers["x-multi-turn-session-id"] = str(session_id)
+
+        note_parts = [f"{sampler_name} (server-side, combined echo+stream)"]
+        for k in ("temperature", "top_p", "top_k", "min_p"):
+            if k in body and body[k] is not None:
+                note_parts.append(f"{k}={body[k]:g}")
+        note = ", ".join(note_parts)
+
+        # Collect ALL positions first, then split into prompt-echo +
+        # emitted-token streams once we know how many positions belong
+        # to which side. The split point comes from the provider's
+        # echoed prompt length (or ``echo_last`` when set): everything
+        # before ``split_at`` is prompt echo, everything after is
+        # emitted output.
+        #
+        # We can't infer the split point from the prompt's local
+        # tokenization (the cloud tokenizer may add a BOS we don't
+        # know about), so we use the position of the FIRST chunk that
+        # arrives without an echo-style fully-populated content[]
+        # block. Concretely: chunk #1 typically carries the full echo
+        # in one shot; subsequent chunks carry 1 emitted token each.
+        # If that pattern doesn't hold for a given deployment, the
+        # smoke script flags it and we keep the two-request fallback.
+        #
+        # Entry shape: (token_id_or_None, text, logprob, top_payload,
+        # sampling_mask_count, is_first_in_chunk_marker).
+        all_positions: list[tuple[int | None, str, float, Any, int | None, bool]] = []
+        last_finish_reason: str | None = None
+        for chunk_idx, chunk in enumerate(
+            self._iter_completions_stream(body, extra_headers=extra_headers)
+        ):
+            u = chunk.get("usage") if isinstance(chunk, dict) else None
+            if isinstance(u, dict):
+                usage_mod.record_tokens(
+                    self._active_usage,
+                    prompt_tokens=u.get("prompt_tokens"),
+                    completion_tokens=u.get("completion_tokens"),
+                    total_tokens=u.get("total_tokens"),
+                )
+            perf = chunk.get("perf_metrics") if isinstance(chunk, dict) else None
+            if isinstance(perf, dict):
+                usage_mod.record_perf_metrics(self._active_usage, perf)
+            raw_out = chunk.get("raw_output") if isinstance(chunk, dict) else None
+            if isinstance(raw_out, dict):
+                usage_mod.record_raw_output(self._active_usage, raw_out)
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            ch = choices[0]
+            lp_obj = ch.get("logprobs") or {}
+            first_in_chunk = True
+            if self.provider.supports_new_logprobs and "content" in lp_obj:
+                for entry in lp_obj.get("content") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    tok = str(entry.get("token", ""))
+                    tid_raw = entry.get("token_id")
+                    tid: int | None = int(tid_raw) if tid_raw is not None else None
+                    lp_raw = entry.get("logprob")
+                    lp = float(lp_raw) if lp_raw is not None else float("nan")
+                    smc_raw = entry.get("sampling_mask_count")
+                    smc = int(smc_raw) if smc_raw is not None else None
+                    all_positions.append(
+                        (tid, tok, lp, entry.get("top_logprobs", []), smc, first_in_chunk)
+                    )
+                    first_in_chunk = False
+            else:
+                chunk_tokens = lp_obj.get("tokens") or []
+                chunk_lps = lp_obj.get("token_logprobs") or []
+                chunk_tops = lp_obj.get("top_logprobs") or []
+                for i, tok in enumerate(chunk_tokens):
+                    lp = (
+                        float(chunk_lps[i])
+                        if i < len(chunk_lps) and chunk_lps[i] is not None
+                        else float("nan")
+                    )
+                    top_entry = chunk_tops[i] if i < len(chunk_tops) else None
+                    all_positions.append(
+                        (None, tok, lp, top_entry, None, first_in_chunk)
+                    )
+                    first_in_chunk = False
+            fr = ch.get("finish_reason")
+            if fr is not None:
+                last_finish_reason = str(fr)
+
+        # Split point: the prompt-echo block is always the *first chunk's*
+        # batch (Fireworks emits all echoed positions in one go before
+        # the first generated token). After the first chunk, every
+        # ``is_first_in_chunk`` marker corresponds to a newly emitted
+        # token's chunk. We split at the FIRST marker that isn't at
+        # index 0.
+        split_at = len(all_positions)
+        for idx, item in enumerate(all_positions[1:], start=1):
+            if item[5]:  # first_in_chunk
+                split_at = idx
+                break
+
+        prompt_records = all_positions[:split_at]
+        emit_records = all_positions[split_at:]
+
+        # Build StepResults for prompt-echo positions. ``chosen`` is the
+        # token that actually appears at this prompt position; rank
+        # comes from looking it up inside the chunk's top_logprobs.
+        for pos_idx, (tok_id_real, tok_text, tok_lp, top_entry, smc, _) in enumerate(
+            prompt_records
+        ):
+            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+                cands = self._cands_from_new_logprobs(top_entry)
+            else:
+                cands = self._candidates_from_top_entry(top_entry)
+            if tok_id_real is not None:
+                tok_id = tok_id_real
+                if tok_text and tok_id not in self._id_to_text:
+                    self._id_to_text[tok_id] = tok_text
+            else:
+                tok_id = self._intern(tok_text)
+            if smc is not None:
+                for c in cands:
+                    c.sampling_mask_count = smc
+            chosen = next((c for c in cands if c.token_id == tok_id), None)
+            if chosen is None:
+                chosen = TokenCandidate(
+                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
+                )
+            yield StepResult(
+                position=pos_idx,
+                candidates=cands,
+                is_full_vocab=False,
+                chosen=chosen,
+                context_text=tok_text,
+            )
+
+        # GenSteps for emitted tokens -- same shape as stream_native.
+        # tokens_before starts as the local tokenize() of the prompt
+        # (synthetic intern ids); accumulates real emitted ids as we
+        # go. The synthetic prompt-id space never overlaps real model
+        # ids thanks to ``_INTERN_ID_BASE``.
+        tokens_before: list[int] = self.tokenize(prompt)
+        step_idx = 0
+        total = len(emit_records)
+        for i, (tok_id_real, tok_text, tok_lp, top_entry, smc, _) in enumerate(
+            emit_records
+        ):
+            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+                cands = self._cands_from_new_logprobs(top_entry)
+            else:
+                cands = self._candidates_from_top_entry(top_entry)
+            if tok_id_real is not None:
+                tok_id = tok_id_real
+                if tok_text and tok_id not in self._id_to_text:
+                    self._id_to_text[tok_id] = tok_text
+            else:
+                tok_id = self._intern(tok_text)
+            if smc is not None:
+                for c in cands:
+                    c.sampling_mask_count = smc
+            chosen = next((c for c in cands if c.token_id == tok_id), None)
+            if chosen is None:
+                chosen = TokenCandidate(
+                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
+                )
+            greedy_id = cands[0].token_id if cands else tok_id
+            sr = StepResult(
+                position=len(tokens_before),
+                candidates=cands,
+                is_full_vocab=False,
+                chosen=chosen,
+            )
+            is_last = i == total - 1
+            stop_reason: str | None = None
+            if is_last:
+                stop_reason = self._finish_reason_to_stop(last_finish_reason)
+            decision = SamplerDecision(
+                token_id=tok_id,
+                token_text=tok_text,
+                kept=[],
+                greedy_token_id=greedy_id,
+                note=note,
+            )
+            yield GenStep(
+                step=step_idx,
+                tokens_before=list(tokens_before),
+                step_result=sr,
+                decision=decision,
+                stop_reason=stop_reason,
+            )
+            tokens_before.append(tok_id)
+            step_idx += 1
+
+    def _iter_completions_stream(
+        self,
+        body: dict[str, Any],
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         """Yield parsed JSON objects from a streaming ``/completions`` call.
 
         Wraps ``httpx.Client.stream`` so the rest of ``stream_native``
         stays free of SSE-decoding details. ``[DONE]`` terminates the
         stream cleanly; any non-JSON line is logged and skipped (rather
         than crashing the whole stream over a single malformed frame).
+
+        ``extra_headers`` lets the caller attach per-request HTTP headers
+        on top of the client defaults (Authorization, Content-Type). The
+        primary use today is Fireworks' session-affinity headers
+        (``x-session-affinity`` / ``x-multi-turn-session-id``) which enable
+        MoE Router Replay for cross-turn determinism.
 
         Retry: the *initial* response code goes through the same 429-aware
         path as the rest of the backend, but once the stream is open we
@@ -658,6 +1293,9 @@ class OpenAICompatBackend(Backend):
         # same retry-on-429 logic here, but only for the *opening* of the
         # stream. Once we've started reading bytes, the wire is committed.
         last_exc: Exception | None = None
+        stream_kwargs: dict[str, Any] = {"json": body}
+        if extra_headers:
+            stream_kwargs["headers"] = dict(extra_headers)
         for attempt in range(self._max_retries + 1):
             # Count every attempt to open the stream, matching what
             # ``_request`` does for non-streaming calls. Without this
@@ -667,7 +1305,7 @@ class OpenAICompatBackend(Backend):
             # rather than just an unincremented counter on this path.
             usage_mod.record_request(self._active_usage)
             try:
-                stream_cm = self._client.stream("POST", "/completions", json=body)
+                stream_cm = self._client.stream("POST", "/completions", **stream_kwargs)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if attempt < self._max_retries:
@@ -746,33 +1384,63 @@ class OpenAICompatBackend(Backend):
     ) -> dict[str, Any]:
         """Translate a built-in sampler to OpenAI-compat request params.
 
-        Only ``_NATIVE_SAMPLERS`` reach this; anything else is rejected
-        by :meth:`supports_native_sampler` before we get here. The
-        mapping mirrors :mod:`decoding_sandbox.core.samplers` exactly so
-        a server-side run produces the same distribution as the
-        per-step loop would have. ``temperature`` defaults are pinned
-        per-sampler to match ``samplers.BUILTINS``.
+        Only samplers accepted by :meth:`supports_native_sampler` reach
+        this; anything else is rejected before we get here. The mapping
+        mirrors :mod:`decoding_sandbox.core.samplers` exactly so a
+        server-side run produces the same distribution as the per-step
+        loop would have. ``temperature`` defaults are pinned per-sampler
+        to match ``samplers.BUILTINS``.
+
+        Penalties (``repetition_penalty`` / ``frequency_penalty`` /
+        ``presence_penalty``) ride along on EVERY sampler; we forward
+        them only when (a) the value differs from its no-op default
+        AND (b) the provider advertises support. ``frequency_penalty``
+        and ``presence_penalty`` are part of the standard OpenAI body
+        shape so we send them whenever set; ``repetition_penalty`` is
+        a Fireworks-specific extension and gated by
+        ``provider.supports_repetition_penalty``.
         """
         out: dict[str, Any] = {}
         if name == "greedy":
             out["temperature"] = 0
-            return out
-        if name == "temperature":
+        elif name == "temperature":
             out["temperature"] = float(params.get("temperature", 0.8))
-            return out
-        if name == "top_k":
+        elif name == "top_k":
             out["temperature"] = float(params.get("temperature", 1.0))
             out["top_k"] = int(params.get("top_k", 40))
-            return out
-        if name == "top_p":
+        elif name == "top_p":
             out["temperature"] = float(params.get("temperature", 1.0))
             out["top_p"] = float(params.get("top_p", 0.9))
-            return out
-        if name == "min_p":
+        elif name == "min_p":
             out["temperature"] = float(params.get("temperature", 1.0))
             out["min_p"] = float(params.get("min_p", 0.05))
-            return out
-        return out  # pragma: no cover -- guarded by supports_native_sampler
+        elif name == "typical":
+            # Guarded by supports_native_sampler -> supports_typical_p_native.
+            out["temperature"] = float(params.get("temperature", 1.0))
+            out["typical_p"] = float(params.get("typical_p", 0.95))
+        elif name == "mirostat":
+            # Guarded by supports_native_sampler -> supports_mirostat.
+            # Fireworks uses ``mirostat_target`` (τ, in nats) and
+            # ``mirostat_lr`` (η); same names we use locally.
+            out["temperature"] = float(params.get("temperature", 1.0))
+            out["mirostat_target"] = float(params.get("mirostat_target", 5.0))
+            out["mirostat_lr"] = float(params.get("mirostat_lr", 0.1))
+
+        # Penalties. These are sampler-agnostic and flow on every
+        # request. The no-op defaults match Sampler / BUILTINS so a
+        # user who never touches the inputs sees no penalty fields on
+        # the wire (smaller body + zero risk of a strict server
+        # 400-ing on an unknown key).
+        freq = float(params.get("frequency_penalty", 0.0) or 0.0)
+        if freq != 0.0:
+            out["frequency_penalty"] = freq
+        pres = float(params.get("presence_penalty", 0.0) or 0.0)
+        if pres != 0.0:
+            out["presence_penalty"] = pres
+        rep = float(params.get("repetition_penalty", 1.0) or 1.0)
+        if rep != 1.0 and self.provider.supports_repetition_penalty:
+            out["repetition_penalty"] = rep
+        return out
 
     @staticmethod
     def _finish_reason_to_stop(reason: str | None) -> str | None:

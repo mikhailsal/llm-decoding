@@ -40,6 +40,11 @@ class WireTokenCandidate(BaseModel):
 
     ``logprob`` is ``Optional[float]``: ``None`` on the wire stands in
     for ``math.nan`` in memory, since standard JSON has no NaN literal.
+
+    ``sampling_mask_count`` carries the Fireworks NewLogProbs
+    ``sampling_mask: 'count'`` value when present. ``None`` means the
+    backend either doesn't support the flag or didn't report it for
+    this position.
     """
 
     token_id: int
@@ -47,6 +52,7 @@ class WireTokenCandidate(BaseModel):
     logprob: float | None = None
     rank: int
     is_special: bool = False
+    sampling_mask_count: int | None = None
 
 
 class WireWatched(BaseModel):
@@ -77,6 +83,14 @@ class WireCapabilities(BaseModel):
     can_force_token: bool = False
     notes: str = ""
     eos_token_ids: list[int] = Field(default_factory=list)
+    # Provider extensions, see Capabilities docstring.
+    supports_ignore_eos: bool = False
+    supports_perf_metrics: bool = False
+    supports_service_tier: bool = False
+    supports_sampling_mask: bool = False
+    supports_raw_output: bool = False
+    supports_logit_bias: bool = False
+    supports_combined_echo_stream: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -238,12 +252,14 @@ def _safe_logprob(v) -> float | None:
 
 
 def candidate_to_wire(c) -> WireTokenCandidate:
+    smc = getattr(c, "sampling_mask_count", None)
     return WireTokenCandidate(
         token_id=int(c.token_id),
         text=c.text,
         logprob=_safe_logprob(c.logprob),
         rank=int(c.rank),
         is_special=bool(c.is_special),
+        sampling_mask_count=int(smc) if smc is not None else None,
     )
 
 
@@ -270,6 +286,15 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         can_force_token=bool(caps.can_force_token),
         notes=caps.notes or "",
         eos_token_ids=list(caps.eos_token_ids or ()),
+        supports_ignore_eos=bool(getattr(caps, "supports_ignore_eos", False)),
+        supports_perf_metrics=bool(getattr(caps, "supports_perf_metrics", False)),
+        supports_service_tier=bool(getattr(caps, "supports_service_tier", False)),
+        supports_sampling_mask=bool(getattr(caps, "supports_sampling_mask", False)),
+        supports_raw_output=bool(getattr(caps, "supports_raw_output", False)),
+        supports_logit_bias=bool(getattr(caps, "supports_logit_bias", False)),
+        supports_combined_echo_stream=bool(
+            getattr(caps, "supports_combined_echo_stream", False)
+        ),
     )
 
 

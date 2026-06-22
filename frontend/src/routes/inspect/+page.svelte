@@ -50,6 +50,12 @@
     if (alternatives > altsMax) alternatives = altsMax;
     if (alternatives < 1) alternatives = 1;
   });
+  // Mirror of /generate: render the "eligible after filters" column
+  // only when the backend can fill it. Otherwise it would just be
+  // "?" across every row.
+  let samplingMaskSupported = $derived<boolean>(
+    !!backendInfo?.capabilities?.supports_sampling_mask
+  );
 
   onMount(async () => {
     if (!$info.info) await info.refresh();
@@ -194,6 +200,13 @@
               <th class="table-cell text-left">pos</th>
               <th class="table-cell text-left">token chosen</th>
               <th class="table-cell text-left">prob</th>
+              {#if samplingMaskSupported}
+                <th
+                  class="table-cell text-left"
+                  title="Number of tokens that survived server-side sampling filters (sampling_mask=count) at this position."
+                  >eligible</th
+                >
+              {/if}
               <th class="table-cell text-left">top candidates (rank 1..{alternatives})</th>
               {#each result.watches as w}
                 <th class="table-cell text-left">{w.label}</th>
@@ -213,6 +226,11 @@
                   {/if}
                 </td>
                 <td class="table-cell w-40"><ConfidenceBar prob={chosenP} /></td>
+                {#if samplingMaskSupported}
+                  <td class="table-cell font-mono text-xs text-slate-400 tabular-nums">
+                    {step.candidates[0]?.sampling_mask_count ?? '?'}
+                  </td>
+                {/if}
                 <td class="table-cell">
                   <div class="space-y-0.5">
                     {#each step.candidates.slice(0, alternatives) as c, j}

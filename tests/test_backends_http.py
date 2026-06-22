@@ -35,6 +35,16 @@ def _make_oc_backend(
     max_top: int = 5,
     max_retries: int = 0,
     sleeps: list[float] | None = None,
+    supports_ignore_eos: bool = False,
+    supports_perf_metrics: bool = False,
+    supports_service_tier: bool = False,
+    supports_prompt_cache_key: bool = False,
+    supports_session_affinity: bool = False,
+    supports_new_logprobs: bool = False,
+    supports_sampling_mask: bool = False,
+    supports_raw_output: bool = False,
+    supports_logit_bias: bool = False,
+    supports_combined_echo_stream: bool = False,
 ) -> tuple[OpenAICompatBackend, MockHTTPClient]:
     """Build an OpenAICompatBackend wired to a MockHTTPClient.
 
@@ -42,6 +52,10 @@ def _make_oc_backend(
     (one shot, raises on non-2xx). Tests that exercise retry pass it
     explicitly along with a ``sleeps`` list that captures wait values
     instead of actually sleeping.
+
+    ``supports_*`` mirror :class:`ProviderConfig` extension flags so each
+    test can opt in to a Fireworks-style provider without affecting the
+    default conservative profile (no extensions) other tests rely on.
     """
     mock = MockHTTPClient(routes)
     monkeypatch.setattr(oc_mod.httpx, "Client", lambda **kw: mock)
@@ -54,6 +68,16 @@ def _make_oc_backend(
         supports_prompt_logprobs=supports_prompt_logprobs,
         require_parameters=require_parameters,
         has_completions=has_completions,
+        supports_ignore_eos=supports_ignore_eos,
+        supports_perf_metrics=supports_perf_metrics,
+        supports_service_tier=supports_service_tier,
+        supports_prompt_cache_key=supports_prompt_cache_key,
+        supports_session_affinity=supports_session_affinity,
+        supports_new_logprobs=supports_new_logprobs,
+        supports_sampling_mask=supports_sampling_mask,
+        supports_raw_output=supports_raw_output,
+        supports_logit_bias=supports_logit_bias,
+        supports_combined_echo_stream=supports_combined_echo_stream,
     )
     sleep_fn = sleeps.append if sleeps is not None else (lambda _w: None)
     backend = OpenAICompatBackend(
@@ -92,6 +116,226 @@ def test_openai_compat_next_distribution_completions_parses_dict(monkeypatch) ->
     assert mock.calls[-1]["url"] == "/completions"
     assert mock.calls[-1]["json"]["model"] == "test/m"
     assert mock.calls[-1]["json"]["logprobs"] == 3
+
+
+def test_openai_compat_new_logprobs_request_shape(monkeypatch) -> None:
+    """``supports_new_logprobs`` flips the body from ``logprobs: N`` to ``true`` + ``top_logprobs``.
+
+    Pinning the wire shape here is the cheapest possible regression
+    guard: an accidental refactor that re-collapses the two paths
+    would silently downgrade Fireworks to the legacy format and lose
+    real token_ids / sampling_mask_count -- both invisible until a
+    user fires up ``--watch-id`` and gets nothing.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [
+                    {
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": " Paris",
+                                    "token_id": 12345,
+                                    "logprob": -0.5,
+                                    "sampling_mask_count": 42,
+                                    "top_logprobs": [
+                                        {"token": " Paris", "token_id": 12345, "logprob": -0.5},
+                                        {"token": " London", "token_id": 67890, "logprob": -2.0},
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_sampling_mask=True,
+    )
+    step = backend.next_distribution(backend.tokenize("hi"), top_k=2)
+    body = mock.calls[-1]["json"]
+    assert body["logprobs"] is True
+    assert body["top_logprobs"] == 2
+    assert body["sampling_mask"] == "count"
+    # Real token IDs from the response, not synthetic interns.
+    assert step.candidates[0].token_id == 12345
+    assert step.candidates[1].token_id == 67890
+    # sampling_mask_count was stamped onto every candidate at this position.
+    assert step.candidates[0].sampling_mask_count == 42
+    assert step.candidates[1].sampling_mask_count == 42
+
+
+def test_openai_compat_legacy_logprobs_request_shape_when_disabled(monkeypatch) -> None:
+    """Without ``supports_new_logprobs`` we still ship the integer form."""
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [
+                    {"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}
+                ]
+            }
+        },
+        has_completions=True,
+    )
+    backend.next_distribution(backend.tokenize("hi"), top_k=3)
+    body = mock.calls[-1]["json"]
+    assert body["logprobs"] == 3
+    assert "top_logprobs" not in body
+    assert "sampling_mask" not in body
+
+
+def test_openai_compat_intern_ids_dont_collide_with_real_token_ids(monkeypatch) -> None:
+    """Synthetic intern ids are namespaced above real model ids.
+
+    Real ids returned by NewLogProbs sit in the [0, vocab_size) range
+    (Fireworks models top out around ~256K). Synthetic ids from
+    ``_intern`` are offset by ``_INTERN_ID_BASE`` (≥16M) so the two
+    spaces never overlap; otherwise a ``tokenize(prompt)`` call could
+    silently overwrite ``_id_to_text[42]`` after a real token 42 had
+    landed there from a previous score_prompt.
+    """
+    backend, _ = _make_oc_backend(monkeypatch, routes={})
+    a = backend._intern("hello")
+    b = backend._intern("world")
+    assert a >= backend._INTERN_ID_BASE
+    assert b >= backend._INTERN_ID_BASE
+
+
+def test_openai_compat_score_prompt_new_logprobs_uses_real_ids(monkeypatch) -> None:
+    """NewLogProbs echo carries real prompt token ids + sampling_mask_count.
+
+    The chosen field for each real-prompt position must point at the
+    SAME id reported in the position's top_logprobs entry (rank 0 for
+    a deterministic max_tokens=1, temperature=0 score). Without
+    NewLogProbs the backend used to invent synthetic ids that would
+    never match watch ids derived from the model's actual vocab.
+    """
+    backend, _ = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [
+                    {
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "The",
+                                    "token_id": 100,
+                                    "logprob": -2.0,
+                                    "sampling_mask_count": 10,
+                                    "top_logprobs": [
+                                        {"token": "The", "token_id": 100, "logprob": -2.0}
+                                    ],
+                                },
+                                {
+                                    "token": " cap",
+                                    "token_id": 200,
+                                    "logprob": -1.0,
+                                    "sampling_mask_count": 8,
+                                    "top_logprobs": [
+                                        {"token": " cap", "token_id": 200, "logprob": -1.0},
+                                        {"token": " other", "token_id": 999, "logprob": -3.0},
+                                    ],
+                                },
+                                {
+                                    "token": " city",
+                                    "token_id": 300,
+                                    "logprob": -0.5,
+                                    "sampling_mask_count": 50,
+                                    "top_logprobs": [
+                                        {"token": " city", "token_id": 300, "logprob": -0.5},
+                                        {"token": " is", "token_id": 301, "logprob": -1.5},
+                                    ],
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        has_completions=True,
+        supports_prompt_logprobs=True,
+        supports_new_logprobs=True,
+        supports_sampling_mask=True,
+    )
+    steps = backend.score_prompt("The capital", top_k=3, watch_ids=[])
+    assert len(steps) == 2
+    real_prompt_step, predict_next = steps
+    # Real prompt position: chosen carries the REAL id from the response.
+    assert real_prompt_step.chosen is not None
+    assert real_prompt_step.chosen.token_id == 200
+    assert real_prompt_step.chosen.sampling_mask_count == 8
+    # Predict-next trailing slot: chosen=None as always; mask_count
+    # still stamped on candidates so the UI can render the column.
+    assert predict_next.chosen is None
+    assert predict_next.candidates[0].sampling_mask_count == 50
+
+
+def test_openai_compat_stream_native_new_logprobs_parses_content(monkeypatch) -> None:
+    """SSE chunks carry ``logprobs.content[]`` instead of parallel arrays."""
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_sampling_mask=True,
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": " Paris",
+                                "token_id": 12345,
+                                "logprob": -0.2,
+                                "sampling_mask_count": 7,
+                                "top_logprobs": [
+                                    {"token": " Paris", "token_id": 12345, "logprob": -0.2},
+                                    {"token": " London", "token_id": 67890, "logprob": -1.5},
+                                ],
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        }
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+
+    steps = list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=2,
+        )
+    )
+    assert len(steps) == 1
+    gs = steps[0]
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["logprobs"] is True
+    assert body["top_logprobs"] == 2
+    assert body["sampling_mask"] == "count"
+    # The emitted token carries the real model id, not an intern.
+    assert gs.decision.token_id == 12345
+    assert gs.step_result.chosen.token_id == 12345
+    # sampling_mask_count appears on every candidate at this step.
+    assert gs.step_result.candidates[0].sampling_mask_count == 7
+    # tokens_before grew by one real id; previous ids are the prompt
+    # intern (we don't have a real tokenizer for the prompt, so the
+    # synthetic intern id is fine -- but it must be in the intern
+    # range, NOT overlapping the real id 12345).
+    assert all(
+        t >= backend._INTERN_ID_BASE for t in gs.tokens_before
+    ), gs.tokens_before
 
 
 def test_openai_compat_next_distribution_chat_parses_list(monkeypatch) -> None:
@@ -250,6 +494,32 @@ def test_openai_compat_capabilities_reflect_provider(monkeypatch) -> None:
     assert backend_b.capabilities.prompt_logprobs is False
     assert backend_b.capabilities.can_force_token is False  # chat-only
     assert backend_b.capabilities.max_top_logprobs == 20
+
+
+def test_openai_compat_capabilities_surface_extension_flags(monkeypatch) -> None:
+    """ProviderConfig.supports_* extension flags appear in Capabilities.
+
+    The frontend reads ``Capabilities.supports_ignore_eos`` to decide
+    whether to lock the ``respect EOS`` checkbox; if the surface here
+    silently swallowed the flag the UI would default back to "always
+    locked" for Fireworks too -- the exact bug the audit flagged.
+    """
+    fw, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_ignore_eos=True,
+        supports_perf_metrics=True,
+        supports_service_tier=True,
+    )
+    plain, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=False)
+
+    assert fw.capabilities.supports_ignore_eos is True
+    assert fw.capabilities.supports_perf_metrics is True
+    assert fw.capabilities.supports_service_tier is True
+    assert plain.capabilities.supports_ignore_eos is False
+    assert plain.capabilities.supports_perf_metrics is False
+    assert plain.capabilities.supports_service_tier is False
 
 
 def test_openai_compat_intern_assigns_stable_ids(monkeypatch) -> None:
@@ -453,11 +723,15 @@ def _attach_stream_factory(mock: MockHTTPClient, queue: list[_MockStreamResponse
 
 
 def test_supports_native_sampler_matrix(monkeypatch) -> None:
-    """Built-ins on /completions backends are mappable; typical/custom are not.
+    """Built-ins are universally mappable; typical/mirostat gated per-provider.
 
     Chat-only providers always fall back to per-step because the native
     path requires the raw text-completion endpoint to emit echo-style
-    per-token logprobs.
+    per-token logprobs. ``typical_p`` and ``mirostat`` are
+    Fireworks-extensions so they only count as native when the provider
+    explicitly opts in -- otherwise the per-step fallback runs the
+    local implementation (mirostat v2 + typical filters in
+    :mod:`decoding_sandbox.core.samplers`).
     """
     comp, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
     chat, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=False)
@@ -468,11 +742,144 @@ def test_supports_native_sampler_matrix(monkeypatch) -> None:
     assert comp.supports_native_sampler("top_k", {"top_k": 10})
     assert comp.supports_native_sampler("min_p", {"min_p": 0.05})
 
+    # Default profile: no extension flags -> typical / mirostat are NOT native.
     assert not comp.supports_native_sampler("typical", {"typical_p": 0.95})
+    assert not comp.supports_native_sampler("mirostat", {"mirostat_target": 5.0})
     assert not comp.supports_native_sampler("custom", {})
+
+    # Fireworks-style profile: extensions on -> both are native.
+    fw, _ = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True,
+    )
+    fw.provider.supports_typical_p_native = True
+    fw.provider.supports_mirostat = True
+    assert fw.supports_native_sampler("typical", {"typical_p": 0.95})
+    assert fw.supports_native_sampler("mirostat", {"mirostat_target": 5.0})
 
     # Chat-only path can't do native streaming even for greedy.
     assert not chat.supports_native_sampler("greedy", {})
+
+
+def test_stream_native_forwards_typical_p_when_supported(monkeypatch) -> None:
+    """Fireworks-extension typical_p flows into the request body."""
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    backend.provider.supports_typical_p_native = True
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="typical",
+            sampler_params={"typical_p": 0.7, "temperature": 0.6},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["typical_p"] == pytest.approx(0.7)
+    assert body["temperature"] == pytest.approx(0.6)
+
+
+def test_stream_native_forwards_mirostat_target_and_lr(monkeypatch) -> None:
+    """mirostat_target + mirostat_lr land on the wire as plain body keys."""
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    backend.provider.supports_mirostat = True
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="mirostat",
+            sampler_params={"mirostat_target": 3.5, "mirostat_lr": 0.2, "temperature": 0.9},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["mirostat_target"] == pytest.approx(3.5)
+    assert body["mirostat_lr"] == pytest.approx(0.2)
+    assert body["temperature"] == pytest.approx(0.9)
+
+
+def test_stream_native_forwards_frequency_and_presence_penalties(monkeypatch) -> None:
+    """``frequency_penalty`` / ``presence_penalty`` are standard OpenAI fields.
+
+    We ship them unconditionally (no provider-extension gate) BUT only
+    when their value differs from the no-op default. That way a user
+    who never touched the inputs doesn't see them on the wire even on
+    providers that accept them; a user who set freq=0.5 sees the field
+    appear regardless of provider.
+    """
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="top_p",
+            sampler_params={"top_p": 0.9, "frequency_penalty": 0.5, "presence_penalty": 0.3},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["frequency_penalty"] == pytest.approx(0.5)
+    assert body["presence_penalty"] == pytest.approx(0.3)
+
+
+def test_stream_native_repetition_penalty_gated_by_provider(monkeypatch) -> None:
+    """``repetition_penalty`` is Fireworks-only; non-supporting providers drop it."""
+    plain, mock_a = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock_a, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        plain.stream_native(
+            "p",
+            sampler_name="top_p",
+            sampler_params={"top_p": 0.9, "repetition_penalty": 1.1},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body_a = mock_a.calls[-1]["kwargs"]["json"]
+    assert "repetition_penalty" not in body_a
+
+    fw, mock_b = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    fw.provider.supports_repetition_penalty = True
+    _attach_stream_factory(mock_b, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        fw.stream_native(
+            "p",
+            sampler_name="top_p",
+            sampler_params={"top_p": 0.9, "repetition_penalty": 1.1},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body_b = mock_b.calls[-1]["kwargs"]["json"]
+    assert body_b["repetition_penalty"] == pytest.approx(1.1)
+
+
+def test_stream_native_omits_no_op_penalty_defaults(monkeypatch) -> None:
+    """Defaults (``freq=0``, ``pres=0``, ``rep=1.0``) MUST NOT appear on wire.
+
+    Strict OpenAI-compat providers (or future-OpenAI itself) sometimes
+    reject zero penalties; even when they accept, the empty bytes are
+    just noise. Pin the default-shape so a regression doesn't quietly
+    grow the wire body.
+    """
+    fw, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    fw.provider.supports_repetition_penalty = True
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        fw.stream_native(
+            "p",
+            sampler_name="top_p",
+            sampler_params={"top_p": 0.9},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert "frequency_penalty" not in body
+    assert "presence_penalty" not in body
+    assert "repetition_penalty" not in body
 
 
 def test_stream_native_emits_one_genstep_per_token(monkeypatch) -> None:
@@ -749,13 +1156,15 @@ def test_stream_native_body_carries_seed_and_include_usage(monkeypatch) -> None:
 
 
 def test_stream_native_respect_eos_false_adds_advisory_note(monkeypatch) -> None:
-    """Cloud providers can't honor ``respect_eos=False``, so we say so.
+    """Cloud providers without ``ignore_eos`` get a one-line advisory note.
 
-    There is no documented OpenAI-compat field that asks the server
-    to keep generating past EOS; every provider halts on the model's
-    EOS token. Rather than silently lying about the flag, we leave a
-    one-line note on the active usage sink so the UI can surface it
-    next to the request counter.
+    There is no OpenAI-compat field that asks the server to keep
+    generating past EOS, so any provider that hasn't opted in to the
+    Fireworks-style ``ignore_eos`` extension just halts. Rather than
+    silently lying about the flag, we leave a one-line note on the
+    active usage sink so the UI can surface it next to the request
+    counter. The test pins the default profile (no extensions) to
+    document this fallback explicitly.
     """
     backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
@@ -775,6 +1184,595 @@ def test_stream_native_respect_eos_false_adds_advisory_note(monkeypatch) -> None
 
     assert sink["notes"]
     assert any("respect_eos" in n for n in sink["notes"])
+    # The body must NOT carry ``ignore_eos`` when the provider can't
+    # honor it: shipping a field the upstream's request validator
+    # rejects (or worse, silently misinterprets) is exactly the kind
+    # of "silent lie" we want to avoid.
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert "ignore_eos" not in body
+
+
+def test_stream_native_respect_eos_false_fireworks_forwards_ignore_eos(monkeypatch) -> None:
+    """On a Fireworks-style provider, ``respect_eos=False`` ships ``ignore_eos: true``.
+
+    With ``supports_ignore_eos=True`` the backend is allowed to use the
+    Fireworks extension that disables EOS halting server-side. The
+    advisory note must NOT appear because the upstream actually honors
+    the flag now -- showing it would falsely suggest the request was
+    silently downgraded.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_ignore_eos=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    sink = {"requests": 0, "notes": []}
+    backend.set_active_usage(sink)
+
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            respect_eos=False,
+        )
+    )
+
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["ignore_eos"] is True
+    # No advisory: the provider honored the flag for real this time.
+    assert not any("respect_eos" in n for n in sink.get("notes", []))
+
+
+def test_stream_native_respect_eos_true_omits_ignore_eos(monkeypatch) -> None:
+    """``respect_eos=True`` must never set ``ignore_eos`` (even on Fireworks).
+
+    The whole point of "respect EOS" is to let the model halt. Shipping
+    ``ignore_eos: true`` regardless would erase that behaviour and make
+    the default mode useless for anything but explicit non-stop sweeps.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_ignore_eos=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            respect_eos=True,
+        )
+    )
+
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert "ignore_eos" not in body
+
+
+def test_stream_native_requests_perf_metrics_when_supported(monkeypatch) -> None:
+    """Fireworks-style providers always get ``perf_metrics_in_response: true``.
+
+    Cheap to ship (small object), but turns the educational sandbox
+    into a proper "where is the time going" debugger by exposing TTFT
+    + prefill + generation timings. Providers without the flag must
+    NOT see the field on the wire (some are strict about unknown
+    body keys, and even when they aren't, sending dead bytes is
+    wasteful).
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_perf_metrics=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert mock.calls[-1]["kwargs"]["json"]["perf_metrics_in_response"] is True
+
+
+def test_stream_native_omits_perf_metrics_when_unsupported(monkeypatch) -> None:
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert "perf_metrics_in_response" not in mock.calls[-1]["kwargs"]["json"]
+
+
+def test_stream_native_records_perf_metrics_from_final_chunk(monkeypatch) -> None:
+    """The ``perf_metrics`` block in the final SSE chunk lands on the sink.
+
+    Streaming providers don't have a "response body" the way non-stream
+    calls do -- the perf block comes in the *last* chunk (same chunk
+    as the ``usage`` block when ``include_usage`` is on). The web
+    layer reads it back from the sink and emits a dedicated ``perf``
+    SSE frame to the browser.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_perf_metrics=True
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "text": "X",
+                    "logprobs": {
+                        "tokens": ["X"],
+                        "token_logprobs": [-0.1],
+                        "top_logprobs": [{"X": -0.1}],
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+        {
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "perf_metrics": {
+                "prompt-tokens": 1,
+                "server-time-to-first-token": 0.042,
+                "prefill-duration": 0.011,
+                "generation-duration": 0.031,
+            },
+        },
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    sink: dict = {"requests": 0, "notes": [], "perf_metrics": None}
+    backend.set_active_usage(sink)
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert isinstance(sink["perf_metrics"], dict)
+    assert sink["perf_metrics"]["server-time-to-first-token"] == pytest.approx(0.042)
+    assert sink["perf_metrics"]["prompt-tokens"] == 1
+
+
+def test_stream_native_records_perf_metrics_from_response_body(monkeypatch) -> None:
+    """Non-stream JSON responses also surface ``perf_metrics`` to the sink.
+
+    The ``_post`` path (used by next_distribution / score_prompt) reads
+    the metrics from the response body directly. Without this code
+    path the inspect page would never see server timings.
+    """
+    payload = {
+        "choices": [
+            {"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}
+        ],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+        "perf_metrics": {"server-processing-time": 0.123},
+    }
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={("POST", "/completions"): payload},
+        has_completions=True,
+        supports_perf_metrics=True,
+    )
+    sink: dict = {"requests": 0, "perf_metrics": None}
+    backend.set_active_usage(sink)
+    backend.next_distribution(backend.tokenize("hi"), top_k=1)
+    assert sink["perf_metrics"] == {"server-processing-time": pytest.approx(0.123)}
+
+
+def test_stream_native_requests_raw_output_when_supported(monkeypatch) -> None:
+    """``raw_output: true`` is always on for providers that support it.
+
+    The wire test pins the always-on behaviour because the only way
+    the UI's "what the model saw" panel ever has anything to render
+    is if every request asks for the diagnostics upfront -- the
+    user can't decide retroactively to see what their last completion
+    saw.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_raw_output=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert mock.calls[-1]["kwargs"]["json"]["raw_output"] is True
+
+
+def test_stream_native_omits_raw_output_when_unsupported(monkeypatch) -> None:
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert "raw_output" not in mock.calls[-1]["kwargs"]["json"]
+
+
+def test_stream_native_records_raw_output_from_final_chunk(monkeypatch) -> None:
+    """The provider's ``raw_output`` block ends up on the usage sink.
+
+    Stream version: the diagnostics arrive in the final ``include_usage``
+    chunk alongside ``usage`` and ``perf_metrics``. We pin the parsing
+    here because the UI's "what the model saw" panel reads
+    ``sink["raw_output"]`` straight through.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_raw_output=True
+    )
+    raw_payload = {
+        "prompt_fragments": ["<|system|>", "you are useful", "<|user|>", "hi"],
+        "prompt_token_ids": [1, 200, 201, 5, 300],
+        "grammar": {"kind": "json_schema", "name": "noop"},
+    }
+    chunks = [
+        {
+            "choices": [{"finish_reason": "length"}],
+            "raw_output": raw_payload,
+        }
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    sink: dict = {"requests": 0}
+    backend.set_active_usage(sink)
+    list(
+        backend.stream_native(
+            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
+        )
+    )
+    assert sink["raw_output"] == raw_payload
+
+
+def test_post_records_raw_output_from_response_body(monkeypatch) -> None:
+    """Non-stream JSON path also surfaces ``raw_output`` to the sink."""
+    payload = {
+        "choices": [{"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}],
+        "raw_output": {"prompt_fragments": ["hi"]},
+    }
+    backend, _mock = _make_oc_backend(
+        monkeypatch,
+        routes={("POST", "/completions"): payload},
+        has_completions=True,
+        supports_raw_output=True,
+    )
+    sink: dict = {"requests": 0}
+    backend.set_active_usage(sink)
+    backend.next_distribution(backend.tokenize("hi"), top_k=1)
+    assert sink["raw_output"] == {"prompt_fragments": ["hi"]}
+
+
+def test_stream_native_forwards_logit_bias_when_supported(monkeypatch) -> None:
+    """``logit_bias`` lands in the body as a stringified-keys dict.
+
+    OpenAI Completions takes string keys for `logit_bias` (a JSON
+    requirement); we coerce ints to strings at the wire boundary and
+    drop NaN / out-of-range / non-numeric entries silently so a single
+    bad key doesn't fail the whole request.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_logit_bias=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            logit_bias={123: 5.0, 456: -100.0, 789: 200.0, 0: float("nan")},
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    # In-range entries pass through; out-of-range and NaN are filtered.
+    assert body["logit_bias"] == {"123": 5.0, "456": -100.0}
+
+
+def test_stream_native_drops_logit_bias_when_unsupported(monkeypatch) -> None:
+    """Backends without the capability never see ``logit_bias`` on the wire."""
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            logit_bias={123: 5.0},
+        )
+    )
+    assert "logit_bias" not in mock.calls[-1]["kwargs"]["json"]
+
+
+def test_stream_native_omits_logit_bias_when_empty(monkeypatch) -> None:
+    """An empty / all-filtered logit_bias map should not appear on the wire."""
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_logit_bias=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            logit_bias={0: float("nan"), 1: 999.0},
+        )
+    )
+    assert "logit_bias" not in mock.calls[-1]["kwargs"]["json"]
+
+
+def test_stream_native_with_echo_requires_capability(monkeypatch) -> None:
+    """``stream_native_with_echo`` refuses to run on providers that haven't opted in.
+
+    Without an explicit capability flag we'd risk silently sending
+    ``echo=true`` + ``stream=true`` to a provider that 400s on the
+    combo. Better to surface a clear NotImplementedError so the web
+    layer's ``_can_use_combined_echo_stream`` check stays the single
+    source of truth.
+    """
+    backend, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    with pytest.raises(NotImplementedError, match="supports_combined_echo_stream"):
+        list(
+            backend.stream_native_with_echo(
+                "p",
+                sampler_name="greedy",
+                sampler_params={},
+                max_tokens=1,
+                top_k=1,
+            )
+        )
+
+
+def test_stream_native_with_echo_splits_prompt_and_generation(monkeypatch) -> None:
+    """One streaming POST yields BOTH prompt-echo StepResults AND emitted GenSteps.
+
+    Phase 5 payoff: instead of two HTTP requests (``score_prompt`` +
+    ``stream_native``) the combined path makes one. We canon-pin the
+    split heuristic here -- the first chunk's positions are prompt
+    echo; later chunks contribute emitted tokens. If a future
+    refactor breaks the split point detection, the prompt_score frame
+    would silently lose rows (or include emitted tokens), which the
+    UI table would render as confusing extra rows -- exactly the kind
+    of regression a wire-shape test catches cheaply.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.types import StepResult
+
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_combined_echo_stream=True,
+    )
+    # Chunk #1: 3 echoed prompt positions in one batch.
+    # Chunks #2 and #3: one emitted token each.
+    chunks = [
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": "The",
+                                "token_id": 100,
+                                "logprob": -2.0,
+                                "top_logprobs": [{"token": "The", "token_id": 100, "logprob": -2.0}],
+                            },
+                            {
+                                "token": " cap",
+                                "token_id": 200,
+                                "logprob": -1.0,
+                                "top_logprobs": [{"token": " cap", "token_id": 200, "logprob": -1.0}],
+                            },
+                            {
+                                "token": " of",
+                                "token_id": 300,
+                                "logprob": -0.5,
+                                "top_logprobs": [{"token": " of", "token_id": 300, "logprob": -0.5}],
+                            },
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": " France",
+                                "token_id": 400,
+                                "logprob": -0.1,
+                                "top_logprobs": [
+                                    {"token": " France", "token_id": 400, "logprob": -0.1}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": " is",
+                                "token_id": 500,
+                                "logprob": -0.05,
+                                "top_logprobs": [
+                                    {"token": " is", "token_id": 500, "logprob": -0.05}
+                                ],
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    out = list(
+        backend.stream_native_with_echo(
+            "The cap of",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=2,
+            top_k=1,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["echo"] is True
+    assert body["stream"] is True
+    # 3 prompt StepResults + 2 GenSteps = 5 yields total.
+    step_results = [x for x in out if isinstance(x, StepResult)]
+    gen_steps = [x for x in out if isinstance(x, GenStep)]
+    assert len(step_results) == 3, [type(x).__name__ for x in out]
+    assert len(gen_steps) == 2, [type(x).__name__ for x in out]
+    # Prompt StepResults carry the right token ids.
+    assert [s.chosen.token_id for s in step_results] == [100, 200, 300]
+    # GenSteps mirror the emitted token sequence with their real ids.
+    assert [g.decision.token_id for g in gen_steps] == [400, 500]
+    # Stop reason landed on the LAST GenStep only.
+    assert gen_steps[-1].stop_reason == "max_tokens"
+
+
+def test_stream_native_with_echo_forwards_echo_last(monkeypatch) -> None:
+    """``echo_last`` reaches the wire when the provider opts in."""
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_combined_echo_stream=True,
+    )
+    # Manually toggle echo_last support on the provider (the
+    # always-on Fireworks defaults already set it; for the test
+    # helper's bare-bones ProviderConfig we flip it here).
+    backend.provider.supports_echo_last = True
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native_with_echo(
+            "hello",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            echo_last=4,
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["echo_last"] == 4
+
+
+def test_stream_native_forwards_service_tier_when_supported(monkeypatch) -> None:
+    """``service_tier`` flows to the body only when the provider supports it."""
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_service_tier=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            service_tier="priority",
+        )
+    )
+    assert mock.calls[-1]["kwargs"]["json"]["service_tier"] == "priority"
+
+
+def test_stream_native_drops_service_tier_when_unsupported(monkeypatch) -> None:
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            service_tier="priority",
+        )
+    )
+    assert "service_tier" not in mock.calls[-1]["kwargs"]["json"]
+
+
+def test_stream_native_forwards_prompt_cache_key_when_supported(monkeypatch) -> None:
+    """``prompt_cache_key`` keeps requests on the same KV-cache-warm replica."""
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_prompt_cache_key=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            prompt_cache_key="manual-session-abc",
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["prompt_cache_key"] == "manual-session-abc"
+
+
+def test_stream_native_session_affinity_headers_set_on_supported_provider(monkeypatch) -> None:
+    """A ``session_id`` becomes ``x-session-affinity`` + R3 multi-turn headers.
+
+    Two headers, one body key: ``x-session-affinity`` pins the request
+    to a specific replica (sticky routing) and
+    ``x-multi-turn-session-id`` triggers MoE Router Replay so the
+    expert-routing trace is reused across turns. Both are
+    Fireworks-extensions; providers without ``supports_session_affinity``
+    must NOT see either header (some upstreams reject unknown headers).
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, supports_session_affinity=True
+    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            session_id="sess-42",
+        )
+    )
+    headers = mock.calls[-1]["kwargs"].get("headers") or {}
+    assert headers.get("x-session-affinity") == "sess-42"
+    assert headers.get("x-multi-turn-session-id") == "sess-42"
+
+
+def test_stream_native_session_affinity_headers_omitted_when_unsupported(monkeypatch) -> None:
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "p",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            session_id="sess-42",
+        )
+    )
+    headers = mock.calls[-1]["kwargs"].get("headers") or {}
+    assert "x-session-affinity" not in headers
+    assert "x-multi-turn-session-id" not in headers
 
 
 def test_request_counts_each_attempt_into_active_usage(monkeypatch) -> None:

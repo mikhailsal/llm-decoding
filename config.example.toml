@@ -113,6 +113,27 @@ default_model = "accounts/fireworks/models/gpt-oss-120b"
 max_top_logprobs = 5
 supports_prompt_logprobs = true
 has_completions = true
+# Provider-specific /v1/completions extensions, see
+# https://docs.fireworks.ai/api-reference/post-completions . We turn them
+# ALL on for Fireworks because the educational sandbox UX is "show me
+# everything the model knows about this step" -- and the cost of an
+# unused field is negligible. Each flag gates one bit of behaviour in
+# decoding_sandbox/backends/openai_compat.py + the matching UI panel.
+supports_ignore_eos = true             # respect_eos = false actually works
+supports_perf_metrics = true           # server-side timings panel (TTFT, prefill, ...)
+supports_raw_output = true             # prompt_fragments, real token_ids, grammar
+supports_sampling_mask = true          # "N tokens passed top_p/top_k/min_p" per step
+supports_return_token_ids = true       # real token ids in candidates (no synthetic interning)
+supports_echo_last = true              # cheap echo for long prompts
+supports_mirostat = true               # adaptive perplexity-targeting sampler
+supports_typical_p_native = true       # typical_p server-side instead of per-step
+supports_repetition_penalty = true     # Fireworks-extension penalty
+supports_prompt_cache_key = true       # stable KV-cache routing for manual sessions
+supports_service_tier = true           # service_tier: priority (etc.)
+supports_session_affinity = true       # x-session-affinity + MoE Router Replay (R3)
+supports_new_logprobs = true           # logprobs:true + top_logprobs:N (NewLogProbs)
+supports_logit_bias = true             # per-request token-id bias map [-100..100]
+supports_combined_echo_stream = true   # echo+stream in one request (Phase 5)
 
 [providers.nim]
 base_url = "https://integrate.api.nvidia.com/v1"

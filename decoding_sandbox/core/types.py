@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -23,6 +24,16 @@ class TokenCandidate:
     eyeballing strings like ``<|endoftext|>``. Backends that don't expose
     this info leave it ``False`` -- the renderer falls back to a pattern
     check on the text.
+
+    ``sampling_mask_count`` is the number of vocabulary tokens that
+    survived the server's sampler filters (top_k / top_p / min_p /
+    typical / mirostat) at this position. It comes from the Fireworks
+    NewLogProbs response's ``sampling_mask: 'count'`` field; backends
+    that don't support that flag leave it ``None``. The generate /
+    inspect table renders this as a separate "eligible after filters"
+    column so the user can see when a tight top_p genuinely cut the
+    candidate set down to a handful vs when the filter was effectively
+    a no-op (count ≈ vocab size).
     """
 
     token_id: int
@@ -30,6 +41,7 @@ class TokenCandidate:
     logprob: float
     rank: int  # 0 = most likely
     is_special: bool = False
+    sampling_mask_count: int | None = None
 
     @property
     def prob(self) -> float:
@@ -84,6 +96,17 @@ class Capabilities:
     The ``generate`` engine treats any chosen token id in this set as an
     implicit stop, so a base model that wants to emit ``<|endoftext|>``
     actually halts instead of running until ``--max-tokens``.
+
+    The ``supports_*`` flags below are mirrors of provider-specific
+    /v1/completions extensions (currently Fireworks-only). They let the
+    UI adapt without hard-coding "if backend.name == 'fireworks'" checks
+    everywhere: ``supports_ignore_eos`` unlocks the ``respect EOS``
+    checkbox; ``supports_perf_metrics`` shows the server-timings panel;
+    ``supports_sampling_mask`` enables the "eligible after filters"
+    column in the generation steps table; ``supports_raw_output``
+    surfaces the "what the model actually saw" panel with rendered
+    prompt fragments + grammar; ``supports_service_tier`` exposes the
+    priority/default selector.
     """
 
     name: str
@@ -93,6 +116,60 @@ class Capabilities:
     can_force_token: bool = False  # supports manual/forced token decoding
     notes: str = ""
     eos_token_ids: tuple[int, ...] = ()
+    # Provider-specific completion extensions (Fireworks today). Stay
+    # False for HF / llamacpp / chat-only cloud providers; surfaced over
+    # the wire so the browser doesn't need to know which provider it is
+    # talking to to decide which UI affordances to enable.
+    supports_ignore_eos: bool = False
+    supports_perf_metrics: bool = False
+    supports_service_tier: bool = False
+    supports_sampling_mask: bool = False
+    supports_raw_output: bool = False
+    # Per-request ``logit_bias`` map (token_id -> bias in [-100, 100]).
+    # OpenAI Completions has always supported it; we still gate the UI
+    # editor on this so providers that ignore the field don't show a
+    # knob that does nothing.
+    supports_logit_bias: bool = False
+    # ``include_prompt`` mode in a single round trip when true (Phase 5).
+    # When false the web layer falls back to two requests
+    # (``score_prompt`` + ``stream_native``). Surfaced so the UI can
+    # show an "echo_last" knob only where the combined path runs.
+    supports_combined_echo_stream: bool = False
 
 
-__all__ = ["TokenCandidate", "StepResult", "Capabilities", "field"]
+@dataclass
+class RawOutputInfo:
+    """Provider diagnostics returned with ``raw_output: true`` requests.
+
+    Fireworks' ``raw_output`` block answers the question "what did the
+    model actually see / produce?" -- *before* any post-processing,
+    template rendering or grammar-constrained decoding hides it. The
+    sandbox stores the bits we know how to render in dedicated fields
+    and keeps the full payload under ``raw`` so the UI's "what the
+    model saw" panel can pretty-print every key the provider chose to
+    include, even ones we haven't typed yet.
+
+    Concrete fields we surface today:
+
+    * ``prompt_fragments`` -- the prompt string broken into the
+      fragments the templating engine fed to the model. Useful for
+      sanity-checking custom chat templates: if your role tags
+      disappeared, this is where you see it.
+    * ``prompt_token_ids`` -- the actual tokenized prompt the model
+      saw, *including* injected BOS / system tokens. The
+      ``--watch-id`` workflow can compare these against the user's
+      typed prompt to detect silent tokenizer mismatches.
+    * ``grammar`` -- the grammar object the server compiled (if any).
+      With response_format / json mode this tells you exactly which
+      constrained-decoding FSM was active.
+
+    Everything else from the provider lands in ``raw`` verbatim.
+    """
+
+    prompt_fragments: list[str] | None = None
+    prompt_token_ids: list[int] | None = None
+    grammar: dict[str, Any] | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+__all__ = ["TokenCandidate", "StepResult", "Capabilities", "RawOutputInfo", "field"]

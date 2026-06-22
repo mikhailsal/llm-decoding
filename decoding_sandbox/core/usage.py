@@ -139,6 +139,58 @@ def add_note(sink: UsageSink | None, text: str) -> None:
         notes.append(text)
 
 
+def record_perf_metrics(sink: UsageSink | None, perf: dict | None) -> None:
+    """Stash a provider-reported ``perf_metrics`` block on the sink.
+
+    The block is opaque dict (provider-defined keys; see Fireworks docs
+    https://docs.fireworks.ai/api-reference/post-completions for the full
+    list -- TTFT, prefill/generation durations, speculation acceptance,
+    backend host, etc.). The web layer reads this back via the dedicated
+    ``perf`` SSE frame, separate from the standard ``usage`` frame so a
+    consumer that only cares about token counts doesn't have to learn
+    the perf-metrics schema.
+
+    Last write wins for any given key -- non-streaming requests get one
+    metric block in the response body; streaming requests get one in
+    the final chunk; either way we just store the latest dict.
+    """
+    if sink is None or not perf:
+        return
+    if not isinstance(perf, dict):
+        return
+    existing = sink.get("perf_metrics")
+    if isinstance(existing, dict):
+        # Merge so partial reports across multiple sub-calls accumulate
+        # (e.g. a future combined echo+stream path that gets metrics in
+        # both the score_prompt response and the streaming final chunk).
+        merged = dict(existing)
+        merged.update(perf)
+        sink["perf_metrics"] = merged
+    else:
+        sink["perf_metrics"] = dict(perf)
+
+
+def record_raw_output(sink: UsageSink | None, raw: dict | None) -> None:
+    """Stash a provider-reported ``raw_output`` block on the sink.
+
+    Same pattern as :func:`record_perf_metrics` -- the block is opaque
+    dict-shaped diagnostics from the provider that the web layer flushes
+    as a dedicated ``raw_output`` SSE frame. Stored verbatim so the
+    browser's "what the model saw" panel can pretty-print every key the
+    provider chose to include, even ones we haven't typed yet
+    (prompt_fragments, prompt_token_ids, grammar, ...).
+
+    Last write wins; we don't merge because the provider sends one full
+    ``raw_output`` per request and merging two of them would silently
+    confuse cross-request fields.
+    """
+    if sink is None or not raw:
+        return
+    if not isinstance(raw, dict):
+        return
+    sink["raw_output"] = dict(raw)
+
+
 __all__ = [
     "UsageSink",
     "UsageAware",
@@ -146,4 +198,6 @@ __all__ = [
     "record_request",
     "record_tokens",
     "add_note",
+    "record_perf_metrics",
+    "record_raw_output",
 ]

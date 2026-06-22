@@ -423,6 +423,155 @@ def test_sampler_empty_candidates_raises() -> None:
         Sampler("greedy")([], _ctx())
 
 
+# --------------------------------------------------------------------------- #
+# Penalties (repetition / frequency / presence) — applied to logprobs before
+# the softmax, using the running history from ``SamplerContext``.
+# --------------------------------------------------------------------------- #
+def _ctx_with_history(ids: list[int]) -> SamplerContext:
+    return SamplerContext(step=len(ids), token_ids=list(ids), rng=random.Random(0))
+
+
+def test_sampler_repetition_penalty_demotes_seen_tokens() -> None:
+    """A repeated token's renormalized prob must drop vs the no-penalty run.
+
+    Token 1 was emitted; with ``repetition_penalty=1.5`` its logprob is
+    divided/multiplied (depending on sign) by 1.5, which after softmax
+    leaves its renorm-prob smaller than the bare run.
+    """
+    cands = [cand(1, "A", 0.6, 0), cand(2, "B", 0.4, 1)]
+    bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 1]))
+    pen = Sampler(
+        "temperature", temperature=1.0, repetition_penalty=1.5
+    ).decide(cands, _ctx_with_history([1, 1, 1]))
+    bare_p = next(p for c, p in bare.kept if c.token_id == 1)
+    pen_p = next(p for c, p in pen.kept if c.token_id == 1)
+    assert pen_p < bare_p
+    assert "rep=1.5" in pen.note
+
+
+def test_sampler_frequency_penalty_scales_with_count() -> None:
+    """``frequency_penalty`` subtracts ``freq * count`` from each token's logprob.
+
+    Token 1 appears 4 times; token 2 once. Net effect: token 1's logprob
+    drops by ``4*freq``, token 2's by ``freq``. After softmax we expect
+    token 1's prob to fall much further than the baseline.
+    """
+    cands = [cand(1, "A", 0.55, 0), cand(2, "B", 0.45, 1)]
+    bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 1, 1, 2]))
+    pen = Sampler(
+        "temperature", temperature=1.0, frequency_penalty=0.5
+    ).decide(cands, _ctx_with_history([1, 1, 1, 1, 2]))
+    bare_p = next(p for c, p in bare.kept if c.token_id == 1)
+    pen_p = next(p for c, p in pen.kept if c.token_id == 1)
+    assert pen_p < bare_p
+    assert "freq=0.5" in pen.note
+
+
+def test_sampler_presence_penalty_flat_per_unique_token() -> None:
+    """``presence_penalty`` subtracts a fixed value once per *seen* token.
+
+    Two seen tokens get the same -1.0 shift regardless of how many
+    times they appeared in history; an unseen third token is left
+    untouched. So an unseen runner-up gets relatively boosted.
+    """
+    cands = [cand(1, "A", 0.5, 0), cand(2, "B", 0.3, 1), cand(3, "C", 0.2, 2)]
+    bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 2]))
+    pen = Sampler(
+        "temperature", temperature=1.0, presence_penalty=1.0
+    ).decide(cands, _ctx_with_history([1, 1, 2]))
+    bare_p3 = next(p for c, p in bare.kept if c.token_id == 3)
+    pen_p3 = next(p for c, p in pen.kept if c.token_id == 3)
+    # Token 3 (never seen) gets a boost because everybody else got demoted.
+    assert pen_p3 > bare_p3
+    assert "pres=1" in pen.note
+
+
+def test_sampler_default_penalties_are_noops() -> None:
+    """Defaults (rep=1.0, freq=0, pres=0) must produce bit-identical decisions.
+
+    Otherwise every legacy run silently changes behaviour the moment we
+    add penalty fields to ``Sampler``. The history is non-empty on
+    purpose -- a no-op penalty against a non-empty history is the
+    same shape as the historical pre-penalty Sampler.
+    """
+    cands = [cand(1, "A", 0.55, 0), cand(2, "B", 0.45, 1)]
+    old_style = Sampler("temperature", temperature=1.0).decide(
+        cands, _ctx_with_history([1, 2, 1])
+    )
+    same = Sampler(
+        "temperature",
+        temperature=1.0,
+        repetition_penalty=1.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+    ).decide(cands, _ctx_with_history([1, 2, 1]))
+    assert old_style.token_id == same.token_id
+    assert [p for _, p in old_style.kept] == pytest.approx([p for _, p in same.kept])
+    assert "rep" not in same.note
+    assert "freq" not in same.note
+    assert "pres" not in same.note
+
+
+# --------------------------------------------------------------------------- #
+# Mirostat v2 (local implementation; cloud forwarding tested in test_backends_http)
+# --------------------------------------------------------------------------- #
+def test_mirostat_initializes_mu_to_2_tau() -> None:
+    """First call sets ``_mirostat_mu`` close to ``2 * τ`` per the paper bootstrap.
+
+    The exact value after the first decision is slightly off because the
+    per-step μ update fires immediately (μ -= η * (surprise - τ)). What
+    we assert here is the *order of magnitude*: after one step μ is
+    still in the ballpark of 2τ, never zero or wildly negative.
+    """
+    sampler = Sampler("mirostat", temperature=1.0, mirostat_target=3.0, mirostat_lr=0.1)
+    cands = [cand(1, "A", 0.9, 0), cand(2, "B", 0.1, 1)]
+    sampler.decide(cands, _ctx())
+    assert sampler._mirostat_mu is not None
+    assert sampler._mirostat_mu == pytest.approx(2.0 * 3.0, rel=0.5)
+    # The note must reveal the running μ so the educational UI can show
+    # how mirostat is converging.
+    decision = sampler.decide(cands, _ctx())
+    assert "mirostat" in decision.note
+    assert "μ=" in decision.note
+
+
+def test_mirostat_filter_caps_candidates_by_surprise() -> None:
+    """Mirostat keeps only candidates with -log(p) <= μ; never empty."""
+    # A tight τ forces μ small immediately; the long-tail candidates
+    # have high surprise (-log p large) and must be filtered out.
+    sampler = Sampler("mirostat", temperature=1.0, mirostat_target=0.2, mirostat_lr=0.5)
+    cands = [cand(1, "A", 0.94, 0), cand(2, "B", 0.05, 1), cand(3, "C", 0.01, 2)]
+    # Warm up so μ shrinks.
+    for _ in range(5):
+        sampler.decide(cands, _ctx())
+    decision = sampler.decide(cands, _ctx())
+    # Surprise(A) ≈ 0.062 nats; B ≈ 3.0; C ≈ 4.6. Expect B and C dropped.
+    assert {c.token_id for c, _ in decision.kept} == {1}
+
+
+def test_mirostat_fallback_returns_top_candidate_when_filter_empties_set() -> None:
+    """μ may shrink below the smallest surprise; we still return SOMETHING."""
+    sampler = Sampler("mirostat", temperature=1.0, mirostat_target=0.01, mirostat_lr=2.0)
+    cands = [cand(1, "A", 0.55, 0), cand(2, "B", 0.45, 1)]
+    # Tight τ + aggressive η + few iterations -> μ << any surprise.
+    for _ in range(10):
+        sampler.decide(cands, _ctx())
+    decision = sampler.decide(cands, _ctx())
+    # Must yield exactly one kept entry (the most likely token).
+    assert len(decision.kept) == 1
+
+
+def test_mirostat_builder_creates_correct_sampler() -> None:
+    """make_sampler('mirostat', ...) carries through to Sampler fields."""
+    from decoding_sandbox.core.samplers import make_sampler
+
+    s = make_sampler("mirostat", mirostat_target=4.0, mirostat_lr=0.25, temperature=0.8)
+    assert s.name == "mirostat"
+    assert s.mirostat_target == pytest.approx(4.0)
+    assert s.mirostat_lr == pytest.approx(0.25)
+    assert s.temperature == pytest.approx(0.8)
+
+
 def test_make_sampler_unknown_raises_keyerror() -> None:
     from decoding_sandbox.core.samplers import make_sampler
 

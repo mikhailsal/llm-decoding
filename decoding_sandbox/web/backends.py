@@ -251,14 +251,31 @@ class BackendRegistry:
             if caps is None and entry.family == "cloud":
                 prov = self._cfg.providers.get(entry.name)
                 if prov is not None:
+                    # Mirror EVERY supports_* flag we publish on the
+                    # loaded backend's capabilities here too -- otherwise
+                    # the UI sees a "stripped down" capability set for
+                    # cloud backends until the first real request lands
+                    # and the proper OpenAICompatBackend instance is
+                    # constructed. That was the exact "respect EOS
+                    # locked for Fireworks before first run" UX glitch
+                    # the manual Chrome MCP check caught.
                     caps = WireCapabilities(
                         name=f"openai_compat:{entry.name}",
                         full_vocab=False,
                         prompt_logprobs=bool(prov.supports_prompt_logprobs),
                         max_top_logprobs=int(prov.max_top_logprobs),
-                        can_force_token=False,
+                        can_force_token=bool(prov.has_completions),
                         notes="static caps from provider config (backend not yet loaded)",
                         eos_token_ids=[],
+                        supports_ignore_eos=bool(prov.supports_ignore_eos),
+                        supports_perf_metrics=bool(prov.supports_perf_metrics),
+                        supports_service_tier=bool(prov.supports_service_tier),
+                        supports_sampling_mask=bool(prov.supports_sampling_mask),
+                        supports_raw_output=bool(prov.supports_raw_output),
+                        supports_logit_bias=bool(prov.supports_logit_bias),
+                        supports_combined_echo_stream=bool(
+                            prov.supports_combined_echo_stream
+                        ),
                     )
             label = self._public_label(entry)
             loaded_model, suggested, editable = self._public_model_info(entry)

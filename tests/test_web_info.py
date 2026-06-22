@@ -106,6 +106,99 @@ def test_info_reports_static_caps_for_unloaded_cloud_backends(app) -> None:
     assert nim["capabilities"]["prompt_logprobs"] is False
 
 
+def test_info_static_caps_mirror_all_provider_supports_flags(env_with_secret) -> None:
+    """Static-caps stub (used before the backend is loaded) must expose
+    EVERY ``supports_*`` flag declared on :class:`ProviderConfig`.
+
+    The Chrome MCP manual check caught a regression where Fireworks'
+    ``respect EOS`` checkbox stayed locked, ``service tier`` dropdown
+    stayed hidden, and ``logit_bias`` editor refused input until the
+    first generate call lazily-loaded the real backend. Cause: the
+    stub in ``web/backends.py`` only forwarded ``prompt_logprobs`` and
+    ``max_top_logprobs`` -- the seven new flags from Phases 1-5 fell
+    back to ``False``. This pin makes sure the stub stays in sync with
+    any future addition to ``ProviderConfig``.
+    """
+    from decoding_sandbox.core.config import (
+        Config,
+        ProviderConfig,
+        RemoteConfig,
+        StorageConfig,
+    )
+
+    cfg = Config(
+        raw={
+            "secrets_env_file": "/tmp/dsbx-test-secrets-DO-NOT-USE.env",
+            "run": {"backend": "dsbx-host-py"},
+            "storage": {
+                "hf_home": "/tmp/hf",
+                "pip_cache": "/tmp/pip",
+                "min_free_gb": 1.0,
+                "check_paths": ["/tmp"],
+            },
+            "local": {},
+            "remote": {"dsbx-host-py": {"base_url": "http://192.0.2.42:8000"}},
+            "providers": {},
+            "web": {"api_token": DEFAULT_TOKEN, "logging": {"enabled": False}},
+        },
+        config_path=None,
+        secrets_env_file="/tmp/dsbx-test-secrets-DO-NOT-USE.env",
+        default_backend="dsbx-host-py",
+        storage=StorageConfig(
+            hf_home="/tmp/hf",
+            pip_cache="/tmp/pip",
+            min_free_gb=1.0,
+            check_paths=["/tmp"],
+        ),
+        providers={
+            "fireworks": ProviderConfig(
+                name="fireworks",
+                base_url="https://api.example/fireworks",
+                api_key_env="FIREWORKS_API_KEY",
+                default_model="fireworks/x",
+                max_top_logprobs=5,
+                supports_prompt_logprobs=True,
+                supports_new_logprobs=True,
+                supports_sampling_mask=True,
+                supports_ignore_eos=True,
+                supports_perf_metrics=True,
+                supports_service_tier=True,
+                supports_raw_output=True,
+                supports_logit_bias=True,
+                supports_combined_echo_stream=True,
+                has_completions=True,
+            )
+        },
+        remotes={
+            "dsbx-host-py": RemoteConfig(
+                name="dsbx-host-py", base_url="http://192.0.2.42:8000", timeout=10.0
+            )
+        },
+    )
+    backend = FakeBackend(
+        tokens={"x": [120]}, pieces={120: "x"}, distributions={}, eos_token_ids=(99,)
+    )
+    app = build_test_app({"dsbx-host-py": backend}, cfg=cfg)
+    with make_authed_client(app) as c:
+        r = c.get("/api/v1/info")
+    by_name = {b["name"]: b for b in r.json()["backends"]}
+    caps = by_name["fireworks"]["capabilities"]
+    assert caps is not None
+    # Every flag below must be ``True`` because the stub MUST mirror what
+    # the loaded OpenAICompatBackend would advertise. ``can_force_token``
+    # comes from ``has_completions`` (Fireworks /v1/completions allows
+    # forcing).
+    assert caps["supports_ignore_eos"] is True
+    assert caps["supports_perf_metrics"] is True
+    assert caps["supports_service_tier"] is True
+    assert caps["supports_sampling_mask"] is True
+    assert caps["supports_raw_output"] is True
+    assert caps["supports_logit_bias"] is True
+    assert caps["supports_combined_echo_stream"] is True
+    assert caps["can_force_token"] is True
+    assert caps["notes"] == "static caps from provider config (backend not yet loaded)"
+
+
 def test_info_marks_cloud_without_key_as_unavailable(env_with_secret, monkeypatch) -> None:
     # Build a fresh app where NIM has no key set.
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)

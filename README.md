@@ -246,6 +246,97 @@ reports `stopped on --stop token: ...` and
 *why* generation halted. Set `respect_eos=False` at the engine level (or
 extend the CLI later) to probe what the model would emit past EOS.
 
+On the OpenAI-compat path `respect_eos=False` used to be a silent lie
+(no documented field to disable EOS halting on the server). That's now
+fixed for providers that opt into the Fireworks-style `ignore_eos`
+field: when `ProviderConfig.supports_ignore_eos` is true we ship
+`ignore_eos: true` on the wire and the model actually keeps emitting
+past its EOS. The browser's `respect EOS` checkbox is enabled on those
+backends. Providers without the flag (NIM, OpenRouter, LM Studio
+chat-only) still get the advisory note on the `usage` SSE frame so the
+UI can say "the cloud ignored this flag" instead of pretending.
+
+### Fireworks /v1/completions extensions
+
+Fireworks exposes a small zoo of extension fields on `/v1/completions`
+that turn the sandbox into a much better learning + debugging tool.
+They are wired through `ProviderConfig.supports_*` flags so other
+providers stay on the conservative OpenAI-compatible subset:
+
+- `ignore_eos` -- see above. Unlocks the `respect EOS` checkbox.
+- `perf_metrics_in_response` -- always-on. The provider returns a
+  `perf_metrics` block (TTFT, prefill/generation durations, cached
+  prompt tokens, backend host) that the middleware surfaces as a
+  dedicated `perf` SSE frame; the browser renders it as a
+  *server timings* panel right next to the running completion.
+- `service_tier` -- per-request selector (`default` / `priority`). The
+  UI shows the dropdown only when `Capabilities.supports_service_tier`
+  is true.
+- `prompt_cache_key` -- when set, requests sharing the same key are
+  routed to the same backend replica to maximize KV-cache hit rate
+  (great for manual decoding where the prefix is stable).
+- `x-session-affinity` + `x-multi-turn-session-id` (HTTP headers) --
+  when `session_id` is set on a request these two headers go on the
+  wire; the second one enables Fireworks' **MoE Router Replay (R3)**
+  feature, making MoE expert routing deterministic across turns of a
+  multi-step session.
+
+Phases 1-2 cover wire mechanics + expanded sampling
+(`typical_p`, `mirostat`, repetition/frequency/presence penalties).
+Phase 3 swapped the cloud-parser onto the **NewLogProbs** format
+(`logprobs: true` + `top_logprobs: N` instead of a single integer):
+- Token candidates now carry the **real model `token_id`** straight
+  from the response, instead of the synthetic interned ids the legacy
+  parser had to invent. That makes `--watch-id N` finally produce
+  meaningful "what's the probability of token 1234?" traces against
+  cloud providers.
+- When `Capabilities.supports_sampling_mask` is true, the request also
+  sets `sampling_mask: 'count'` and the response carries
+  `sampling_mask_count` per position -- the number of tokens that
+  survived the server's sampling filter stack. Both `/generate` and
+  `/inspect` render this as a new **eligible** column right after the
+  probability bar.
+
+Phase 4 wired the remaining Fireworks-only knobs into both the request
+and the UI:
+- **`raw_output: true`** is always on for Fireworks. The provider's
+  diagnostics block (`prompt_fragments`, `prompt_token_ids`,
+  `grammar`, plus whatever else the upstream chose to emit) flows
+  through a dedicated `raw_output` SSE frame and renders as a
+  "what the model saw" panel beside the perf timings. Most useful
+  when a custom chat template silently ate your system prompt --
+  you see it directly instead of guessing from "why didn't the model
+  follow the instructions?".
+- **`logit_bias`** is a new field on `GenerateRequest`. The generate
+  page exposes a row editor (token_id + bias in [-100, 100]) gated
+  on `Capabilities.supports_logit_bias`. The wire shape matches
+  OpenAI (`{"<token_id>": float}`); invalid rows are dropped silently
+  on the client and again on the backend, so a single typo never
+  fails the whole request. Use cases: ban a token (`-100`), nudge a
+  rare option past a tight `top_p` (`+5..+15`), force a particular
+  token in a grammar-constrained setup (`+100`).
+
+Phase 5 collapses the "include prompt logits" workflow from two
+network round trips into one when the backend advertises
+`supports_combined_echo_stream`:
+- A single `echo=true` + `stream=true` request returns BOTH the
+  echoed per-prompt-token logprobs AND the streamed generated tokens
+  in one connection. The frontend wire shape is unchanged
+  (`prompt_score? -> step* -> perf? -> raw_output? -> usage -> done`)
+  so existing consumers keep working without any client changes.
+- A new `echo_last` field on `GenerateRequest` (Fireworks-specific,
+  gated on `supports_echo_last`) restricts the echoed positions to
+  the last N prompt tokens -- handy for long prompts where you only
+  care about the trailing context. The generate page surfaces it as
+  a small "echo last N" knob right under the *include prompt* check-
+  box, visible only when the combined path is actually in use.
+- `scripts/smoke_fireworks_echo_stream.py` is a one-shot diagnostic
+  that POSTs an `echo + stream + max_tokens>0 + logprobs` body
+  against the real Fireworks API and prints the chunk-by-chunk
+  ordering, so you can confirm a new deployment tolerates the combo
+  before flipping `supports_combined_echo_stream` on in
+  `config.toml`.
+
 `dsbx inspect` (and `:caps` inside a session) prints the configured EOS
 ids in the banner, e.g.
 `EOS ids: 248044=<special>` -- the magenta marker means the token's

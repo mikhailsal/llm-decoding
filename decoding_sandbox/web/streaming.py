@@ -62,6 +62,11 @@ def stream_generate(
     seed: int,
     respect_eos: bool,
     include_prompt: bool = False,
+    service_tier: str | None = None,
+    prompt_cache_key: str | None = None,
+    session_id: str | None = None,
+    logit_bias: dict[int, float] | None = None,
+    echo_last: int | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames for a generate call against ``backend``.
 
@@ -105,10 +110,22 @@ def stream_generate(
 
     last_reason: str | None = None
     try:
-        if include_prompt:
-            yield from _emit_prompt_score(backend, prompt=prompt, top_k=top_k)
-        if use_remote_stream:
-            for gs in _iter_remote_stream(
+        # Combined echo+stream path (Phase 5): when the user asked for
+        # ``include_prompt`` AND the backend can do echo+stream in one
+        # request, we replace the legacy two-call sequence
+        # (``_emit_prompt_score`` + per-token loop) with a single
+        # ``stream_native_with_echo`` call that interleaves prompt-echo
+        # StepResults (turned into a single ``prompt_score`` frame at
+        # the front) with emitted GenSteps. The wire order is preserved
+        # exactly, so the browser sees the same
+        # ``prompt_score? -> step* -> perf? -> raw_output? -> usage ->
+        # done`` sequence as before -- just with half the provider RPS
+        # pressure on include-prompt inspect / generate runs.
+        use_combined = include_prompt and _can_use_combined_echo_stream(
+            backend, sampler_name, sampler_params
+        )
+        if use_combined:
+            for frame, step_delta, reason in _iter_combined_echo_stream(
                 backend,
                 prompt=prompt,
                 sampler_name=sampler_name,
@@ -118,47 +135,77 @@ def stream_generate(
                 stop_ids=stop_ids,
                 seed=seed,
                 respect_eos=respect_eos,
+                service_tier=service_tier,
+                prompt_cache_key=prompt_cache_key,
+                session_id=session_id,
+                logit_bias=logit_bias,
+                echo_last=echo_last,
             ):
-                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
-                completion_steps += 1
-                last_reason = gs.stop_reason
-        elif _can_use_native_cloud_stream(backend, sampler_name, sampler_params):
-            # Cloud /completions provider + a built-in sampler: replace the
-            # per-token decode loop (one HTTP request per token, the path
-            # that historically tripped Fireworks' per-account RPS limit on
-            # serverless models like glm-5p2) with a SINGLE streaming POST
-            # that asks the provider to run the sampler server-side. Custom
-            # samplers and chat-only providers continue to use the per-step
-            # loop below, which now has its own 429/Retry-After retry from
-            # the backend's _request helper.
-            for gs in backend.stream_native(  # type: ignore[attr-defined]
-                prompt,
-                sampler_name=sampler_name,
-                sampler_params=sampler_params,
-                max_tokens=max_tokens,
-                top_k=top_k,
-                stop_ids=stop_ids,
-                seed=seed,
-                respect_eos=respect_eos,
-            ):
-                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
-                completion_steps += 1
-                last_reason = gs.stop_reason
+                yield frame
+                completion_steps += step_delta
+                if reason is not None:
+                    last_reason = reason
         else:
-            rng = random.Random(seed)
-            for gs in core_generate(
-                backend,
-                prompt,
-                sampler,
-                max_tokens=max_tokens,
-                top_k=top_k,
-                rng=rng,
-                stop_ids=stop_ids,
-                respect_eos=respect_eos,
-            ):
-                yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
-                completion_steps += 1
-                last_reason = gs.stop_reason
+            if include_prompt:
+                yield from _emit_prompt_score(backend, prompt=prompt, top_k=top_k)
+            if use_remote_stream:
+                for gs in _iter_remote_stream(
+                    backend,
+                    prompt=prompt,
+                    sampler_name=sampler_name,
+                    sampler_params=sampler_params,
+                    max_tokens=max_tokens,
+                    top_k=top_k,
+                    stop_ids=stop_ids,
+                    seed=seed,
+                    respect_eos=respect_eos,
+                ):
+                    yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                    completion_steps += 1
+                    last_reason = gs.stop_reason
+            elif _can_use_native_cloud_stream(backend, sampler_name, sampler_params):
+                # Cloud /completions provider + a built-in sampler:
+                # replace the per-token decode loop (one HTTP request
+                # per token, the path that historically tripped
+                # Fireworks' per-account RPS limit on serverless models
+                # like glm-5p2) with a SINGLE streaming POST that asks
+                # the provider to run the sampler server-side. Custom
+                # samplers and chat-only providers continue to use the
+                # per-step loop below, which now has its own
+                # 429/Retry-After retry from the backend's _request
+                # helper.
+                for gs in backend.stream_native(  # type: ignore[attr-defined]
+                    prompt,
+                    sampler_name=sampler_name,
+                    sampler_params=sampler_params,
+                    max_tokens=max_tokens,
+                    top_k=top_k,
+                    stop_ids=stop_ids,
+                    seed=seed,
+                    respect_eos=respect_eos,
+                    service_tier=service_tier,
+                    prompt_cache_key=prompt_cache_key,
+                    session_id=session_id,
+                    logit_bias=logit_bias,
+                ):
+                    yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                    completion_steps += 1
+                    last_reason = gs.stop_reason
+            else:
+                rng = random.Random(seed)
+                for gs in core_generate(
+                    backend,
+                    prompt,
+                    sampler,
+                    max_tokens=max_tokens,
+                    top_k=top_k,
+                    rng=rng,
+                    stop_ids=stop_ids,
+                    respect_eos=respect_eos,
+                ):
+                    yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
+                    completion_steps += 1
+                    last_reason = gs.stop_reason
     except Exception as exc:  # noqa: BLE001
         log.exception("dsbx-web: generate stream errored")
         error = str(exc)
@@ -196,13 +243,159 @@ def stream_generate(
     ):
         usage["total_tokens"] = int(usage["prompt_tokens"]) + int(usage["completion_tokens"])
 
-    # Emit ``usage`` BEFORE ``done`` so consumers that already key off
-    # ``done`` as the terminator don't have to special-case ordering.
+    # Emit ``perf`` and ``raw_output`` (when present) BEFORE ``usage``
+    # so a consumer that only reads ``usage`` still sees consistent
+    # ordering: prompt_score? -> step* -> perf? -> raw_output? ->
+    # usage -> done. Both are provider-populated; missing for non-
+    # Fireworks backends and for the legacy per-step decode path. We
+    # ``pop`` them off the sink so they don't accidentally land in the
+    # ``usage`` frame (which is just a kwargs splat).
+    perf = usage.pop("perf_metrics", None)
+    if isinstance(perf, dict) and perf:
+        yield sse_frame({"event": "perf", "metrics": perf})
+    raw_output = usage.pop("raw_output", None)
+    if isinstance(raw_output, dict) and raw_output:
+        yield sse_frame({"event": "raw_output", "payload": raw_output})
     yield sse_frame({"event": "usage", **usage})
     if error is not None:
         yield sse_frame({"event": "done", "stop_reason": last_reason, "error": error})
         return
     yield sse_frame({"event": "done", "stop_reason": last_reason})
+
+
+def _can_use_combined_echo_stream(
+    backend: Backend, sampler_name: str, sampler_params: dict[str, Any]
+) -> bool:
+    """Should we use the single-call echo+stream path for include_prompt?
+
+    Three conditions:
+
+    1. Backend exposes ``stream_native_with_echo`` AND
+       ``supports_native_sampler`` (so we know the sampler maps onto
+       server-side knobs).
+    2. The active sampler is one of the natively mappable set.
+    3. The backend's capabilities advertise
+       ``supports_combined_echo_stream`` -- a separate flag from
+       ``supports_native_sampler`` because echo+stream tolerance is a
+       deployment-time decision (Fireworks documents it; other
+       providers haven't been validated).
+
+    The check is intentionally conservative: any failure short-circuits
+    to ``False`` and the caller falls back to the two-request path,
+    which still works.
+    """
+    if not hasattr(backend, "stream_native_with_echo"):
+        return False
+    if not hasattr(backend, "supports_native_sampler"):
+        return False
+    caps = getattr(backend, "capabilities", None)
+    if caps is None or not getattr(caps, "supports_combined_echo_stream", False):
+        return False
+    try:
+        return bool(backend.supports_native_sampler(sampler_name, sampler_params))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _iter_combined_echo_stream(
+    backend: Backend,
+    *,
+    prompt: str,
+    sampler_name: str,
+    sampler_params: dict[str, Any],
+    max_tokens: int,
+    top_k: int,
+    stop_ids: list[int],
+    seed: int,
+    respect_eos: bool,
+    service_tier: str | None,
+    prompt_cache_key: str | None,
+    session_id: str | None,
+    logit_bias: dict[int, float] | None,
+    echo_last: int | None,
+) -> Iterator[tuple[bytes, int, str | None]]:
+    """Drive ``stream_native_with_echo`` into SSE frames + bookkeeping.
+
+    Yields ``(sse_frame_bytes, completion_step_delta, stop_reason)``
+    triples so the caller can update ``completion_steps`` and
+    ``last_reason`` without re-parsing the frames. Wire shape produced:
+
+    * Exactly one ``prompt_score`` frame at the front, built from every
+      StepResult the backend yielded (the echoed prompt positions).
+      Empty list when the backend yielded no prompt positions; we
+      still emit the frame so the browser sees the same event order
+      it does on the two-request path.
+    * One ``step`` frame per GenStep, identical to what the regular
+      ``stream_native`` path emits.
+
+    The backend's own ``stream_native_with_echo`` handles all the
+    perf_metrics / raw_output / usage sink writes during streaming;
+    the perf / raw_output / usage SSE frames come out of the same
+    finalizer ``stream_generate`` uses for every path.
+    """
+    caps = backend.capabilities
+    prompt_steps: list = []
+    prompt_score_emitted = False
+    iterator = backend.stream_native_with_echo(  # type: ignore[attr-defined]
+        prompt,
+        sampler_name=sampler_name,
+        sampler_params=sampler_params,
+        max_tokens=max_tokens,
+        top_k=top_k,
+        stop_ids=stop_ids,
+        seed=seed,
+        respect_eos=respect_eos,
+        service_tier=service_tier,
+        prompt_cache_key=prompt_cache_key,
+        session_id=session_id,
+        logit_bias=logit_bias,
+        echo_last=echo_last,
+    )
+    for item in iterator:
+        # ``StepResult`` -> goes into the prompt_score frame buffer.
+        # ``GenStep``    -> first time we see one, flush the
+        # prompt_score frame; then yield this step's frame.
+        if hasattr(item, "decision") and hasattr(item, "step_result"):
+            # GenStep: flush prompt_score first if not already done.
+            if not prompt_score_emitted:
+                yield (
+                    sse_frame(
+                        {
+                            "event": "prompt_score",
+                            "steps": [step_to_wire(s).model_dump() for s in prompt_steps],
+                            "is_full_vocab": bool(caps.full_vocab),
+                            "prompt_logprobs": bool(caps.prompt_logprobs),
+                            "note": "",
+                        }
+                    ),
+                    0,
+                    None,
+                )
+                prompt_score_emitted = True
+            yield (
+                sse_frame({"event": "step", "step": genstep_to_wire(item).model_dump()}),
+                1,
+                item.stop_reason,
+            )
+        else:
+            # StepResult: buffer for the eventual prompt_score frame.
+            prompt_steps.append(item)
+    # No emitted tokens at all (e.g. max_tokens=0). Still emit the
+    # prompt_score frame so the UI table renders the echoed positions.
+    if not prompt_score_emitted:
+        yield (
+            sse_frame(
+                {
+                    "event": "prompt_score",
+                    "steps": [step_to_wire(s).model_dump() for s in prompt_steps],
+                    "is_full_vocab": bool(caps.full_vocab),
+                    "prompt_logprobs": bool(caps.prompt_logprobs),
+                    "note": "",
+                }
+            ),
+            0,
+            None,
+        )
 
 
 def _can_use_native_cloud_stream(
