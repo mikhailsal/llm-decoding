@@ -722,6 +722,37 @@ def _attach_stream_factory(mock: MockHTTPClient, queue: list[_MockStreamResponse
     mock.stream = _stream  # type: ignore[attr-defined]
 
 
+def test_iter_completions_stream_pins_per_frame_read_timeout(monkeypatch) -> None:
+    """Each ``/completions`` stream POST must carry an explicit
+    ``httpx.Timeout`` with a tight ``read`` knob (the "max gap between
+    SSE frames"). The wider client default of 120 s is fine for one-shot
+    calls but would pin the FastAPI threadpool slot for two minutes if
+    the provider went silent mid-generate, which is exactly what makes
+    the browser's "stop" button feel broken. See the matching
+    ``RemoteBackend.stream_generate`` test in test_remote_backend.py."""
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
+    list(
+        backend.stream_native(
+            "hi",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    stream_calls = [c for c in mock.calls if c.get("stream")]
+    assert stream_calls, "no stream call recorded"
+    timeout = stream_calls[-1]["kwargs"].get("timeout")
+    import httpx as _httpx
+
+    assert isinstance(timeout, _httpx.Timeout)
+    # Tight enough that a hung provider surfaces within a minute; wide
+    # enough to outlast a slow first-token on a cold model. 45 s today.
+    assert 5.0 <= float(timeout.read) <= 120.0
+    assert (timeout.connect or 0) <= 30.0
+
+
 def test_supports_native_sampler_matrix(monkeypatch) -> None:
     """Built-ins are universally mappable; typical/mirostat gated per-provider.
 

@@ -1354,6 +1354,18 @@ class OpenAICompatBackend(Backend):
         stream_kwargs: dict[str, Any] = {"json": body}
         if extra_headers:
             stream_kwargs["headers"] = dict(extra_headers)
+        # Per-stream timeout overrides the client default so a hung
+        # provider (or a TCP black hole) doesn't pin the request for
+        # the full ``timeout=120`` window. The ``read`` value is
+        # specifically "max gap between SSE frames"; Fireworks emits
+        # one frame per token so 45 s is wildly generous in practice
+        # but tight enough that a real silence surfaces fast and the
+        # web layer's ``stream_generate`` can drain its outer ``with``
+        # (closing the connection, RSTing the upstream, and letting
+        # the browser's stop button take effect within seconds).
+        stream_kwargs["timeout"] = httpx.Timeout(
+            connect=10.0, read=45.0, write=10.0, pool=10.0
+        )
         for attempt in range(self._max_retries + 1):
             # Count every attempt to open the stream, matching what
             # ``_request`` does for non-streaming calls. Without this
@@ -1399,23 +1411,34 @@ class OpenAICompatBackend(Backend):
                     self._sleep(wait)
                     continue
                 response.raise_for_status()
-                for raw in response.iter_lines():
-                    line = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                    line = line.strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload = line[len("data:") :].strip()
-                    if payload == "[DONE]":
-                        return
-                    try:
-                        yield json.loads(payload)
-                    except json.JSONDecodeError as exc:
-                        log.warning(
-                            "%s: dropping non-JSON SSE frame: %r (%s)",
-                            self.provider.name,
-                            payload[:120],
-                            exc,
-                        )
+                try:
+                    for raw in response.iter_lines():
+                        line = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:") :].strip()
+                        if payload == "[DONE]":
+                            return
+                        try:
+                            yield json.loads(payload)
+                        except json.JSONDecodeError as exc:
+                            log.warning(
+                                "%s: dropping non-JSON SSE frame: %r (%s)",
+                                self.provider.name,
+                                payload[:120],
+                                exc,
+                            )
+                except GeneratorExit:
+                    # Mirrors the remote-backend cleanup: re-raising
+                    # lets ``with stream_cm as response`` close the
+                    # httpx response, which closes the socket, which
+                    # signals the provider to stop streaming. Without
+                    # this, a "stop" click on a happily-streaming
+                    # Fireworks generate would still leak the
+                    # connection until the response naturally
+                    # completed.
+                    raise
                 return
         # Retry budget exhausted with an exception we couldn't recover from.
         if last_exc is not None:  # pragma: no cover -- defensive

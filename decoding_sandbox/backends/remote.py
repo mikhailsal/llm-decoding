@@ -40,6 +40,17 @@ class RemoteBackendError(RuntimeError):
     """Raised when the server returns a non-2xx response or invalid JSON."""
 
 
+class RemoteStreamTimeout(RemoteBackendError):
+    """Raised when the upstream remote server stops sending bytes mid-stream.
+
+    Kept as a dedicated subclass so callers (notably ``stream_generate``
+    in the web layer) can present a friendly "server stopped responding"
+    message instead of the raw httpx exception. Inherits from
+    :class:`RemoteBackendError` so any existing
+    ``except RemoteBackendError`` blocks continue to swallow it.
+    """
+
+
 class RemoteBackend(Backend):
     """``Backend`` over HTTP. Talks to a ``dsbx serve`` instance."""
 
@@ -49,6 +60,17 @@ class RemoteBackend(Backend):
     # remains obvious in code review.
     supports_remote_stream: bool = True
 
+    # Per-frame timeout applied to ``stream_generate``. Separate from the
+    # outer ``timeout`` (which governs connect / non-stream requests like
+    # /v1/info or /v1/score_prompt) because for a stream the meaningful
+    # liveness signal is "the next SSE frame arrives within N seconds",
+    # not "the whole response finishes within N seconds". Defaults to
+    # 45 s, which is generous enough for a single P40 generate step on
+    # a long prompt but tight enough that a fully hung server surfaces
+    # as ``RemoteStreamTimeout`` before the user gives up and reloads.
+    # Bumped via ``stream_read_timeout=`` if a slow deployment trips it.
+    DEFAULT_STREAM_READ_TIMEOUT: float = 45.0
+
     def __init__(
         self,
         base_url: str,
@@ -56,6 +78,7 @@ class RemoteBackend(Backend):
         client: httpx.Client | None = None,
         timeout: float = 120.0,
         transport: httpx.BaseTransport | None = None,
+        stream_read_timeout: float | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
@@ -70,6 +93,11 @@ class RemoteBackend(Backend):
             if transport is not None:
                 client_kwargs["transport"] = transport
             self._client = httpx.Client(**client_kwargs)  # type: ignore[arg-type]
+        self._stream_read_timeout: float = (
+            float(stream_read_timeout)
+            if stream_read_timeout is not None
+            else self.DEFAULT_STREAM_READ_TIMEOUT
+        )
         info = self._get_info()
         self._capabilities = _capabilities_from_dict(info["capabilities"])
         self._backend_kind: str = str(info.get("backend_kind", "unknown"))
@@ -202,8 +230,22 @@ class RemoteBackend(Backend):
             "seed": int(seed),
             "respect_eos": bool(respect_eos),
         }
+        # Per-stream timeout: tight ``read`` so a hung server surfaces as
+        # ``RemoteStreamTimeout`` within seconds (and lets the web layer
+        # release its sync generator so Starlette's ``GeneratorExit``
+        # from a disconnected browser tab can actually take effect).
+        # ``write`` / ``pool`` stay short because the upload is a small
+        # JSON blob; only ``connect`` is bumped to 10 s for slow LANs.
+        stream_timeout = httpx.Timeout(
+            connect=10.0,
+            read=self._stream_read_timeout,
+            write=10.0,
+            pool=10.0,
+        )
         try:
-            with self._client.stream("POST", "/v1/generate/stream", json=body) as r:
+            with self._client.stream(
+                "POST", "/v1/generate/stream", json=body, timeout=stream_timeout
+            ) as r:
                 if r.status_code >= 400:
                     # Read the (small) body so the server's HTTPException
                     # detail makes it back to the user.
@@ -214,18 +256,38 @@ class RemoteBackend(Backend):
                     raise RemoteBackendError(
                         f"POST /v1/generate/stream -> HTTP {r.status_code}: {detail}"
                     )
-                for event in _iter_sse_events(r.iter_lines()):
-                    kind = event.get("event")
-                    if kind == "step":
-                        yield _genstep_from_dict(event["step"])
-                    elif kind == "done":
-                        err = event.get("error")
-                        if err:
-                            raise RemoteBackendError(f"server reported error: {err}")
-                        return
-                    # Unknown event kinds are silently ignored; this lets
-                    # the server add new event types (e.g. "progress")
-                    # without breaking older clients.
+                try:
+                    for event in _iter_sse_events(r.iter_lines()):
+                        kind = event.get("event")
+                        if kind == "step":
+                            yield _genstep_from_dict(event["step"])
+                        elif kind == "done":
+                            err = event.get("error")
+                            if err:
+                                raise RemoteBackendError(
+                                    f"server reported error: {err}"
+                                )
+                            return
+                        # Unknown event kinds are silently ignored; this lets
+                        # the server add new event types (e.g. "progress")
+                        # without breaking older clients.
+                except GeneratorExit:
+                    # Re-raise so the outer ``with`` actually closes the
+                    # connection (httpx ``Response`` ``__exit__`` runs
+                    # ``stream.close()`` which RSTs the socket -- that's
+                    # how the upstream dsbx serve learns the client gave
+                    # up and stops generating).
+                    raise
+        except httpx.ReadTimeout as exc:
+            # Distinct, actionable error: the server is silent. Common
+            # causes: the model loader is stuck, the dsbx serve event
+            # loop is blocked by a prior request, or the network path
+            # is one-way. The web layer surfaces this as a clean
+            # ``done.error`` SSE so the browser shows it in the toast.
+            raise RemoteStreamTimeout(
+                f"upstream stopped sending data for >{self._stream_read_timeout:.0f}s; "
+                "the remote ``dsbx serve`` may be hung or overloaded"
+            ) from exc
         except httpx.HTTPError as exc:
             raise RemoteBackendError(f"stream connection error: {exc}") from exc
 
@@ -391,4 +453,4 @@ def _iter_sse_events(lines: Iterator[str]) -> Iterator[dict]:
             return
 
 
-__all__ = ["RemoteBackend", "RemoteBackendError"]
+__all__ = ["RemoteBackend", "RemoteBackendError", "RemoteStreamTimeout"]

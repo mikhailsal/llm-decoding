@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import math
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.backends.remote import RemoteBackend, RemoteBackendError
+from decoding_sandbox.backends.remote import (
+    RemoteBackend,
+    RemoteBackendError,
+    RemoteStreamTimeout,
+)
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.types import StepResult, TokenCandidate
 from decoding_sandbox.server.app import make_app
@@ -272,3 +277,200 @@ def test_close_closes_owned_client(monkeypatch) -> None:
     monkeypatch.setattr(tc, "close", lambda: closes.append(1))
     remote.close()
     assert closes == [1]
+
+
+# --------------------------------------------------------------------------- #
+# Streaming: timeout + cancellation cleanup
+# --------------------------------------------------------------------------- #
+class _StreamClient:
+    """Minimal httpx.Client stand-in that supports the surface our
+    streaming code uses: ``.get`` for /v1/info, ``.stream`` returning a
+    context-managed response whose ``iter_lines`` is fed by a caller-
+    supplied callable.
+
+    The point is to drive ``RemoteBackend.stream_generate`` through its
+    happy path AND its ReadTimeout / GeneratorExit paths without
+    standing up a server, so we can assert (a) the right timeout knob
+    reaches httpx, (b) ``RemoteStreamTimeout`` is raised on a hang, and
+    (c) closing the generator closes the underlying connection.
+    """
+
+    def __init__(self, *, info_payload: dict, line_factory) -> None:
+        self._info = info_payload
+        self._line_factory = line_factory
+        self.last_timeout: object | None = None
+        self.closed_streams = 0
+
+    def get(self, path: str, **_: object) -> "_StreamResp":
+        return _StreamResp(200, payload=self._info, owner=self)
+
+    def post(self, path: str, *, json=None, **_: object) -> "_StreamResp":
+        # Not actually used in these tests; the streaming path uses
+        # ``self.stream``. Defined anyway because RemoteBackend's
+        # constructor relies on ``post`` for the ``_get_info`` call's
+        # error fallback path -- not exercised here but cheap to leave.
+        return _StreamResp(200, payload={}, owner=self)
+
+    def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        json=None,
+        timeout=None,
+        **_: object,
+    ) -> "_StreamCtx":
+        self.last_timeout = timeout
+        return _StreamCtx(self._line_factory(), owner=self)
+
+    def close(self) -> None:
+        return None
+
+
+class _StreamResp:
+    def __init__(self, status_code: int, *, payload, owner: _StreamClient) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.headers: dict[str, str] = {}
+        self._owner = owner
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if not (200 <= self.status_code < 300):
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=None, response=None  # type: ignore[arg-type]
+            )
+
+
+class _StreamCtx:
+    def __init__(self, line_iter, *, owner: _StreamClient) -> None:
+        self._lines = line_iter
+        self.status_code = 200
+        self._owner = owner
+
+    def __enter__(self) -> "_StreamCtx":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._owner.closed_streams += 1
+        return False
+
+    def iter_lines(self):
+        # Yield from the caller-provided iterator. Tests inject one of:
+        #   - a generator yielding SSE lines + then returning (happy path)
+        #   - a function raising httpx.ReadTimeout (hung upstream)
+        #   - a generator yielding one line then pausing forever
+        yield from self._lines
+
+    def read(self) -> bytes:
+        return b""
+
+
+def _info_payload() -> dict:
+    """Minimal /v1/info shape ``RemoteBackend`` needs to construct."""
+    return {
+        "backend_kind": "test",
+        "engine_version": "0",
+        "loaded_model": None,
+        "capabilities": {
+            "name": "test",
+            "full_vocab": True,
+            "prompt_logprobs": True,
+            "max_top_logprobs": 5,
+            "can_force_token": False,
+            "notes": "",
+            "eos_token_ids": [],
+        },
+    }
+
+
+def test_stream_generate_uses_short_per_frame_read_timeout() -> None:
+    """The streaming POST must carry an explicit ``httpx.Timeout`` whose
+    ``read`` knob equals the backend's per-frame timeout, NOT the
+    client's wider default. This is what lets the web layer free its
+    sync generator within seconds of an upstream hang instead of the
+    full 120 s client default."""
+
+    def lines():
+        # Empty stream + immediate done so the iterator returns cleanly.
+        yield 'data: {"event": "done"}'
+        yield ""
+
+    fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
+    rb = RemoteBackend(
+        "http://test", client=fake, stream_read_timeout=12.5
+    )
+    list(rb.stream_generate("hi", "greedy", {}, max_tokens=1))
+    timeout = fake.last_timeout
+    assert isinstance(timeout, httpx.Timeout)
+    # httpx stores values per-phase; the read knob is what matters here.
+    assert timeout.read == pytest.approx(12.5)
+    # Connect kept short on purpose so a black-hole gateway surfaces fast.
+    assert (timeout.connect or 0) <= 15.0
+
+
+def test_stream_generate_translates_read_timeout_to_remote_stream_timeout() -> None:
+    """A hung upstream surfaces as ``RemoteStreamTimeout`` (subclass of
+    RemoteBackendError) with a message naming the configured budget --
+    matches the user-facing error the SSE done frame now carries."""
+
+    def lines():
+        # Mimic httpx raising ReadTimeout from inside iter_lines when no
+        # bytes arrive within the configured read budget. (httpx itself
+        # surfaces this as ReadTimeout from the underlying transport.)
+        raise httpx.ReadTimeout("read timed out")
+        yield  # pragma: no cover -- unreachable, but marks this a generator
+
+    fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
+    rb = RemoteBackend("http://test", client=fake, stream_read_timeout=7.0)
+    with pytest.raises(RemoteStreamTimeout, match=">7s"):
+        list(rb.stream_generate("hi", "greedy", {}, max_tokens=1))
+    # The ``with self._client.stream(...)`` context manager MUST close
+    # even on the timeout path -- otherwise the leaked httpx Response
+    # would still pin a connection to the dead upstream.
+    assert fake.closed_streams == 1
+
+
+def test_stream_generate_closes_upstream_on_generator_close() -> None:
+    """Cancelling the iterator mid-stream closes the underlying httpx
+    response. That's the chain the web layer relies on so the
+    browser's "stop" click actually RSTs the wire to the upstream
+    ``dsbx serve`` (instead of letting the connection limp on until
+    the response naturally completes)."""
+
+    def lines():
+        # Yield one usable line, then "park" forever waiting for more
+        # data. The test will close the generator after consuming the
+        # first frame; we should never reach the second yield.
+        yield (
+            'data: {"event": "step", "step": {"step": 0, "tokens_before": [], '
+            '"step_result": {"position": 0, "candidates": [], "is_full_vocab": false}, '
+            '"decision": {"token_id": 1, "token_text": "x", "kept": []}, '
+            '"stop_reason": null}}'
+        )
+        yield ""
+        # If the generator wasn't closed, we'd block forever here. The
+        # test asserting ``closed_streams == 1`` proves we did close.
+        while True:  # pragma: no cover -- unreachable when close works
+            yield ""
+
+    fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
+    rb = RemoteBackend("http://test", client=fake)
+    gen = rb.stream_generate("hi", "greedy", {}, max_tokens=99)
+    first = next(gen)
+    assert first.step == 0
+    gen.close()  # mirrors what Starlette does on client disconnect
+    assert fake.closed_streams == 1
+
+
+def test_stream_read_timeout_defaults_to_class_constant() -> None:
+    """A backend constructed without an explicit ``stream_read_timeout``
+    falls back to the class default. Keeps the public surface stable
+    for callers that don't care about the knob."""
+    rb = RemoteBackend(
+        "http://test",
+        client=_StreamClient(info_payload=_info_payload(), line_factory=lambda: iter([])),
+    )
+    assert rb._stream_read_timeout == RemoteBackend.DEFAULT_STREAM_READ_TIMEOUT

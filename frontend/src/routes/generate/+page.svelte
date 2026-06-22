@@ -612,30 +612,46 @@
           </button>
         </div>
         {#if logitBiasRows.length}
-          <div class="space-y-1">
+          <div class="space-y-1.5">
             {#each logitBiasRows as row (row.id)}
+              {@const parsedId = Number.parseInt(row.tokenId, 10)}
               {@const cachedText =
-                Number.isFinite(Number.parseInt(row.tokenId, 10))
-                  ? tokenCache[Number.parseInt(row.tokenId, 10)]
-                  : undefined}
-              <div class="flex items-center gap-2">
-                <div class="flex-1 min-w-0">
-                  <input
-                    type="text"
-                    inputmode="numeric"
-                    list="token-id-suggestions"
-                    autocomplete="off"
-                    class="input w-full font-mono text-xs"
-                    placeholder="token_id (autocomplete: type id or text)"
-                    title={cachedText !== undefined
-                      ? `id ${row.tokenId} = ${JSON.stringify(cachedText)}`
-                      : 'pick from the autocomplete list or type a numeric id'}
-                    bind:value={row.tokenId}
-                  />
+                Number.isFinite(parsedId) ? tokenCache[parsedId] : undefined}
+              {@const isSyntheticId =
+                Number.isFinite(parsedId) && parsedId >= 1 << 24}
+              <!--
+                Grid layout (vs. flex) is the robust fix for "вёрстка
+                поехала": fixed-width columns can't wrap onto a second
+                line even when the parent panel is narrow, and the
+                TokenText cell can truncate independently without
+                affecting the bias / × columns. The numeric id is now
+                deliberately small + secondary because the human-
+                readable text is what the user actually reads when
+                scanning the bias list (см. UX-feedback от 22 июня).
+              -->
+              <div class="grid grid-cols-[4rem_minmax(0,1fr)_4.5rem_1.5rem] items-center gap-1.5">
+                <input
+                  type="text"
+                  inputmode="numeric"
+                  list="token-id-suggestions"
+                  autocomplete="off"
+                  class="input w-full font-mono text-[11px] text-left px-1"
+                  placeholder="id"
+                  title={cachedText !== undefined
+                    ? `id ${row.tokenId} = ${JSON.stringify(cachedText)}${isSyntheticId ? ' (synthetic intern id, not a real model token)' : ''}`
+                    : 'pick from the autocomplete list or type a numeric id'}
+                  bind:value={row.tokenId}
+                />
+                <div class="min-w-0 truncate text-xs">
                   {#if cachedText !== undefined}
-                    <div class="text-[10px] text-slate-500 font-mono truncate" title={cachedText}>
-                      = {cachedText}
-                    </div>
+                    <TokenText text={cachedText} className="font-mono text-xs text-slate-200" />
+                    {#if isSyntheticId}
+                      <span class="ml-1 text-[10px] text-amber-400" title="synthetic intern id from a chat-only backend — server won't honor a logit_bias on this id">⚠</span>
+                    {/if}
+                  {:else if row.tokenId !== ''}
+                    <span class="text-[10px] text-slate-500" title="no text known for this id yet; the autocomplete list shows tokens we've seen in the prompt or generation">unknown token</span>
+                  {:else}
+                    <span class="text-[10px] text-slate-600">— text appears here</span>
                   {/if}
                 </div>
                 <input
@@ -643,14 +659,15 @@
                   step="0.5"
                   min="-100"
                   max="100"
-                  class="input w-24 font-mono text-xs"
+                  class="input w-full font-mono text-[11px] text-right px-1"
                   placeholder="bias"
                   bind:value={row.bias}
                 />
                 <button
                   type="button"
-                  class="text-xs px-2 py-0.5 rounded border border-slate-700 hover:border-rose-500 hover:text-rose-300"
+                  class="text-xs leading-none px-1.5 py-1 rounded border border-slate-700 hover:border-rose-500 hover:text-rose-300"
                   title="remove this entry"
+                  aria-label="remove bias row"
                   onclick={() => {
                     logitBiasRows = logitBiasRows.filter((r) => r.id !== row.id);
                   }}
