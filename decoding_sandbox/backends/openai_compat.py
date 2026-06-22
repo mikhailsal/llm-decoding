@@ -181,5 +181,93 @@ class OpenAICompatBackend(Backend):
             results.append(step)
         return results
 
+    # -- model discovery -------------------------------------------------- #
+    def fetch_available_models(self, timeout: float = 15.0) -> list[str]:
+        """Return the list of model ids this provider currently serves.
+
+        Provider catalogues live at non-uniform paths:
+
+        - NIM, OpenRouter, LM Studio: the OpenAI-compat ``/models`` endpoint
+          works as documented and returns ``{"data": [{"id": "..."}, ...]}``.
+        - Fireworks: ``/inference/v1/models`` returns 500 (it tries to list
+          *deployed* models, not the catalogue). The actual catalogue lives
+          at ``/v1/accounts/fireworks/models`` and uses a richer schema; we
+          filter to chat-capable serverless models so the picker only shows
+          things the OpenAI-compat path can talk to.
+
+        The middleware caches the result so we hit each provider at most
+        once per cache TTL (default 6h). Failures bubble up so the caller
+        can fall back to the curated static list.
+        """
+        if self.provider.name == "fireworks":
+            return self._fetch_fireworks_models(timeout=timeout)
+        # Default OpenAI-compat shape.
+        r = self._client.get("/models", timeout=timeout)
+        r.raise_for_status()
+        payload = r.json()
+        models = payload.get("data") if isinstance(payload, dict) else payload
+        ids: list[str] = []
+        if isinstance(models, list):
+            for m in models:
+                if isinstance(m, dict):
+                    mid = m.get("id") or m.get("name")
+                    if isinstance(mid, str) and mid:
+                        ids.append(mid)
+        # Dedupe while preserving order so the first occurrence wins.
+        seen: set[str] = set()
+        out: list[str] = []
+        for mid in ids:
+            if mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+        return sorted(out)
+
+    def _fetch_fireworks_models(self, *, timeout: float) -> list[str]:
+        """Paginate Fireworks's account-scoped model catalogue.
+
+        Filters to ``HF_BASE_MODEL`` entries with ``supportsServerless=True``
+        and no image input, which is the set that actually responds at
+        ``POST /inference/v1/chat/completions``.
+        """
+        base = "https://api.fireworks.ai"  # explicit -- different host than provider.base_url
+        url = "/v1/accounts/fireworks/models?pageSize=200"
+        out: list[str] = []
+        next_token = ""
+        # A separate client so the Bearer header reaches the non-compat host.
+        with httpx.Client(
+            base_url=base,
+            headers=dict(self._client.headers),
+            timeout=timeout,
+        ) as client:
+            while True:
+                suffix = f"&pageToken={next_token}" if next_token else ""
+                r = client.get(url + suffix)
+                r.raise_for_status()
+                d = r.json()
+                for m in d.get("models", []) or []:
+                    if not isinstance(m, dict):
+                        continue
+                    if not m.get("supportsServerless"):
+                        continue
+                    if m.get("kind") not in ("HF_BASE_MODEL",):
+                        continue
+                    if m.get("supportsImageInput"):
+                        # Vision/multimodal serverless endpoints don't accept the
+                        # text-completion ``logprobs`` parameter we rely on.
+                        continue
+                    name = m.get("name")
+                    if isinstance(name, str) and name:
+                        out.append(name)
+                next_token = d.get("nextPageToken") or ""
+                if not next_token:
+                    break
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for mid in out:
+            if mid not in seen:
+                seen.add(mid)
+                deduped.append(mid)
+        return sorted(deduped)
+
     def close(self) -> None:
         self._client.close()

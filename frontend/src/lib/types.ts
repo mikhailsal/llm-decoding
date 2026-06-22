@@ -44,6 +44,15 @@ export interface InfoResponse {
   backends: BackendInfo[];
 }
 
+export interface ModelsResponse {
+  backend: string;
+  models: string[];
+  source: 'live' | 'cached' | 'static' | 'fallback';
+  fetched_at: number | null;
+  cache_ttl_s: number;
+  note: string;
+}
+
 export interface TokenCandidate {
   token_id: number;
   text: string;

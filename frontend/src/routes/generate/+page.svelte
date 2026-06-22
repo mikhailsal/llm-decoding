@@ -140,6 +140,16 @@
     if (!c) return null;
     return probFromLogprob(c.logprob);
   }
+
+  // True iff ``promptSteps`` is an actual per-prompt-token scoring (one
+  // row per prompt token, each carrying a ``chosen`` candidate with a
+  // logprob). For chat-only providers ``promptSteps`` is a one-row
+  // next-token distribution -- still useful as a table but missing the
+  // per-prompt-token data we need to colorize the prefix, so we leave
+  // the prompt rendering plain grey in that case.
+  let promptHasFullTokenization = $derived(
+    promptSteps.length > 1 && promptSteps.every((s) => !!s?.chosen)
+  );
 </script>
 
 <Toast message={streamError} onClose={() => (streamError = null)} />
@@ -257,7 +267,13 @@
         </div>
       </div>
       <div class="font-mono text-sm text-slate-200 whitespace-pre-wrap min-h-[2.5rem] leading-relaxed">
-        <span class="text-slate-400">{prompt}</span>{#each steps as s}<TokenInline
+        {#if promptHasFullTokenization}{#each promptSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
+              text={ps.chosen?.text ?? ''}
+              isSpecial={ps.chosen?.is_special ?? false}
+              showMarkers={showMarkers}
+              bgClass={tokenBackgroundClass(p)}
+              title={`prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
+            />{/each}{:else}<span class="text-slate-400">{prompt}</span>{/if}{#each steps as s}<TokenInline
             text={s.decision.token_text}
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(chosenProb(s))}

@@ -30,13 +30,41 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Literal
 
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.config import Config
 from decoding_sandbox.core.factory import LOCAL_BACKENDS, build_backend
 from decoding_sandbox.web.schemas import BackendInfo
+
+# Default TTL for the per-backend model-catalogue cache. Cloud providers
+# don't churn their catalogues on minute scales but they do retire models
+# every few weeks (Fireworks notably so), so a 6h refresh is a reasonable
+# balance between "fresh enough to notice a new GPT-OSS variant" and "not
+# hammering /v1/accounts/fireworks/models on every page load".
+MODEL_LIST_TTL_S = 6 * 3600.0
+
+ModelListSource = Literal["live", "cached", "static", "fallback"]
+
+
+@dataclass
+class ModelListEntry:
+    """Cached result of one ``list_models`` lookup for one backend name.
+
+    ``source`` records how we got the list so the UI can show "served from
+    cache (3h ago)" vs "fresh from provider" vs "fell back to static list
+    because the live fetch failed". ``note`` is a short human-readable
+    string for the same purpose -- safe to surface to the browser because
+    it contains no URL or env-var name.
+    """
+
+    models: list[str]
+    source: ModelListSource
+    fetched_at: float
+    note: str = ""
+
 
 log = logging.getLogger("decoding_sandbox.web.backends")
 
@@ -87,6 +115,11 @@ class BackendRegistry:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._entries: dict[str, _BackendEntry] = {}
+        self._models_cache: dict[str, ModelListEntry] = {}
+        # Independent lock for the model-list cache so a long-running
+        # generate stream (holding a per-backend lock) doesn't block a
+        # browser asking "what models are available?".
+        self._models_lock = threading.Lock()
         self._enumerate()
 
     # ------------------------------------------------------- discovery
@@ -192,6 +225,153 @@ class BackendRegistry:
             model = lp_cfg.get("model_path") or glob.replace("**/", "")
             return model, ([model] if model else []), False
         return None, [], False
+
+    # --------------------------------------------------- model catalogue
+    def list_models(self, name: str, *, refresh: bool = False) -> ModelListEntry:
+        """Return the model catalogue for ``name``, hitting the wire at most once per TTL.
+
+        Behaviour by family:
+
+        - ``cloud`` providers: ask the upstream's catalogue endpoint
+          (OpenAI-compat ``/models`` for NIM / OpenRouter / LM Studio, the
+          per-account Fireworks endpoint for that one). The returned list
+          is UNIONED with the curated ``[providers.NAME].models`` so a
+          locally-pinned name stays visible even when the provider has
+          retired it from the catalogue. Failures fall back to the
+          curated list and ``source="fallback"``; the ``note`` is a
+          short error category (no URLs).
+        - ``remote`` / ``local`` backends: no network call. Return the
+          single-element list that ``list_public`` already exposes via
+          ``suggested_models``; ``source="static"``.
+
+        ``refresh=True`` invalidates the cache for this name and forces a
+        fresh fetch even if the cached entry is still warm.
+        """
+        entry = self.get(name)
+        cached = None
+        now = time.time()
+        with self._models_lock:
+            cached = self._models_cache.get(name)
+            if cached and not refresh and (now - cached.fetched_at) < MODEL_LIST_TTL_S:
+                # Hand back a copy so callers can mutate freely.
+                return ModelListEntry(
+                    models=list(cached.models),
+                    source="cached",
+                    fetched_at=cached.fetched_at,
+                    note=cached.note,
+                )
+
+        if entry.family != "cloud":
+            loaded_model, suggested, _ = self._public_model_info(entry)
+            result = ModelListEntry(
+                models=list(suggested),
+                source="static",
+                fetched_at=now,
+                note=(
+                    f"{entry.family} backends don't expose a catalogue; "
+                    "showing the configured model only"
+                ),
+            )
+            with self._models_lock:
+                self._models_cache[name] = result
+            return ModelListEntry(
+                models=list(result.models),
+                source=result.source,
+                fetched_at=result.fetched_at,
+                note=result.note,
+            )
+
+        # Cloud path: try a live fetch via the OpenAICompatBackend's helper.
+        prov = self._cfg.providers.get(name)
+        if prov is None:
+            raise LookupError(f"backend {name!r} is not a configured provider")
+        curated = list(prov.known_models())
+        if entry.unavailable_reason:
+            # No API key set -- we can't actually list. The curated list is
+            # the best the browser can show.
+            result = ModelListEntry(
+                models=curated,
+                source="fallback",
+                fetched_at=now,
+                note=f"cannot fetch live catalogue ({entry.unavailable_reason})",
+            )
+            with self._models_lock:
+                self._models_cache[name] = result
+            return ModelListEntry(
+                models=list(result.models),
+                source=result.source,
+                fetched_at=result.fetched_at,
+                note=result.note,
+            )
+        try:
+            from decoding_sandbox.backends.openai_compat import OpenAICompatBackend
+
+            # We deliberately spin up a fresh OpenAICompatBackend instead of
+            # reusing entry.instance / one of entry.cloud_variants: the
+            # catalogue endpoint is per-provider, not per-model, so the
+            # cached chat client is irrelevant here. Construction is cheap
+            # (one httpx.Client) and we close it immediately.
+            probe = OpenAICompatBackend(prov)
+            try:
+                live = probe.fetch_available_models()
+            finally:
+                probe.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "dsbx-web: failed to fetch %r model catalogue: %s", name, exc.__class__.__name__
+            )
+            result = ModelListEntry(
+                models=curated,
+                source="fallback",
+                fetched_at=now,
+                note=(
+                    f"live catalogue unavailable ({exc.__class__.__name__}); "
+                    "showing curated suggestions"
+                ),
+            )
+            with self._models_lock:
+                self._models_cache[name] = result
+            return ModelListEntry(
+                models=list(result.models),
+                source=result.source,
+                fetched_at=result.fetched_at,
+                note=result.note,
+            )
+
+        # Union live ∪ curated, preserving curated order at the front so
+        # the user's favourites stay near the top.
+        seen: set[str] = set()
+        merged: list[str] = []
+        for m in curated:
+            if m and m not in seen:
+                seen.add(m)
+                merged.append(m)
+        for m in live:
+            if m and m not in seen:
+                seen.add(m)
+                merged.append(m)
+        result = ModelListEntry(
+            models=merged,
+            source="live",
+            fetched_at=now,
+            note=f"{len(live)} from provider, {len(curated)} curated",
+        )
+        with self._models_lock:
+            self._models_cache[name] = result
+        return ModelListEntry(
+            models=list(result.models),
+            source=result.source,
+            fetched_at=result.fetched_at,
+            note=result.note,
+        )
+
+    def invalidate_models_cache(self, name: str | None = None) -> None:
+        """Drop the cached catalogue for one backend (or all if ``name`` is None)."""
+        with self._models_lock:
+            if name is None:
+                self._models_cache.clear()
+            else:
+                self._models_cache.pop(name, None)
 
     @staticmethod
     def _public_label(entry: _BackendEntry) -> str:
@@ -330,4 +510,9 @@ def iter_backend_names(cfg: Config) -> Iterator[str]:
     yield from LOCAL_BACKENDS
 
 
-__all__ = ["BackendRegistry", "iter_backend_names"]
+__all__ = [
+    "BackendRegistry",
+    "ModelListEntry",
+    "MODEL_LIST_TTL_S",
+    "iter_backend_names",
+]

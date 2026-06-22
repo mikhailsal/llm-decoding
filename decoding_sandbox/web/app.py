@@ -46,7 +46,7 @@ from decoding_sandbox.core.types import StepResult
 from decoding_sandbox.server.schemas import step_to_wire
 from decoding_sandbox.web import schemas as S
 from decoding_sandbox.web.auth import AuthConfig, make_require_bearer
-from decoding_sandbox.web.backends import BackendRegistry
+from decoding_sandbox.web.backends import MODEL_LIST_TTL_S, BackendRegistry
 from decoding_sandbox.web.sessions import (
     ManualSessionRegistry,
     load_transcript_into_session,
@@ -130,6 +130,37 @@ def make_web_app(
             server_label=server_label,
             default_backend=cfg.default_backend,
             backends=registry.list_public(),
+        )
+
+    # ---------------------------------------------------------- models
+    @app.get(
+        "/api/v1/models/{name}",
+        response_model=S.ModelsResponse,
+        tags=["meta"],
+        dependencies=[Depends(require_bearer)],
+    )
+    def models(name: str, refresh: bool = Query(default=False)) -> S.ModelsResponse:
+        """List the catalogue advertised by backend ``name``.
+
+        Cloud providers are fetched live (cached for ``MODEL_LIST_TTL_S``);
+        ``refresh=true`` invalidates the cached entry. Remote / local
+        backends short-circuit to a static single-model list -- the same
+        one ``/api/v1/info`` surfaces -- so the browser can use a single
+        endpoint regardless of family.
+        """
+        try:
+            result = registry.list_models(name, refresh=bool(refresh))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return S.ModelsResponse(
+            backend=name,
+            models=list(result.models),
+            source=result.source,
+            fetched_at=result.fetched_at,
+            cache_ttl_s=float(MODEL_LIST_TTL_S),
+            note=result.note,
         )
 
     # --------------------------------------------------- tokenize / detok

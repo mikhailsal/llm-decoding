@@ -86,6 +86,37 @@ class InfoResponse(BaseModel):
     backends: list[BackendInfo]
 
 
+class ModelsResponse(BaseModel):
+    """``GET /api/v1/models/{name}`` response.
+
+    Lists the model ids the named backend currently advertises. For cloud
+    providers this is fetched live from the upstream catalogue (NIM /
+    OpenRouter / LM Studio via OpenAI-compat ``/models``, Fireworks via
+    its per-account catalogue) and cached on the middleware for
+    ``cache_ttl_s`` seconds. For ``remote`` / ``local`` backends this
+    returns the configured-model single-element list so the browser can
+    call the same endpoint uniformly.
+
+    ``source`` is one of:
+
+    - ``"live"``: result of an actual upstream call this turn.
+    - ``"cached"``: result of an upstream call within the TTL window.
+    - ``"static"``: no network needed (remote/local backends).
+    - ``"fallback"``: the upstream call failed; this is the curated list.
+
+    ``fetched_at`` is an epoch seconds timestamp (None when
+    ``source=="static"`` and there's no meaningful "when"). ``note`` is a
+    short human-readable comment safe to show in the UI (no URLs).
+    """
+
+    backend: str
+    models: list[str]
+    source: Literal["live", "cached", "static", "fallback"]
+    fetched_at: float | None = None
+    cache_ttl_s: float = 0.0
+    note: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # Tokenization & misc per-backend RPCs
 # --------------------------------------------------------------------------- #
@@ -368,6 +399,7 @@ class HealthResponse(BaseModel):
 __all__ = [
     "BackendInfo",
     "InfoResponse",
+    "ModelsResponse",
     "TokenizeRequest",
     "TokenizeResponse",
     "DetokenizeRequest",
