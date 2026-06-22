@@ -7,6 +7,8 @@ engine and for the Qwen3.5-9B-Base GGUF that the HF path can't host on 6 GB.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import httpx
 
 from decoding_sandbox.core.backend import Backend, candidates_from_logprobs
@@ -71,7 +73,13 @@ class LlamaCppBackend(Backend):
             self._piece_cache[token_id] = self.detokenize([token_id])
         return self._piece_cache[token_id]
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         n_probs = max(1, min(top_k, self._max_top))
         body = {
             "prompt": token_ids,
@@ -90,7 +98,15 @@ class LlamaCppBackend(Backend):
         top = cp[0].get("top_logprobs", [])
         triples = [(e["id"], _clean_piece(e.get("token", "")), float(e["logprob"])) for e in top]
         cands = candidates_from_logprobs(triples)
-        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
+        step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
+        # Top-k-only HTTP backend: no way to fish out an outside-top-k
+        # logprob from this endpoint, so we fall back to
+        # ``lookup_watch`` (real candidate when in top-k, rank=-1/NaN
+        # otherwise). Bumping ``top_k`` on the request is the user's
+        # escape hatch.
+        for wid in watch_ids:
+            step.watched[int(wid)] = self.lookup_watch(step, int(wid))
+        return step
 
     def close(self) -> None:
         self._client.close()

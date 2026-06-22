@@ -135,6 +135,18 @@ class Capabilities:
     # (``score_prompt`` + ``stream_native``). Surfaced so the UI can
     # show an "echo_last" knob only where the combined path runs.
     supports_combined_echo_stream: bool = False
+    # When true, the backend is REGISTERED but refuses to generate. The
+    # current trigger is "chat-only OpenAI-compat provider" (NIM /
+    # OpenRouter -- ``ProviderConfig.has_completions = false``): the
+    # per-step "growing user message" emulation we used to do here
+    # produced N independent first-responses instead of a real
+    # continuation, so it's gated off until a proper chat-mode UI lands
+    # (separate PR). The web route ``/api/v1/generate/stream`` enforces
+    # the gate by returning 400 when this flag is true; the frontend
+    # backend picker renders such entries as disabled options and uses
+    # the ``notes`` field as the tooltip explanation. Default ``False``
+    # for every other backend.
+    generation_disabled: bool = False
 
 
 @dataclass

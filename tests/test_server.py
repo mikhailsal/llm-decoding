@@ -170,7 +170,7 @@ def test_score_prompt_maps_notimplemented_to_400() -> None:
         def piece(self, tid):
             return ""
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             return StepResult(position=len(token_ids), candidates=[], is_full_vocab=False)
 
         def score_prompt(self, prompt, top_k, watch_ids=None):
@@ -207,7 +207,7 @@ def test_verify_greedy_endpoint() -> None:
         def piece(self, tid):
             return chr(tid)
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             return StepResult(
                 position=len(token_ids),
                 candidates=[TokenCandidate(88, "X", math.log(0.9), 0)],
@@ -330,7 +330,7 @@ def test_generate_stream_runtime_error_lands_in_done_event() -> None:
         def piece(self, tid):
             return chr(tid)
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             raise RuntimeError("kaboom")
 
     app = make_app(_ExplodingBackend())

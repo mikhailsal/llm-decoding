@@ -48,7 +48,7 @@ class _Target(Backend):
     def piece(self, tid):
         return chr(tid) if 0 < tid < 0x110000 else "?"
 
-    def next_distribution(self, token_ids, top_k):
+    def next_distribution(self, token_ids, top_k, *, watch_ids=()):
         return StepResult(
             position=len(token_ids),
             candidates=[TokenCandidate(88, "X", math.log(0.9), 0)],
@@ -79,7 +79,7 @@ class _Draft(Backend):
     def piece(self, tid):
         return chr(tid) if 0 < tid < 0x110000 else "?"
 
-    def next_distribution(self, token_ids, top_k):
+    def next_distribution(self, token_ids, top_k, *, watch_ids=()):
         # Always proposes a single greedy continuation.
         return StepResult(
             position=len(token_ids),

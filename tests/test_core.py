@@ -306,6 +306,64 @@ def test_generate_records_user_stop_reason() -> None:
     assert steps[0].stop_reason == "user_stop"
 
 
+def test_generate_propagates_watch_ids_into_step_watched() -> None:
+    """The unified Decode workbench surfaces watch columns on every
+    generation step (not just inspect). The engine has to thread
+    ``watch_ids`` through to each ``next_distribution`` call so each
+    emitted ``GenStep.step_result.watched`` carries an entry per
+    requested id. With a backend that puts the watch id in the top-k,
+    the entry's rank should match what ``next_distribution`` reports.
+    """
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 2: "X", 7: "W"},
+        distributions={
+            (1,): [cand(2, "X", 0.7, 0), cand(7, "W", 0.2, 1)],
+            (1, 2): [cand(2, "X", 0.6, 0), cand(7, "W", 0.3, 1)],
+        },
+    )
+
+    steps = list(
+        generate(backend, "P", Sampler("greedy"), max_tokens=2, watch_ids=[7])
+    )
+
+    assert len(steps) == 2
+    for gs in steps:
+        watched = gs.step_result.watched
+        assert 7 in watched, "engine must forward watch_ids to every step"
+        assert watched[7].rank == 1
+        assert not math.isnan(watched[7].logprob)
+
+
+def test_generate_appends_prefix_token_ids_after_tokenized_prompt() -> None:
+    """Manual mode rides on ``prefix_token_ids``: the engine has to treat
+    the input as ``tokenize(prompt) + prefix_token_ids`` so the backend
+    sees a single continuous sequence. We verify that the
+    ``tokens_before`` field on the first emitted step includes both the
+    tokenized prompt AND the prefix; otherwise the per-pick continuation
+    would predict from the wrong context.
+    """
+    backend = FakeBackend(
+        tokens={"P": [1]},
+        pieces={1: "P", 2: "X", 5: "Y", 9: "Z"},
+        distributions={
+            (1, 5, 9): [cand(2, "X", 0.9, 0)],
+        },
+    )
+
+    [gs] = list(
+        generate(
+            backend,
+            "P",
+            Sampler("greedy"),
+            max_tokens=1,
+            prefix_token_ids=[5, 9],
+        )
+    )
+    assert gs.tokens_before == [1, 5, 9]
+    assert gs.decision.token_id == 2
+
+
 def test_generate_records_max_tokens_stop_reason() -> None:
     """When the loop exits via max_tokens (no EOS, no user stop) the LAST step
     is tagged stop_reason='max_tokens'; earlier steps stay None."""

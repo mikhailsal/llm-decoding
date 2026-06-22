@@ -91,6 +91,12 @@ class WireCapabilities(BaseModel):
     supports_raw_output: bool = False
     supports_logit_bias: bool = False
     supports_combined_echo_stream: bool = False
+    # ``True`` for backends that are registered but inert. Currently set
+    # only on chat-only OpenAI-compat providers (NIM / OpenRouter) until
+    # proper chat-mode UI lands. The web layer rejects generate-stream
+    # requests against such backends with a 400, and the frontend picker
+    # marks the option disabled with ``notes`` as the tooltip.
+    generation_disabled: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +195,21 @@ class GenerateRequest(BaseModel):
     stop_ids: list[int] = Field(default_factory=list)
     seed: int = 0
     respect_eos: bool = True
+    # Token ids whose per-step probability the caller wants to track
+    # even when they fall outside the returned top-k. The dsbx-serve
+    # engine forwards them to ``Backend.next_distribution(... watch_ids=)``;
+    # full-vocab backends (HF, llamacpp_py) read EXACT values from the
+    # same forward-pass tensor, top-k-only backends fall back to
+    # "found in top-k or rank=-1/NaN". Empty list disables the feature.
+    watch_ids: list[int] = Field(default_factory=list)
+    # Token ids the engine should treat as already-generated PREFIX
+    # AFTER the prompt -- the model sees ``tokenize(prompt) + prefix_token_ids``
+    # as one continuous sequence and starts generating from there. Powers
+    # the unified workbench's "manual decoding" mode without server-side
+    # session state: the browser holds the picks and resends the growing
+    # id list on every pick. Empty list = no prefix (the historical
+    # behaviour).
+    prefix_token_ids: list[int] = Field(default_factory=list)
 
 
 class WireKeptEntry(BaseModel):
@@ -295,6 +316,7 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         supports_combined_echo_stream=bool(
             getattr(caps, "supports_combined_echo_stream", False)
         ),
+        generation_disabled=bool(getattr(caps, "generation_disabled", False)),
     )
 
 

@@ -45,7 +45,13 @@ class OpenAICompatBackend(Backend):
     def piece(self, token_id: int) -> str:
         return self._pieces.get(token_id, "")
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids=(),
+    ) -> StepResult:
         assert token_ids == [0]
         return StepResult(
             position=1,
@@ -583,6 +589,8 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
             stop_ids=(),
             seed=0,
             respect_eos=True,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             stream_calls.append(
                 dict(

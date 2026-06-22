@@ -154,47 +154,17 @@ class PieceResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Inspect
-# --------------------------------------------------------------------------- #
-
-
-class InspectRequest(BaseModel):
-    backend: str
-    prompt: str
-    top_k: int = 8
-    watch_texts: list[str] = Field(default_factory=list)
-    watch_ids: list[int] = Field(default_factory=list)
-    watch_eos: bool = False
-    model: str | None = None
-
-
-class ResolvedWatch(BaseModel):
-    """One resolved watch column -- enough for the UI to render the header.
-
-    ``source`` records which user input produced this column (text/id/eos)
-    so the UI can show the right header style. ``label`` is the literal
-    string the CLI would have used, so the renderer logic stays parallel.
-    """
-
-    label: str
-    token_id: int
-    source: Literal["text", "id", "eos"]
-    piece: str = ""
-
-
-class InspectResponse(BaseModel):
-    """``score_prompt`` output plus the resolved watch column metadata."""
-
-    steps: list[WireStepResult]
-    watches: list[ResolvedWatch]
-    is_full_vocab: bool
-    prompt_logprobs: bool
-    note: str = ""
-
-
-# --------------------------------------------------------------------------- #
 # Generate (SSE body re-uses WireGenStep verbatim)
 # --------------------------------------------------------------------------- #
+#
+# The legacy ``InspectRequest`` / ``InspectResponse`` / ``ResolvedWatch``
+# schemas used to live above ``GenerateRequest``. They are gone -- the
+# inspect endpoint was deleted in plan: Unify Decode Workbench Phase 3
+# because inspect is a degenerate case of generate (``max_tokens=1 +
+# include_prompt=true``). ``watch_texts`` / ``watch_ids`` / ``watch_eos``
+# now live on :class:`GenerateRequest`; the frontend reconstructs human-
+# readable column labels from what it sent (the round-trip
+# ``ResolvedWatch`` payload is no longer needed).
 
 
 class GenerateRequest(BaseModel):
@@ -244,6 +214,37 @@ class GenerateRequest(BaseModel):
     # user really only cares about the trailing context. ``None`` ==
     # echo the whole prompt (the historical default).
     echo_last: int | None = None
+    # Token ids the engine should treat as PREFIX after the prompt --
+    # the model sees ``tokenize(prompt) + prefix_token_ids`` as one
+    # continuous sequence and starts generating from there. Powers
+    # the unified workbench's "manual decoding" mode: the browser
+    # holds the user's picks and resends the growing id list on each
+    # pick instead of carrying server-side session state. For
+    # Fireworks the web layer turns the ids back into text via
+    # ``backend.detokenize(...)`` before sending; for the per-step
+    # engine path the engine appends them directly to the token
+    # buffer. Empty list = no prefix (historical behaviour).
+    prefix_token_ids: list[int] = Field(default_factory=list)
+    # Token ids whose per-step probability the caller wants to track
+    # even when they fall outside the returned top-k. Forwarded to
+    # every per-token GenStep (and to the prompt-echo StepResults
+    # when ``include_prompt`` is set). Full-vocab backends return
+    # exact values; top-k-only backends report ``rank=-1, logprob=NaN``
+    # for ids outside the chunk's top_logprobs. Replaces the watch
+    # plumbing that used to live solely on the (now-deleted) inspect
+    # endpoint.
+    watch_ids: list[int] = Field(default_factory=list)
+    # Text strings to resolve to single tokens via the backend's
+    # tokenizer (taking the first token id when a string spans
+    # multiple) and merge into ``watch_ids``. Lets the user type
+    # human-readable cells like " Paris" without computing ids up
+    # front. Resolution happens server-side because the tokenizer is
+    # backend-specific.
+    watch_texts: list[str] = Field(default_factory=list)
+    # When true, every id in ``Capabilities.eos_token_ids`` is added
+    # as a watched cell. Saves the user from having to know the
+    # model's EOS id; same UX the historical inspect endpoint had.
+    watch_eos: bool = False
 
 
 class StepEvent(BaseModel):
@@ -254,9 +255,12 @@ class StepEvent(BaseModel):
 class PromptScoreEvent(BaseModel):
     """Optional first frame of a generate stream when ``include_prompt`` is set.
 
-    The shape is intentionally identical to the body of
-    :class:`InspectResponse` so a browser that already knows how to render
-    one row of inspect can render these rows too -- no extra component.
+    Carries one :class:`WireStepResult` per prompt token (the per-position
+    distribution the model would have predicted) plus the same
+    ``is_full_vocab`` / ``prompt_logprobs`` / ``note`` flags the old
+    inspect endpoint returned. With the inspect endpoint deleted (plan:
+    Unify Decode Workbench Phase 3), this is the canonical "show me the
+    prompt logits" wire shape.
     """
 
     event: Literal["prompt_score"] = "prompt_score"
@@ -516,9 +520,6 @@ __all__ = [
     "DetokenizeResponse",
     "PieceRequest",
     "PieceResponse",
-    "InspectRequest",
-    "InspectResponse",
-    "ResolvedWatch",
     "GenerateRequest",
     "StepEvent",
     "PromptScoreEvent",

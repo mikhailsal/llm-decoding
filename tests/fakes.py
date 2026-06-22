@@ -10,6 +10,7 @@ ids but do care that tokenization is *consistent* between calls.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 from decoding_sandbox.core.backend import Backend
@@ -63,9 +64,20 @@ class FakeBackend(Backend):
     def piece(self, token_id: int) -> str:
         return self.pieces.get(token_id, chr(token_id))
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         cands = list(self.distributions.get(tuple(token_ids), []))[:top_k]
-        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab)
+        step = StepResult(
+            position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab
+        )
+        for wid in watch_ids:
+            step.watched[int(wid)] = self.lookup_watch(step, int(wid))
+        return step
 
     def close(self) -> None:
         self.closed = True

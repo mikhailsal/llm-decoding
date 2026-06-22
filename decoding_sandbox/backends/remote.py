@@ -208,6 +208,8 @@ class RemoteBackend(Backend):
         stop_ids: Sequence[int] = (),
         seed: int = 0,
         respect_eos: bool = True,
+        watch_ids: Sequence[int] = (),
+        prefix_token_ids: Sequence[int] = (),
     ) -> Iterator[GenStep]:
         """POST to ``/v1/generate/stream`` and re-yield each step as a ``GenStep``.
 
@@ -217,6 +219,15 @@ class RemoteBackend(Backend):
         ``done`` event terminates the iterator -- if it carries an
         ``error`` field the iterator raises :class:`RemoteBackendError`
         with the server's message, which surfaces cleanly in the TUI.
+
+        ``watch_ids`` -- token ids whose per-step probability the caller
+        wants to track even when they fall outside top_k. Forwarded to
+        dsbx-serve via the ``watch_ids`` body field; the remote engine
+        plumbs them through to :meth:`Backend.next_distribution`. A
+        full-vocab remote backend (dsbx-host-py / HF / llamacpp_py) returns
+        exact logprobs; a top-k-only remote would fall back to
+        ``rank=-1, logprob=NaN``, but the only deployed remote shape
+        today is full-vocab so the field round-trips cleanly.
         """
         body = {
             "prompt": prompt,
@@ -229,6 +240,10 @@ class RemoteBackend(Backend):
             "stop_ids": [int(i) for i in stop_ids],
             "seed": int(seed),
             "respect_eos": bool(respect_eos),
+            "watch_ids": [int(i) for i in watch_ids],
+            # Manual-decoding picks: the dsbx-serve engine appends these
+            # to the tokenized prompt before the first decode step.
+            "prefix_token_ids": [int(i) for i in prefix_token_ids],
         }
         # Per-stream timeout: tight ``read`` so a hung server surfaces as
         # ``RemoteStreamTimeout`` within seconds (and lets the web layer

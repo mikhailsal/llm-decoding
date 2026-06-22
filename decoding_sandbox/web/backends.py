@@ -259,13 +259,34 @@ class BackendRegistry:
                     # constructed. That was the exact "respect EOS
                     # locked for Fireworks before first run" UX glitch
                     # the manual Chrome MCP check caught.
+                    #
+                    # ``generation_disabled`` falls out of
+                    # ``has_completions=false`` (chat-only providers --
+                    # NIM, OpenRouter). The frontend backend picker
+                    # uses the flag to render the option as
+                    # ``<option disabled>`` with ``notes`` as tooltip
+                    # text, and the generate-stream route enforces the
+                    # same gate authoritatively. We pre-fill ``notes``
+                    # with the same wording the loaded backend would
+                    # publish so the tooltip is identical pre- and
+                    # post-first-use.
+                    is_chat_only = not bool(prov.has_completions)
+                    if is_chat_only:
+                        notes = (
+                            "chat-only provider; generation disabled "
+                            "until proper chat-mode UI lands"
+                        )
+                    else:
+                        notes = (
+                            "static caps from provider config (backend not yet loaded)"
+                        )
                     caps = WireCapabilities(
                         name=f"openai_compat:{entry.name}",
                         full_vocab=False,
                         prompt_logprobs=bool(prov.supports_prompt_logprobs),
                         max_top_logprobs=int(prov.max_top_logprobs),
                         can_force_token=bool(prov.has_completions),
-                        notes="static caps from provider config (backend not yet loaded)",
+                        notes=notes,
                         eos_token_ids=[],
                         supports_ignore_eos=bool(prov.supports_ignore_eos),
                         supports_perf_metrics=bool(prov.supports_perf_metrics),
@@ -276,6 +297,7 @@ class BackendRegistry:
                         supports_combined_echo_stream=bool(
                             prov.supports_combined_echo_stream
                         ),
+                        generation_disabled=is_chat_only,
                     )
             label = self._public_label(entry)
             loaded_model, suggested, editable = self._public_model_info(entry)

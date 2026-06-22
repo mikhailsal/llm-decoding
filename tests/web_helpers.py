@@ -97,6 +97,11 @@ def make_test_config(
                 default_model=f"{name}/default-model",
                 max_top_logprobs=5,
                 supports_prompt_logprobs=(name == "fireworks"),
+                # Mirror config.example.toml: fireworks + LM Studio expose
+                # /v1/completions; NIM + OpenRouter are chat-only. The
+                # ``generation_disabled`` capability flag the chat-only
+                # provider tests assert against is derived from this.
+                has_completions=name in {"fireworks", "lmstudio"},
             )
             for name in providers
         },

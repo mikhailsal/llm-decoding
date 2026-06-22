@@ -37,6 +37,15 @@ export interface Capabilities {
    * actually used).
    */
   supports_combined_echo_stream: boolean;
+  /**
+   * When true, the backend is REGISTERED but inert: generate-stream
+   * requests against it are rejected with a 400 by the middleware,
+   * and the backend picker renders it as a disabled option with
+   * ``notes`` as the tooltip explanation. Set on chat-only OpenAI-
+   * compat providers (NIM / OpenRouter) until proper chat-mode UI
+   * lands. Default ``false`` for every other backend.
+   */
+  generation_disabled: boolean;
 }
 
 export interface BackendInfo {
@@ -106,20 +115,12 @@ export interface StepResult {
   watched: Watched[];
 }
 
-export interface ResolvedWatch {
-  label: string;
-  token_id: number;
-  source: 'text' | 'id' | 'eos';
-  piece: string;
-}
-
-export interface InspectResponse {
-  steps: StepResult[];
-  watches: ResolvedWatch[];
-  is_full_vocab: boolean;
-  prompt_logprobs: boolean;
-  note: string;
-}
+// ``ResolvedWatch`` / ``InspectResponse`` used to live here. They are
+// gone -- the inspect endpoint was deleted (plan: Unify Decode
+// Workbench Phase 3) and the Decode workbench page reconstructs watch
+// column labels locally from what it sent (``watchTexts`` /
+// ``watchIds`` / ``watchEos``), so the round-trip ``ResolvedWatch``
+// payload was no longer needed.
 
 export interface SamplerSpec {
   name: string;

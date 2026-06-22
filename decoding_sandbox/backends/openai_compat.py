@@ -29,7 +29,7 @@ import json
 import logging
 import random
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import httpx
@@ -178,17 +178,37 @@ class OpenAICompatBackend(Backend):
 
     @property
     def capabilities(self) -> Capabilities:
+        # Chat-only providers (NIM / OpenRouter -- ``has_completions=false``)
+        # are REGISTERED but INERT. The historical
+        # ``next_distribution`` chat-completion emulation re-sent the
+        # growing ``detokenize(prompt + emitted_so_far)`` as a fresh
+        # user message on every step, so the displayed "continuation"
+        # was N independent first-responses rather than a real
+        # continuation -- misleading data in a sandbox whose whole job
+        # is to show the truth. We now raise on that path and mirror
+        # that decision into capabilities so the web layer can refuse
+        # gracefully and the frontend can disable the option in the
+        # backend picker with a tooltip-ready ``notes`` value. The
+        # full chat-mode UI (system / user / assistant / new user, no
+        # per-step inspection inside an assistant turn) is out of
+        # scope here; tracked as a separate PR.
+        is_chat_only = not self.provider.has_completions
+        if is_chat_only:
+            notes = (
+                "chat-only provider; generation disabled until proper "
+                "chat-mode UI lands"
+            )
+        elif self.provider.supports_prompt_logprobs:
+            notes = "whole-context via echo"
+        else:
+            notes = "raw /completions"
         return Capabilities(
             name=f"{self.provider.name}:{self.model}",
             full_vocab=False,
             prompt_logprobs=self.provider.supports_prompt_logprobs,
             max_top_logprobs=self.provider.max_top_logprobs,
             can_force_token=self.provider.has_completions,
-            notes=(
-                "whole-context via echo"
-                if self.provider.supports_prompt_logprobs
-                else ("raw /completions" if self.provider.has_completions else "chat-only top-k")
-            ),
+            notes=notes,
             # Provider extension flags surfaced to the UI so the browser
             # can adapt without hard-coding provider names.
             supports_ignore_eos=bool(self.provider.supports_ignore_eos),
@@ -200,6 +220,7 @@ class OpenAICompatBackend(Backend):
             supports_combined_echo_stream=bool(
                 self.provider.supports_combined_echo_stream
             ),
+            generation_disabled=is_chat_only,
         )
 
     # -- requests ---------------------------------------------------------- #
@@ -394,7 +415,13 @@ class OpenAICompatBackend(Backend):
             )
         return out
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         text = self.detokenize(token_ids)
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         sampling_mask_count: int | None = None
@@ -426,26 +453,52 @@ class OpenAICompatBackend(Backend):
                 top_lps = lp.get("top_logprobs") or []
                 cands = self._cands_from_dict(top_lps[0]) if top_lps else []
         else:
-            data = self._post(
-                "/chat/completions",
-                {
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": text}],
-                    "max_tokens": 1,
-                    "temperature": 0,
-                    "logprobs": True,
-                    "top_logprobs": top,
-                },
+            # Chat-only providers (NIM / OpenRouter): we used to silently
+            # POST ``[{"role": "user", "content": detokenize(token_ids)}]``
+            # to /chat/completions and grab ``top_logprobs[0]`` as if it
+            # were the next continuation token. Across the engine's
+            # decode loop the user message keeps growing with every
+            # picked token, so the model gets a fresh "respond to this
+            # slightly-longer user query" prompt each step -- it never
+            # sees its own prior emit as assistant, so the displayed
+            # "continuation" is actually N independent first-responses,
+            # not a real continuation. That's misleading data in a
+            # sandbox whose whole job is to expose the truth. Adjacent
+            # methods (``score_prompt``, ``stream_native``,
+            # ``stream_native_with_echo``) already raise on chat-only
+            # providers; we close the inconsistency here. Proper
+            # chat-mode UI (system / user / assistant turns, real
+            # /chat/completions wire shape) is out of scope -- tracked
+            # as a separate PR. Callers should branch on
+            # ``capabilities.generation_disabled`` to render the
+            # backend as inert instead of catching this exception.
+            raise NotImplementedError(
+                f"{self.provider.name!r} has no /completions endpoint; "
+                "the chat-completion emulation was misleading-by-design "
+                "(the per-step decode loop re-sent the growing prompt "
+                "as a fresh user message, yielding N independent "
+                "first-responses instead of a continuation) and is now "
+                "disabled. Use a /completions-capable provider "
+                "(fireworks, lmstudio) or a local / remote dsbx backend "
+                "until proper chat-mode UI lands."
             )
-            content = ((data.get("choices") or [{}])[0].get("logprobs") or {}).get("content") or []
-            cands = self._cands_from_list(content[0].get("top_logprobs", [])) if content else []
         # Stamp the per-position mask count onto every candidate at this
         # step so the renderer can read it without a separate plumbing
         # channel. None values are simply ignored downstream.
         if sampling_mask_count is not None:
             for c in cands:
                 c.sampling_mask_count = sampling_mask_count
-        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
+        step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=False)
+        # Top-k-only backend: a watched id either landed in the chunk
+        # we already have or it didn't. We do NOT fire a second HTTP
+        # request to probe outside top-k (the logit-bias trick the
+        # plan mentions is deliberately postponed); ids outside top-k
+        # render as ``rank=-1, logprob=NaN`` and the UI shows a dim
+        # "—" cell. Same contract :meth:`Backend.lookup_watch`
+        # implements generically.
+        for wid in watch_ids:
+            step.watched[int(wid)] = self.lookup_watch(step, int(wid))
+        return step
 
     def _attach_logprobs_request(self, body: dict[str, Any], *, top_k: int) -> None:
         """Add the logprobs-related fields to ``body`` in the right shape.
@@ -631,6 +684,8 @@ class OpenAICompatBackend(Backend):
         prompt_cache_key: str | None = None,
         session_id: str | None = None,
         logit_bias: dict[int, float] | None = None,
+        watch_ids: Sequence[int] = (),
+        prefix_token_ids: Sequence[int] = (),
     ) -> Iterator[GenStep]:
         """Stream tokens via a single ``/completions`` SSE call.
 
@@ -710,6 +765,13 @@ class OpenAICompatBackend(Backend):
                 "streaming requires the raw text-completion path. Fall back "
                 "to the per-step decode loop via core.engine.generate."
             )
+        # Manual-mode picks live in the browser; the web layer forwards
+        # them here as ``prefix_token_ids``. Fireworks /completions takes
+        # the prompt as TEXT (not ids), so we detokenize and concatenate.
+        # The model sees ``prompt + detokenize(prefix_token_ids)`` as one
+        # continuous string. Empty list -> no-op.
+        if prefix_token_ids:
+            prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
@@ -929,6 +991,15 @@ class OpenAICompatBackend(Backend):
                 is_full_vocab=False,
                 chosen=chosen,
             )
+            # Per-step watch column: fish each watched id out of the
+            # same chunk's top_k. Cloud providers cap top_k at 5
+            # (Fireworks) / 20 (NIM/OpenRouter), so ids outside that
+            # window render as ``rank=-1, logprob=NaN`` (dim "—" in
+            # the UI). The bias-probe trick that would let us read
+            # outside-top-k values cheaply is postponed; for now
+            # honestly showing "unknown" beats a misleading number.
+            for wid in watch_ids:
+                sr.watched[int(wid)] = self.lookup_watch(sr, int(wid))
             is_last = i == total - 1
             stop_reason: str | None = None
             if is_last:
@@ -966,6 +1037,8 @@ class OpenAICompatBackend(Backend):
         session_id: str | None = None,
         logit_bias: dict[int, float] | None = None,
         echo_last: int | None = None,
+        watch_ids: Sequence[int] = (),
+        prefix_token_ids: Sequence[int] = (),
     ) -> Iterator[StepResult | GenStep]:
         """Combined ``echo=true`` + ``stream=true`` path -- ONE round trip.
 
@@ -1013,6 +1086,13 @@ class OpenAICompatBackend(Backend):
                 "supports_combined_echo_stream; use score_prompt + "
                 "stream_native as two separate calls."
             )
+        # Manual-mode picks join the prompt as text -- same trick as the
+        # plain ``stream_native`` path. The echoed positions then cover
+        # ``prompt + picks`` as a single continuous block, which is what
+        # the unified workbench wants ("show me the distribution at every
+        # prefix of my evolving picks plus the next predicted token").
+        if prefix_token_ids:
+            prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
@@ -1250,13 +1330,19 @@ class OpenAICompatBackend(Backend):
                 chosen = TokenCandidate(
                     tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
                 )
-            yield StepResult(
+            prompt_step = StepResult(
                 position=pos_idx,
                 candidates=cands,
                 is_full_vocab=False,
                 chosen=chosen,
                 context_text=tok_text,
             )
+            # Watch column on echoed prompt positions: same top-k-only
+            # contract as the per-emitted-step path. Lets ``include_prompt``
+            # runs render the same "P(watched)" rows the inspect path does.
+            for wid in watch_ids:
+                prompt_step.watched[int(wid)] = self.lookup_watch(prompt_step, int(wid))
+            yield prompt_step
 
         # GenSteps for emitted tokens -- same shape as stream_native.
         # tokens_before starts as the local tokenize() of the prompt
@@ -1300,6 +1386,10 @@ class OpenAICompatBackend(Backend):
                 is_full_vocab=False,
                 chosen=chosen,
             )
+            # Per-step watch column on emitted tokens; same rules as
+            # the prompt-echo loop above.
+            for wid in watch_ids:
+                sr.watched[int(wid)] = self.lookup_watch(sr, int(wid))
             is_last = i == total - 1
             stop_reason: str | None = None
             if is_last:

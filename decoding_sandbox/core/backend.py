@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
 
@@ -32,11 +33,28 @@ class Backend(ABC):
         """Human-readable text for a single token id."""
 
     @abstractmethod
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         """Distribution over the token that follows ``token_ids``.
 
         ``candidates`` must be ranked most-likely first. ``position`` should be
         ``len(token_ids)`` (the index of the predicted token).
+
+        ``watch_ids`` -- token ids whose per-step probability the caller
+        wants to see even if they fall outside the returned top-k. Full-
+        vocab backends (HF, llamacpp_py) should populate
+        ``StepResult.watched`` with the *exact* logprob read from the
+        forward-pass tensor; top-k-only backends should fall back to
+        :meth:`lookup_watch` (the candidate from the top-k when present,
+        otherwise ``rank=-1, logprob=NaN``). The engine forwards
+        ``watch_ids`` through ``generate(...)`` so the per-step
+        generation flow can show the same "watch column" the inspect
+        path already does.
         """
 
     # -- derived ----------------------------------------------------------- #

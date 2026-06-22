@@ -54,11 +54,24 @@ previous context (manual stepping stays cheap).
 | Provider | chat logprobs | whole-context (prompt) logprobs | notes |
 |---|---|---|---|
 | **Fireworks** | yes (top_logprobs <= 5) | **yes** (`/completions` `echo`) | frontier models (gpt-oss-120b, glm-5, kimi, deepseek) |
-| **NVIDIA NIM** | yes (top_logprobs <= 20) | no (no `/completions`) | hosts Qwen3.5 MoE siblings |
-| **OpenRouter** | yes (needs `provider.require_parameters`) | no | routes to a capable provider |
+| **NVIDIA NIM** | yes (top_logprobs <= 20) | no (no `/completions`) | **registered, generation disabled** -- chat-only; see Decode Workbench Phase 0 |
+| **OpenRouter** | yes (needs `provider.require_parameters`) | no | **registered, generation disabled** -- chat-only; see Decode Workbench Phase 0 |
 | **LM Studio** | yes (top_logprobs <= 10) | no (chat-only by default) | local OpenAI-compatible server, no key needed |
 | **Gemini AI Studio** | no (capability gate) | no | use Vertex AI + billing if ever needed |
 | Ollama 0.7.0 | no | no | not used |
+
+> **Chat-only providers are gated off** (NIM, OpenRouter). Their `next_distribution`
+> used to silently route through `/chat/completions` with a growing `[{role: user,
+> content: detokenize(prompt + emitted_so_far)}]` message on every step, so the
+> "continuation" we displayed was actually N independent first-responses to N
+> slightly-different user queries -- not a real continuation, and not what an
+> educational sandbox is supposed to show. The backends remain registered (so
+> `/api/v1/info` still lists them and the frontend backend picker shows them as
+> a disabled option with a tooltip), but the decode workbench refuses to start a
+> generate / inspect / manual session against them with a 400 carrying the same
+> explanation. Re-enable once a proper chat-mode UI (system / user / assistant
+> turns, real `/chat/completions` wire shape, no per-step inspection inside an
+> assistant turn) lands -- tracked as a separate PR.
 
 ## Where things run
 

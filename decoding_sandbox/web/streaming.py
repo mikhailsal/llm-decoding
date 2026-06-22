@@ -67,6 +67,8 @@ def stream_generate(
     session_id: str | None = None,
     logit_bias: dict[int, float] | None = None,
     echo_last: int | None = None,
+    watch_ids: list[int] | None = None,
+    prefix_token_ids: list[int] | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames for a generate call against ``backend``.
 
@@ -83,11 +85,13 @@ def stream_generate(
 
     When ``include_prompt`` is true we emit a single ``prompt_score`` frame
     BEFORE the step events: it carries the per-prompt-token distributions
-    (when the backend supports prompt logprobs) or a one-row next-token
-    distribution fallback (chat-only cloud paths). The frame's body is
-    shape-compatible with :class:`decoding_sandbox.web.schemas.InspectResponse`.
+    (when the backend supports prompt logprobs). Chat-only backends are
+    rejected at the route boundary (:mod:`web.app` returns 400 before the
+    stream opens), so this helper assumes a real prompt-logprob path.
     """
     use_remote_stream = hasattr(backend, "stream_generate")
+    watch_id_list: list[int] = [int(i) for i in (watch_ids or [])]
+    prefix_id_list: list[int] = [int(i) for i in (prefix_token_ids or [])]
 
     # Per-run usage accounting. Backends implementing
     # :class:`decoding_sandbox.core.usage.UsageAware` (OpenAICompatBackend
@@ -140,6 +144,8 @@ def stream_generate(
                 session_id=session_id,
                 logit_bias=logit_bias,
                 echo_last=echo_last,
+                watch_ids=watch_id_list,
+                prefix_token_ids=prefix_id_list,
             ):
                 yield frame
                 completion_steps += step_delta
@@ -147,7 +153,13 @@ def stream_generate(
                     last_reason = reason
         else:
             if include_prompt:
-                yield from _emit_prompt_score(backend, prompt=prompt, top_k=top_k)
+                yield from _emit_prompt_score(
+                    backend,
+                    prompt=prompt,
+                    top_k=top_k,
+                    watch_ids=watch_id_list,
+                    prefix_token_ids=prefix_id_list,
+                )
             if use_remote_stream:
                 for gs in _iter_remote_stream(
                     backend,
@@ -159,6 +171,8 @@ def stream_generate(
                     stop_ids=stop_ids,
                     seed=seed,
                     respect_eos=respect_eos,
+                    watch_ids=watch_id_list,
+                    prefix_token_ids=prefix_id_list,
                 ):
                     yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
                     completion_steps += 1
@@ -187,6 +201,8 @@ def stream_generate(
                     prompt_cache_key=prompt_cache_key,
                     session_id=session_id,
                     logit_bias=logit_bias,
+                    watch_ids=watch_id_list,
+                    prefix_token_ids=prefix_id_list,
                 ):
                     yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
                     completion_steps += 1
@@ -202,6 +218,8 @@ def stream_generate(
                     rng=rng,
                     stop_ids=stop_ids,
                     respect_eos=respect_eos,
+                    watch_ids=watch_id_list,
+                    prefix_token_ids=prefix_id_list,
                 ):
                     yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
                     completion_steps += 1
@@ -313,6 +331,8 @@ def _iter_combined_echo_stream(
     session_id: str | None,
     logit_bias: dict[int, float] | None,
     echo_last: int | None,
+    watch_ids: list[int],
+    prefix_token_ids: list[int],
 ) -> Iterator[tuple[bytes, int, str | None]]:
     """Drive ``stream_native_with_echo`` into SSE frames + bookkeeping.
 
@@ -350,6 +370,8 @@ def _iter_combined_echo_stream(
         session_id=session_id,
         logit_bias=logit_bias,
         echo_last=echo_last,
+        watch_ids=watch_ids,
+        prefix_token_ids=prefix_token_ids,
     )
     for item in iterator:
         # ``StepResult`` -> goes into the prompt_score frame buffer.
@@ -427,36 +449,44 @@ def _can_use_native_cloud_stream(
         return False
 
 
-def _emit_prompt_score(backend: Backend, *, prompt: str, top_k: int) -> Iterator[bytes]:
+def _emit_prompt_score(
+    backend: Backend,
+    *,
+    prompt: str,
+    top_k: int,
+    watch_ids: list[int] | None = None,
+    prefix_token_ids: list[int] | None = None,
+) -> Iterator[bytes]:
     """Emit a single ``prompt_score`` SSE frame for the given prompt.
 
-    Mirrors the logic in ``/api/v1/inspect``: backends that can score the
-    prompt (HF, llamacpp-py, Fireworks-with-echo, RemoteBackend backed by
-    any of those) yield one row per prompt token; chat-only backends fall
-    back to a single next-token distribution row so the UI still has
-    something useful to render.
-
-    Errors inside this function become a ``prompt_score`` frame with an
-    empty steps list and a ``note`` -- the regular generation loop then
-    runs to completion, so the user sees "couldn't score prompt" rather
-    than a hard 500.
+    Backends that can score the prompt (HF, llamacpp-py, Fireworks-with-
+    echo, RemoteBackend backed by any of those) yield one row per
+    prompt token. Backends that cannot (chat-only OpenAI-compat
+    providers) raise ``NotImplementedError`` from
+    :meth:`Backend.score_prompt`; we surface that here as a
+    ``prompt_score`` frame with an empty steps list and a ``note`` so
+    the rest of the generation loop can still run to completion. In
+    practice the chat-only path doesn't reach this helper anyway --
+    the ``generate_stream`` route in :mod:`web.app` rejects chat-only
+    backends with a 400 before the stream opens -- but the fallback
+    keeps the function robust if a future backend type lands here
+    without prompt-logprobs support.
     """
     caps = backend.capabilities
+    watch_id_list: list[int] = [int(i) for i in (watch_ids or [])]
+    prefix_id_list: list[int] = [int(i) for i in (prefix_token_ids or [])]
+    effective_prompt = prompt
+    if prefix_id_list:
+        try:
+            effective_prompt = prompt + backend.detokenize(prefix_id_list)
+        except Exception:  # noqa: BLE001
+            effective_prompt = prompt
     try:
-        chat_only = backend.__class__.__name__ == "OpenAICompatBackend" and not caps.prompt_logprobs
-        if chat_only:
-            tokens = backend.tokenize(prompt)
-            step = backend.next_distribution(tokens, top_k=int(top_k))
-            step.context_text = prompt
-            steps_wire = [step_to_wire(step).model_dump()]
-            note = (
-                "this backend cannot score prompt tokens; showing the "
-                "next-token distribution after the prompt instead"
-            )
-        else:
-            steps = backend.score_prompt(prompt, top_k=int(top_k), watch_ids=[])
-            steps_wire = [step_to_wire(s).model_dump() for s in steps]
-            note = ""
+        steps = backend.score_prompt(
+            effective_prompt, top_k=int(top_k), watch_ids=watch_id_list
+        )
+        steps_wire = [step_to_wire(s).model_dump() for s in steps]
+        note = ""
     except Exception as exc:  # noqa: BLE001
         log.warning("dsbx-web: prompt scoring failed: %s", exc)
         yield sse_frame(
@@ -491,6 +521,8 @@ def _iter_remote_stream(
     stop_ids: list[int],
     seed: int,
     respect_eos: bool,
+    watch_ids: list[int] | None = None,
+    prefix_token_ids: list[int] | None = None,
 ):
     """Yield ``GenStep`` objects from a remote backend.
 
@@ -513,6 +545,8 @@ def _iter_remote_stream(
         stop_ids=stop_ids,
         seed=seed,
         respect_eos=respect_eos,
+        watch_ids=[int(i) for i in (watch_ids or [])],
+        prefix_token_ids=[int(i) for i in (prefix_token_ids or [])],
     )
     yield from iterator
 

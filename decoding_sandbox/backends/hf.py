@@ -11,6 +11,8 @@ them (e.g. the client); this backend is only instantiated on dsbx-host.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
 
@@ -101,7 +103,13 @@ class HFBackend(Backend):
             logits = self.model(input_ids).logits[0, -1]
         return torch.log_softmax(logits.float(), dim=-1)
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         torch = self._torch
         logp = self._logprobs_at_last(token_ids)
         k = min(top_k, logp.shape[-1])
@@ -116,7 +124,16 @@ class HFBackend(Backend):
             )
             for rank, (v, i) in enumerate(zip(vals.tolist(), idx.tolist()))
         ]
-        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
+        step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
+        # Full-vocab backend: read the EXACT logprob of each watched id
+        # from the same forward-pass tensor, including ids that fell
+        # outside the requested top_k (i.e. tail-of-distribution
+        # probes -- the only way to see P(EOS) on a confident model
+        # without raising top_k to vocab_size).
+        for wid in watch_ids:
+            wid_i = int(wid)
+            step.watched[wid_i] = self._exact_candidate(logp, wid_i)
+        return step
 
     def _exact_candidate(self, dist, token_id: int) -> TokenCandidate:
         lp = float(dist[token_id].item())

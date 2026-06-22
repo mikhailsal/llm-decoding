@@ -51,7 +51,6 @@ def test_health_is_public(app) -> None:
     [
         ("GET", "/api/v1/info", None),
         ("POST", "/api/v1/tokenize", {"backend": "dsbx-host-py", "text": "ab"}),
-        ("POST", "/api/v1/inspect", {"backend": "dsbx-host-py", "prompt": "ab"}),
         ("POST", "/api/v1/manual/sessions", {"backend": "dsbx-host-py", "prompt": "ab"}),
         ("GET", "/api/v1/probe", None),
     ],

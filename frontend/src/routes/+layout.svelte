@@ -21,9 +21,7 @@
   });
 
   const navLinks: { href: string; label: string }[] = [
-    { href: '/inspect', label: 'Inspect' },
-    { href: '/generate', label: 'Generate' },
-    { href: '/manual', label: 'Manual' },
+    { href: '/generate', label: 'Decode' },
     { href: '/spec', label: 'Speculative' },
     { href: '/status', label: 'Status' },
     { href: '/logs', label: 'Logs' }

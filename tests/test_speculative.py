@@ -18,7 +18,7 @@ from tests.fakes import FakeBackend
 class _SequentialDraft(FakeBackend):
     """Always proposes the next consecutive int id after the context."""
 
-    def next_distribution(self, token_ids, top_k):
+    def next_distribution(self, token_ids, top_k, *, watch_ids=()):
         from decoding_sandbox.core.types import StepResult
 
         next_id = 100 + len(token_ids)
@@ -102,7 +102,7 @@ def test_speculative_generate_breaks_when_no_token_emitted() -> None:
     target = _NoBonusTarget(tokens={"P": [1]}, pieces={1: "P"})
 
     class _EmptyDraft(FakeBackend):
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             from decoding_sandbox.core.types import StepResult
 
             return StepResult(position=len(token_ids), candidates=[], is_full_vocab=False)

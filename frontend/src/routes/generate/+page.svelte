@@ -15,11 +15,15 @@
     GenStep,
     StepResult,
     TokenCandidate,
+    Watched,
     BackendInfo,
     UsagePayload,
     PerfMetricsPayload,
     RawOutputPayload
   } from '$lib/types';
+
+  type Mode = 'inspect' | 'generate' | 'manual';
+  let lastMode = $state<Mode>('generate');
 
   let backend = $state<string>('');
   let model = $state<string>('');
@@ -37,7 +41,19 @@
   let stopTexts = $state<string[]>([]);
   let stopIds = $state<string[]>([]);
   let respectEos = $state(true);
-  let includePrompt = $state(false);
+  // Defaults to true in the unified Decode workbench: showing per-prompt-
+  // token logits is the highest-signal way to introduce the user to the
+  // model's distribution, and on Fireworks combined-echo+stream means we
+  // get it back in ONE upstream request (zero added RPS cost). The user
+  // can still untick to skip the prompt-score frame.
+  let includePrompt = $state(true);
+  // Watch chips panel (ported from the old /inspect page): every request
+  // ships these so the watched columns appear in both prompt-logits and
+  // generation-steps tables. Strings during edit, server-side resolved
+  // to ids in ``_resolve_watches``.
+  let watchTexts = $state<string[]>([]);
+  let watchIds = $state<string[]>([]);
+  let watchEos = $state(false);
   // ``echo_last=N`` (Fireworks combined echo+stream path only): echo
   // logprobs for the LAST N prompt tokens instead of every position.
   // 0 = echo the whole prompt (the default). Only meaningful when
@@ -102,6 +118,30 @@
   // back to "0" mid-typing) and parse + clamp at submit time.
   type LogitBiasRow = { id: string; tokenId: string; bias: string };
   let logitBiasRows = $state<LogitBiasRow[]>([]);
+
+  // -------- Manual decoding (browser-side ephemeral state) ----------
+  // The unified workbench's "Manual" button activates an inline picker
+  // that DOES NOT touch the deleted manual-sessions backend. State lives
+  // entirely in the browser: ``pickedIds`` grows as the user picks
+  // candidates, and each pick fires a fresh ``/generate/stream`` call
+  // with ``prefix_token_ids = pickedIds`` so the model sees
+  // ``tokenize(prompt) + pickedIds`` as one continuous sequence. The
+  // ``manualSessionId`` + ``manualCacheKey`` UUIDs are auto-generated on
+  // enter and stay stable for the lifetime of the manual session, which
+  // on Fireworks reuses the KV cache + MoE expert routing across picks
+  // (essentially free per-pick after the first).
+  let manualMode = $state(false);
+  let manualSessionId = $state<string>('');
+  let manualCacheKey = $state<string>('');
+  let pickedIds = $state<number[]>([]);
+  let pickedTexts = $state<string[]>([]);
+  let pickedProbs = $state<(number | null)[]>([]);
+  // Current picker distribution -- the StepResult emitted by the most
+  // recent generate-stream call. The picker table reads ``candidates``
+  // and ``watched`` from it; ``chosen`` is unused in manual mode.
+  let manualDistribution = $state<StepResult | null>(null);
+  let forceText = $state('');
+  let forceId = $state('');
 
   // ``tokenCache`` is an id->text dictionary populated from every
   // ``prompt_score`` and ``step`` SSE frame across the lifetime of
@@ -213,6 +253,18 @@
   let combinedEchoStreamSupported = $derived<boolean>(
     !!backendInfo?.capabilities?.supports_combined_echo_stream
   );
+  // Chat-only providers (NIM / OpenRouter) are registered but inert
+  // until proper chat-mode UI lands; the middleware rejects
+  // generate-stream requests against them with a 400. We mirror the
+  // gate here so the button is visibly disabled and carries the
+  // backend's ``notes`` as a tooltip explanation, instead of letting
+  // the click round-trip and bounce off a 400.
+  let generationDisabled = $derived<boolean>(
+    !!backendInfo?.capabilities?.generation_disabled
+  );
+  let generationDisabledNote = $derived<string>(
+    backendInfo?.capabilities?.notes ?? ''
+  );
 
   // ``alternatives`` ceiling comes from the backend's capabilities. Cloud
   // providers cap aggressively (Fireworks: 5, NIM/OpenRouter: 20,
@@ -311,57 +363,102 @@
     return Object.keys(out).length ? out : undefined;
   }
 
-  async function run() {
-    streamError = null;
-    steps = [];
-    promptSteps = [];
-    promptNote = '';
-    stopReason = null;
-    usage = null;
-    perf = null;
-    rawOutput = null;
-    busy = true;
+  /**
+   * Build the request body for a generate-stream call. Mode-specific
+   * fields (max_tokens, include_prompt, prefix_token_ids, manual session
+   * UUIDs) are layered on top of the common fields here so the three
+   * action buttons stay one-liners. ``prefix`` defaults to the manual
+   * picker's accumulated picks when set; pass ``[]`` for inspect/generate.
+   */
+  function buildRequest(opts: {
+    maxTokensOverride?: number;
+    includePromptOverride?: boolean;
+    prefix?: number[];
+    forManual?: boolean;
+  }): Record<string, unknown> {
     const stop_ids = stopIds
       .map((s) => Number.parseInt(s, 10))
       .filter((n) => Number.isFinite(n));
-    const stream = apiStream('/api/v1/generate/stream', {
+    const watch_ids_resolved = watchIds
+      .map((s) => Number.parseInt(s, 10))
+      .filter((n) => Number.isFinite(n));
+    const includeP = opts.includePromptOverride ?? includePrompt;
+    return {
       backend,
       model: model || undefined,
       prompt,
       sampler: { name: sampler, params: samplerParams() },
-      max_tokens: maxTokens,
-      // Single source of truth for "how many top alternatives do we
-      // care about?" -- both the wire ``top_k`` and the table renderer
-      // below read from the same state, capped to the backend's
-      // ``max_top_logprobs`` ceiling.
+      max_tokens: opts.maxTokensOverride ?? maxTokens,
       top_k: alternatives,
       stop_texts: stopTexts,
       stop_ids,
       seed,
       respect_eos: respectEos,
-      include_prompt: includePrompt,
-      // Only ship the service tier when the backend can honor it; the
-      // middleware ignores the field otherwise, but keeping the wire
-      // small for non-supporting backends is good hygiene.
+      include_prompt: includeP,
       service_tier: serviceTierSupported ? serviceTier : undefined,
       logit_bias: collectLogitBias(),
-      echo_last: includePrompt && combinedEchoStreamSupported && echoLast > 0 ? echoLast : undefined
-    });
+      echo_last:
+        includeP && combinedEchoStreamSupported && echoLast > 0 ? echoLast : undefined,
+      watch_texts: watchTexts,
+      watch_ids: watch_ids_resolved,
+      watch_eos: watchEos,
+      prefix_token_ids: opts.prefix ?? [],
+      // Manual mode pins both UUIDs so Fireworks can reuse the KV cache
+      // and MoE expert routing across picks; for the other modes we
+      // leave them ``undefined`` so each click is a fresh request.
+      session_id: opts.forManual ? manualSessionId : undefined,
+      prompt_cache_key: opts.forManual ? manualCacheKey : undefined
+    };
+  }
+
+  /**
+   * Generic streaming runner shared by all three buttons. ``onStep``
+   * lets the manual-mode caller intercept the single emitted step and
+   * stash it into ``manualDistribution`` instead of appending to the
+   * scrolling ``steps`` table.
+   */
+  async function streamRun(
+    body: Record<string, unknown>,
+    opts: {
+      resetUi: boolean;
+      onStep?: (gs: GenStep) => void;
+      onPromptScore?: (steps: StepResult[], note: string) => void;
+    }
+  ): Promise<void> {
+    streamError = null;
+    stopReason = null;
+    if (opts.resetUi) {
+      steps = [];
+      promptSteps = [];
+      promptNote = '';
+      usage = null;
+      perf = null;
+      rawOutput = null;
+    }
+    busy = true;
+    const stream = apiStream('/api/v1/generate/stream', body);
     cancelFn = stream.cancel;
     try {
       for await (const evt of stream.events) {
         if (evt.event === 'step') {
           const gs = evt.step as GenStep;
-          steps = [...steps, gs];
-          // Populate the token-id cache from this step so the bias
-          // editor's autocomplete and the click-to-bias buttons can
-          // reference this token on the next iteration.
           rememberFromStep(gs.step_result);
           rememberToken(gs.decision?.token_id, gs.decision?.token_text ?? '');
+          if (opts.onStep) {
+            opts.onStep(gs);
+          } else {
+            steps = [...steps, gs];
+          }
         } else if (evt.event === 'prompt_score') {
-          promptSteps = (evt as { steps: StepResult[] }).steps ?? [];
-          promptNote = (evt as { note?: string }).note ?? '';
-          for (const s of promptSteps) rememberFromStep(s);
+          const ps = (evt as { steps: StepResult[] }).steps ?? [];
+          const note = (evt as { note?: string }).note ?? '';
+          for (const s of ps) rememberFromStep(s);
+          if (opts.onPromptScore) {
+            opts.onPromptScore(ps, note);
+          } else {
+            promptSteps = ps;
+            promptNote = note;
+          }
         } else if (evt.event === 'perf') {
           const p = (evt as { metrics?: PerfMetricsPayload }).metrics;
           perf = p && typeof p === 'object' ? p : null;
@@ -391,6 +488,147 @@
     }
   }
 
+  async function runInspect() {
+    lastMode = 'inspect';
+    manualMode = false;
+    await streamRun(buildRequest({ maxTokensOverride: 1, includePromptOverride: true }), {
+      resetUi: true
+    });
+  }
+
+  async function runGenerate() {
+    lastMode = 'generate';
+    manualMode = false;
+    await streamRun(buildRequest({}), { resetUi: true });
+  }
+
+  /**
+   * Enter manual decoding mode. Generates fresh per-session UUIDs (so
+   * Fireworks routes pin to one replica + reuse KV cache across picks)
+   * and fires the first generate-stream call with ``prefix=[]`` so the
+   * picker has an initial distribution to show.
+   */
+  async function enterManual() {
+    lastMode = 'manual';
+    manualMode = true;
+    manualSessionId = crypto.randomUUID();
+    manualCacheKey = crypto.randomUUID();
+    pickedIds = [];
+    pickedTexts = [];
+    pickedProbs = [];
+    manualDistribution = null;
+    await fetchManualNext();
+  }
+
+  function exitManual() {
+    manualMode = false;
+    // Leave the rendered prompt-score + completion in place so the user
+    // can switch back to inspect/generate without losing context.
+  }
+
+  /**
+   * Fire one generate-stream call for manual mode. ``include_prompt`` is
+   * only true on the first call (no picks yet) -- once the picker has
+   * a baseline distribution we don't need the per-prompt-token rows
+   * again and switching to ``include_prompt=false`` lets the Fireworks
+   * cache-replay path skip the echo work too.
+   */
+  async function fetchManualNext() {
+    const firstCall = pickedIds.length === 0;
+    const body = buildRequest({
+      maxTokensOverride: 1,
+      includePromptOverride: firstCall,
+      prefix: [...pickedIds],
+      forManual: true
+    });
+    await streamRun(body, {
+      // First call resets the UI so the prompt-logits table refreshes;
+      // subsequent picks leave it alone (cache reuse).
+      resetUi: firstCall,
+      onStep: (gs) => {
+        manualDistribution = gs.step_result;
+      },
+      onPromptScore: firstCall
+        ? (ps, note) => {
+            promptSteps = ps;
+            promptNote = note;
+          }
+        : undefined
+    });
+  }
+
+  function pickCandidate(c: TokenCandidate) {
+    pickedIds = [...pickedIds, c.token_id];
+    pickedTexts = [...pickedTexts, c.text];
+    pickedProbs = [
+      ...pickedProbs,
+      c.logprob !== null ? Math.exp(c.logprob) : null
+    ];
+    rememberToken(c.token_id, c.text);
+    void fetchManualNext();
+  }
+
+  function pickForceText() {
+    const text = forceText;
+    if (!text) return;
+    // Tokenize on the server (we don't have the tokenizer in-browser).
+    // Append every token the input expanded into so multi-token forces
+    // ("Paris" -> ["Pa", "ris"]) end up as a coherent prefix.
+    void (async () => {
+      busy = true;
+      try {
+        const res = await fetch('/api/v1/tokenize', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ backend, model: model || undefined, text })
+        });
+        if (!res.ok) {
+          streamError = `tokenize failed: HTTP ${res.status}`;
+          busy = false;
+          return;
+        }
+        const data = (await res.json()) as { ids: number[] };
+        for (const tid of data.ids) {
+          pickedIds = [...pickedIds, tid];
+          pickedTexts = [...pickedTexts, ''];
+          pickedProbs = [...pickedProbs, null];
+        }
+        forceText = '';
+        busy = false;
+        await fetchManualNext();
+      } catch (exc) {
+        streamError = exc instanceof Error ? exc.message : String(exc);
+        busy = false;
+      }
+    })();
+  }
+
+  function pickForceId() {
+    const tid = Number.parseInt(forceId, 10);
+    if (!Number.isFinite(tid)) return;
+    pickedIds = [...pickedIds, tid];
+    pickedTexts = [...pickedTexts, tokenCache[tid] ?? ''];
+    pickedProbs = [...pickedProbs, null];
+    forceId = '';
+    void fetchManualNext();
+  }
+
+  function manualUndo() {
+    if (pickedIds.length === 0) return;
+    pickedIds = pickedIds.slice(0, -1);
+    pickedTexts = pickedTexts.slice(0, -1);
+    pickedProbs = pickedProbs.slice(0, -1);
+    void fetchManualNext();
+  }
+
+  function manualUndoTo(idx: number) {
+    if (idx < 0 || idx >= pickedIds.length) return;
+    pickedIds = pickedIds.slice(0, idx);
+    pickedTexts = pickedTexts.slice(0, idx);
+    pickedProbs = pickedProbs.slice(0, idx);
+    void fetchManualNext();
+  }
+
   function cancel() {
     cancelFn?.();
     busy = false;
@@ -403,6 +641,82 @@
     const c = step.step_result.candidates.find((c: TokenCandidate) => c.token_id === id);
     if (!c) return null;
     return probFromLogprob(c.logprob);
+  }
+
+  function watchedById(step: StepResult, id: number): TokenCandidate | null {
+    const w = step.watched.find((x: Watched) => x.token_id === id);
+    return w ? w.candidate : null;
+  }
+
+  /**
+   * Frontend reconstructs human-readable watch column headers from what
+   * IT sent (no server-side ResolvedWatch round-trip; the inspect
+   * endpoint that needed it is gone). De-duplication semantics mirror
+   * the server's :func:`_resolve_watches` so the columns line up with
+   * the per-step ``watched`` arrays.
+   */
+  type WatchColumn = { label: string; tokenId: number; source: 'text' | 'id' | 'eos' };
+  let watchColumns = $derived.by<WatchColumn[]>(() => {
+    const out: WatchColumn[] = [];
+    const seen = new Set<number>();
+    // text watches: we don't know the tokenizer in-browser, so we
+    // can't pre-resolve to ids. Instead we render the label up front
+    // and pair it with the watched cell by scanning each row's
+    // ``watched`` list for "the first id we haven't matched yet that
+    // looks like it came from a text watch". Practically: text
+    // watches always appear before id+eos watches in the server-side
+    // resolution order, so we render them as placeholder columns and
+    // let the first N watched entries fill them in. (The plan's
+    // simplification: the UI just shows label + raw value.)
+    for (const t of watchTexts) {
+      out.push({ label: `text:${JSON.stringify(t)}`, tokenId: -1, source: 'text' });
+    }
+    for (const raw of watchIds) {
+      const tid = Number.parseInt(raw, 10);
+      if (!Number.isFinite(tid) || seen.has(tid)) continue;
+      seen.add(tid);
+      const piece = tokenCache[tid];
+      const suffix = piece ? ` ${JSON.stringify(piece)}` : '';
+      out.push({ label: `id=${tid}${suffix}`, tokenId: tid, source: 'id' });
+    }
+    if (watchEos) {
+      for (const tid of backendInfo?.capabilities?.eos_token_ids ?? []) {
+        if (seen.has(tid)) continue;
+        seen.add(tid);
+        out.push({ label: `EOS:${tid}`, tokenId: tid, source: 'eos' });
+      }
+    }
+    return out;
+  });
+  /**
+   * Resolve one watch column at a given position by looking it up in
+   * the row's ``watched`` array. For ``text`` columns we use the
+   * positional index trick (text watches always come first in the
+   * server's resolved order). For ``id`` / ``eos`` columns we know
+   * the id and look it up directly.
+   */
+  function watchedAt(step: StepResult, col: WatchColumn, textIdxIfApplicable: number):
+    TokenCandidate | null {
+    if (col.source === 'text') {
+      // Positional: text watches always lead the watched list in the
+      // server's resolved order, so the i-th text column maps to the
+      // i-th watched entry.
+      const w = step.watched[textIdxIfApplicable];
+      return w ? w.candidate : null;
+    }
+    return watchedById(step, col.tokenId);
+  }
+
+  let watchTextCount = $derived<number>(watchTexts.length);
+
+  /**
+   * Probability for the i-th manual pick, used to color the running-
+   * completion view exactly like /generate's auto-generated tokens.
+   * Forced tokens have ``null`` here (we don't know the model's
+   * prob at the time the user typed them) and render plain grey.
+   */
+  function pickedProb(i: number): number | null {
+    return pickedProbs[i] ?? null;
   }
 
   // ``promptSteps`` per the ``Backend.score_prompt`` contract is N rows
@@ -458,9 +772,12 @@
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
   <div class="card lg:col-span-1 space-y-3">
-    <h2 class="text-lg font-semibold">Generate</h2>
+    <h2 class="text-lg font-semibold">Decode</h2>
     <p class="text-xs text-slate-400">
-      Stream tokens with a chosen sampler. Mirrors <span class="font-mono">dsbx generate</span>.
+      Inspect, generate, or pick tokens manually. All three buttons hit a single endpoint
+      (<span class="font-mono">/api/v1/generate/stream</span>) with different parameters; inspect is
+      <span class="font-mono">max_tokens=1</span>, manual is per-pick <span class="font-mono">max_tokens=1 +
+      prefix_token_ids = [your picks]</span>.
     </p>
     <BackendSelect bind:value={backend} onChange={onBackendChange} />
     <ModelInput backend={backendInfo} bind:value={model} />
@@ -591,6 +908,22 @@
     {/if}
     <ChipInput bind:values={stopTexts} label="Stop text" placeholder="e.g. '.'" />
     <ChipInput bind:values={stopIds} label="Stop ids" placeholder="token id" preserveSpace={false} />
+    <ChipInput
+      bind:values={watchTexts}
+      label="Watch text"
+      placeholder="e.g. ' Paris' (leading space preserved)"
+      hint="Each chip is tokenized server-side; multi-token watches use their first id. Probabilities show in extra table columns."
+    />
+    <ChipInput
+      bind:values={watchIds}
+      label="Watch ids"
+      placeholder="numeric token id"
+      preserveSpace={false}
+    />
+    <label class="flex items-center gap-2 text-sm">
+      <input type="checkbox" bind:checked={watchEos} class="accent-sky-500" />
+      Watch EOS tokens
+    </label>
     {#if logitBiasSupported}
       <div class="space-y-1">
         <div class="flex items-center justify-between">
@@ -783,14 +1116,60 @@
         </p>
       </div>
     {/if}
-    <div class="flex gap-2">
-      <button class="btn btn-primary flex-1" onclick={run} disabled={busy || !backend}>
-        {busy ? 'streaming…' : 'generate'}
+    <div class="grid grid-cols-3 gap-2">
+      <button
+        class="btn flex-1 {lastMode === 'inspect' && !busy ? 'btn-primary' : 'btn-ghost'}"
+        onclick={runInspect}
+        disabled={busy || !backend || generationDisabled}
+        title={generationDisabled
+          ? generationDisabledNote
+          : 'Score every prompt position (max_tokens=1 + include_prompt). Same wire path as generate; just stops after one emitted token.'}
+      >
+        {busy && lastMode === 'inspect' ? '…' : 'inspect'}
       </button>
-      {#if busy}
-        <button class="btn btn-ghost" onclick={cancel}>stop</button>
-      {/if}
+      <button
+        class="btn flex-1 {lastMode === 'generate' && !busy ? 'btn-primary' : 'btn-ghost'}"
+        onclick={runGenerate}
+        disabled={busy || !backend || generationDisabled}
+        title={generationDisabled
+          ? generationDisabledNote
+          : 'Stream N tokens with the current sampler.'}
+      >
+        {busy && lastMode === 'generate' ? '…' : 'generate'}
+      </button>
+      <button
+        class="btn flex-1 {manualMode ? 'btn-primary' : 'btn-ghost'}"
+        onclick={enterManual}
+        disabled={busy || !backend || generationDisabled}
+        title={generationDisabled
+          ? generationDisabledNote
+          : 'Open the inline picker: pick or force each token by hand. Browser state only; one /generate/stream call per pick (Fireworks reuses KV cache via session_id + prompt_cache_key).'}
+      >
+        {busy && lastMode === 'manual' ? '…' : 'manual'}
+      </button>
     </div>
+    {#if busy}
+      <div class="mt-2 flex justify-end">
+        <button class="btn btn-ghost text-xs" onclick={cancel}>stop streaming</button>
+      </div>
+    {/if}
+    {#if generationDisabled}
+      <p class="mt-1 text-[11px] text-amber-400 leading-snug">
+        {generationDisabledNote || 'generation disabled for this backend'}
+      </p>
+    {/if}
+    {#if manualMode}
+      <p class="mt-2 text-[11px] text-sky-400/80 leading-snug">
+        manual mode active — pick a candidate in the right panel; each pick fires
+        one <span class="font-mono">/generate/stream</span> call with
+        <span class="font-mono">prefix_token_ids = [your picks]</span>.
+        <button
+          type="button"
+          class="ml-1 underline decoration-dotted hover:text-sky-200"
+          onclick={exitManual}
+        >exit manual</button>
+      </p>
+    {/if}
   </div>
 
   <div class="lg:col-span-2 space-y-3">
@@ -812,7 +1191,12 @@
               showMarkers={showMarkers}
               bgClass={tokenBackgroundClass(p)}
               title={`prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
-            />{/each}{:else}<span class="text-slate-400">{prompt}</span>{/if}{#each steps as s}<TokenInline
+            />{/each}{:else}<span class="text-slate-400">{prompt}</span>{/if}{#each pickedTexts as pt, i}{@const pp = pickedProb(i)}<TokenInline
+            text={pt}
+            showMarkers={showMarkers}
+            bgClass={tokenBackgroundClass(pp)}
+            title={`manual pick #${i + 1}${pp !== null ? ` · p=${(pp * 100).toFixed(2)}%` : ' · forced'}`}
+          />{/each}{#each steps as s}<TokenInline
             text={s.decision.token_text}
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(chosenProb(s))}
@@ -843,6 +1227,134 @@
         </div>
       {/if}
     </div>
+
+    {#if manualMode}
+      <div class="card space-y-3 border-sky-700/40">
+        <div class="flex items-center justify-between">
+          <div class="text-xs uppercase tracking-wider text-sky-300">
+            manual picker
+            <span class="ml-2 normal-case text-[10px] text-slate-500">
+              {pickedIds.length} pick{pickedIds.length === 1 ? '' : 's'}
+              · session <span class="font-mono">{manualSessionId.slice(0, 8)}</span>
+            </span>
+          </div>
+          <button
+            type="button"
+            class="text-xs underline decoration-dotted text-slate-400 hover:text-slate-200"
+            onclick={exitManual}
+          >exit manual</button>
+        </div>
+
+        {#if pickedIds.length > 0}
+          <div class="flex flex-wrap items-center gap-1 text-xs">
+            <span class="text-slate-500 uppercase tracking-wider text-[10px] mr-1">picks:</span>
+            {#each pickedIds as tid, i}
+              <button
+                type="button"
+                class="px-1.5 py-0.5 rounded border border-slate-700 hover:border-rose-500 hover:text-rose-300 font-mono text-[11px]"
+                title={`click to undo back to step ${i} (drops picks ${i + 1}..${pickedIds.length})`}
+                onclick={() => manualUndoTo(i)}
+              >
+                <TokenText text={pickedTexts[i] || `id=${tid}`} className="font-mono text-[11px]" />
+                <span class="text-slate-600">·{tid}</span>
+              </button>
+            {/each}
+            <button
+              type="button"
+              class="ml-1 px-2 py-0.5 rounded border border-slate-700 hover:border-amber-500 hover:text-amber-300 text-[11px]"
+              onclick={manualUndo}
+              disabled={busy || pickedIds.length === 0}
+              title="undo last pick"
+            >undo</button>
+          </div>
+        {/if}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <div>
+            <label class="label" for="force-text">force text</label>
+            <div class="flex gap-1">
+              <input
+                id="force-text"
+                type="text"
+                class="input flex-1 font-mono"
+                bind:value={forceText}
+                placeholder="e.g. ' the'"
+                onkeydown={(e) => { if (e.key === 'Enter') pickForceText(); }}
+              />
+              <button
+                class="btn btn-ghost"
+                onclick={pickForceText}
+                disabled={busy || !forceText}
+              >+</button>
+            </div>
+            <p class="text-[10px] text-slate-500 mt-0.5">
+              Tokenized server-side; multi-token strings expand into N picks.
+            </p>
+          </div>
+          <div>
+            <label class="label" for="force-id">force id</label>
+            <div class="flex gap-1">
+              <input
+                id="force-id"
+                type="text"
+                inputmode="numeric"
+                class="input flex-1 font-mono"
+                bind:value={forceId}
+                list="token-id-suggestions"
+                placeholder="numeric id"
+                onkeydown={(e) => { if (e.key === 'Enter') pickForceId(); }}
+              />
+              <button
+                class="btn btn-ghost"
+                onclick={pickForceId}
+                disabled={busy || !forceId}
+              >+</button>
+            </div>
+          </div>
+        </div>
+
+        {#if manualDistribution}
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+              next-token distribution (click a row to pick)
+            </div>
+            <table class="w-full text-sm">
+              <thead class="text-xs text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th class="table-cell text-left">rank</th>
+                  <th class="table-cell text-left">token</th>
+                  <th class="table-cell text-left">prob</th>
+                  <th class="table-cell text-left">id</th>
+                  <th class="table-cell text-left">sampler</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each manualDistribution.candidates.slice(0, alternatives) as c}
+                  {@const p = c.logprob !== null ? Math.exp(c.logprob) : null}
+                  <tr
+                    class="border-b border-slate-800/60 hover:bg-slate-800/40 cursor-pointer"
+                    onclick={() => pickCandidate(c)}
+                    data-token-row
+                  >
+                    <td class="table-cell font-mono text-slate-400">{c.rank + 1}</td>
+                    <td class="table-cell">
+                      <TokenText text={c.text} isSpecial={c.is_special} className="font-mono" />
+                    </td>
+                    <td class="table-cell w-32"><ConfidenceBar prob={p} /></td>
+                    <td class="table-cell font-mono text-xs text-slate-500 tabular-nums">{c.token_id}</td>
+                    <td class="table-cell text-[10px] uppercase tracking-wider text-slate-500">
+                      {c.sampling_mask_count !== undefined && c.sampling_mask_count !== null
+                        ? `mask=${c.sampling_mask_count}`
+                        : ''}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if rawOutput && rawOutputSupported}
       <div class="card">
@@ -961,6 +1473,9 @@
                 >
               {/if}
               <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
+              {#each watchColumns as w}
+                <th class="table-cell text-left" title={`watch column · ${w.label}`}>{w.label}</th>
+              {/each}
             </tr>
           </thead>
           <tbody>
@@ -999,6 +1514,16 @@
                     {/each}
                   </div>
                 </td>
+                {#each watchColumns as w, wi}
+                  {@const cand = watchedAt(s, w, w.source === 'text' ? wi : 0)}
+                  <td class="table-cell">
+                    {#if cand}
+                      <ConfidenceBar prob={cand.logprob !== null ? Math.exp(cand.logprob) : null} />
+                    {:else}
+                      <span class="text-slate-600 text-xs">—</span>
+                    {/if}
+                  </td>
+                {/each}
               </tr>
             {/each}
           </tbody>
@@ -1023,6 +1548,9 @@
                 >
               {/if}
               <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
+              {#each watchColumns as w}
+                <th class="table-cell text-left" title={`watch column · ${w.label}`}>{w.label}</th>
+              {/each}
             </tr>
           </thead>
           <tbody>
@@ -1048,15 +1576,32 @@
                 <td class="table-cell">
                   <div class="flex flex-col gap-0.5">
                     {#each s.step_result.candidates.slice(0, alternatives) as c}
+                      {@const eligible = (s.decision.kept ?? []).some((k) => k.token_id === c.token_id)}
                       <div class="flex items-center gap-2">
                         {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
                         <span class="text-xs text-slate-500 tabular-nums">
                           {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
                         </span>
+                        {#if eligible}
+                          <span
+                            class="text-[9px] uppercase tracking-wider text-emerald-400/80"
+                            title="survived the current sampler filter (sampler.kept)"
+                          >eligible</span>
+                        {/if}
                       </div>
                     {/each}
                   </div>
                 </td>
+                {#each watchColumns as w, wi}
+                  {@const cand = watchedAt(s.step_result, w, w.source === 'text' ? wi : 0)}
+                  <td class="table-cell">
+                    {#if cand}
+                      <ConfidenceBar prob={cand.logprob !== null ? Math.exp(cand.logprob) : null} />
+                    {:else}
+                      <span class="text-slate-600 text-xs">—</span>
+                    {/if}
+                  </td>
+                {/each}
               </tr>
             {/each}
           </tbody>

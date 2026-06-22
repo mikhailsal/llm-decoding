@@ -118,6 +118,56 @@ def test_generate_stream_resolves_stop_texts_to_ids(client) -> None:
     assert events[-1]["stop_reason"] == "user_stop"
 
 
+def test_generate_stream_returns_400_for_chat_only_backend() -> None:
+    """Chat-only providers (NIM, OpenRouter) are registered but inert until
+    proper chat-mode UI lands. The route refuses to open the stream with a
+    400 carrying a human-readable explanation, instead of half-streaming
+    an SSE error.
+
+    The historical per-step "growing user message" emulation produced N
+    independent first-responses to N slightly-different user queries
+    rather than a real continuation, so a sandbox that exists to show
+    the truth shouldn't pretend otherwise. The route guard mirrors the
+    ``OpenAICompatBackend.next_distribution`` raise + the
+    ``Capabilities.generation_disabled`` flag.
+    """
+
+    class _ChatOnlyFake(FakeBackend):
+        @property
+        def capabilities(self) -> Capabilities:
+            base = super().capabilities
+            return Capabilities(
+                name=base.name,
+                full_vocab=False,
+                prompt_logprobs=False,
+                max_top_logprobs=base.max_top_logprobs,
+                can_force_token=False,
+                notes=(
+                    "chat-only provider; generation disabled until "
+                    "proper chat-mode UI lands"
+                ),
+                generation_disabled=True,
+            )
+
+    backend = _ChatOnlyFake(
+        tokens={"ab": [97, 98]}, pieces={97: "a", 98: "b"}, distributions={}
+    )
+    app = build_test_app({"chat-only": backend})
+    body = {
+        "backend": "chat-only",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+    }
+    with make_authed_client(app) as c:
+        r = c.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 400
+    detail = r.json()["detail"].lower()
+    assert "chat-only" in detail
+    assert "generation is disabled" in detail
+
+
 def test_generate_stream_rejects_custom_sampler(client) -> None:
     body = {
         "backend": "dsbx-host-py",
@@ -204,6 +254,72 @@ def test_generate_stream_default_does_not_emit_prompt_score(client) -> None:
     assert all(e["event"] != "prompt_score" for e in events)
 
 
+def test_generate_stream_accepts_watch_ids_and_emits_watched_on_each_step(client) -> None:
+    """The unified Decode workbench's inspect/generate buttons forward
+    the ``watch_*`` panel on every request; the underlying ``GenStep`` /
+    ``StepResult`` payloads then carry a ``watched`` map per row. We
+    verify a) the request shape is accepted (no 4xx) and b) the watched
+    map for the requested ids appears on every emitted ``step`` frame.
+    """
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 2,
+        "top_k": 3,
+        "seed": 0,
+        # Mix all three knobs: text + id + eos so the ``_resolve_watches``
+        # helper exercises each branch. FakeBackend's tokenize splits
+        # strings into per-char ids so " " -> [32]; the resolved
+        # watch_ids will at least include 32 (text), 99 (id), and any
+        # configured eos ids.
+        "watch_texts": [" "],
+        "watch_ids": [99],
+        "watch_eos": True,
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 200, r.text
+    events = _parse_sse(r.text)
+    step_events = [e for e in events if e["event"] == "step"]
+    assert step_events, "expected at least one step frame"
+    # Every step frame should carry a ``watched`` list with one entry
+    # per resolved watch id. The FakeBackend's ``lookup_watch`` populates
+    # them; we don't care about the exact values, only that the wire
+    # shape carries them through.
+    for evt in step_events:
+        watched = evt["step"]["step_result"]["watched"]
+        assert isinstance(watched, list)
+        # At least the id-watch entry (99) should be present.
+        ids = {w["token_id"] for w in watched}
+        assert 99 in ids, f"expected watched id 99, got {ids}"
+
+
+def test_generate_stream_accepts_prefix_token_ids(client) -> None:
+    """Manual mode ships ``prefix_token_ids`` on every per-pick call.
+    The middleware route must accept it (no 4xx for an unknown field)
+    and forward it through the engine so the model decodes from
+    ``tokenize(prompt) + prefix``. We can't easily assert the FakeBackend
+    received the prefix without instrumenting it, but a successful 200
+    + step frame proves the wire path is wired.
+    """
+    body = {
+        "backend": "dsbx-host-py",
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 1,
+        "top_k": 3,
+        "seed": 0,
+        "include_prompt": False,
+        "prefix_token_ids": [101, 102],
+    }
+    r = client.post("/api/v1/generate/stream", json=body)
+    assert r.status_code == 200, r.text
+    events = _parse_sse(r.text)
+    assert any(e["event"] == "step" for e in events) or any(
+        e["event"] == "done" for e in events
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Native-streaming opt-in (backend implements supports_native_sampler + stream_native)
 # --------------------------------------------------------------------------- #
@@ -250,6 +366,8 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
             prompt_cache_key=None,
             session_id=None,
             logit_bias=None,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             self.native_calls.append(
                 {
@@ -261,6 +379,8 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
                     "stop_ids": list(stop_ids or []),
                     "seed": seed,
                     "respect_eos": respect_eos,
+                    "watch_ids": list(watch_ids or []),
+                    "prefix_token_ids": list(prefix_token_ids or []),
                 }
             )
             cand_x = TokenCandidate(token_id=10, text="X", logprob=-0.01, rank=0)
@@ -283,9 +403,9 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
                 stop_reason="max_tokens",
             )
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             next_dist_calls["n"] += 1
-            return super().next_distribution(token_ids, top_k)
+            return super().next_distribution(token_ids, top_k, watch_ids=watch_ids)
 
     backend = _NativeFake()
     app = build_test_app({"dsbx-host-py": backend})
@@ -343,9 +463,9 @@ def test_generate_stream_falls_back_to_per_step_when_native_says_no() -> None:
             native_calls["n"] += 1
             return iter([])
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             next_dist_calls["n"] += 1
-            return super().next_distribution(token_ids, top_k)
+            return super().next_distribution(token_ids, top_k, watch_ids=watch_ids)
 
     backend = _PickyFake()
     app = build_test_app({"dsbx-host-py": backend})
@@ -444,6 +564,8 @@ def test_generate_stream_usage_event_records_native_backend_requests() -> None:
             prompt_cache_key=None,
             session_id=None,
             logit_bias=None,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             # Simulate two HTTP attempts (e.g. 429 -> 200) and a server-
             # reported usage block. Both must land in the bound sink.
@@ -536,6 +658,8 @@ def test_generate_stream_emits_perf_event_before_usage() -> None:
             prompt_cache_key=None,
             session_id=None,
             logit_bias=None,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             if self._sink is not None:
                 self._sink["perf_metrics"] = {
@@ -653,6 +777,8 @@ def test_generate_stream_uses_combined_echo_path_when_supported() -> None:
             session_id=None,
             logit_bias=None,
             echo_last=None,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             self.echo_stream_called += 1
             # 3 prompt-echo StepResults then 1 emitted GenStep.
@@ -716,6 +842,103 @@ def test_generate_stream_uses_combined_echo_path_when_supported() -> None:
     assert events[-2]["event"] == "usage"
 
 
+def test_generate_stream_combined_echo_path_forwards_prefix_and_watch() -> None:
+    """The Fireworks combined-echo+stream path is the most fragile spot
+    for the new manual + watch wiring: ``prefix_token_ids`` has to land
+    in :meth:`stream_native_with_echo` so the backend can detokenize +
+    concatenate it onto the prompt text, and ``watch_ids`` has to ride
+    along so per-step watched columns light up. We assert both arrive at
+    the fake backend verbatim.
+    """
+    from decoding_sandbox.core.engine import GenStep
+    from decoding_sandbox.core.samplers import SamplerDecision
+    from decoding_sandbox.core.types import (
+        Capabilities,
+        StepResult,
+        TokenCandidate,
+    )
+
+    seen: dict[str, object] = {}
+
+    class _ComboFake(FakeBackend):
+        def __init__(self):
+            super().__init__(
+                tokens={"hi": [1, 2]},
+                pieces={1: "h", 2: "i", 5: "Y", 9: "Z", 10: "X"},
+            )
+
+        @property
+        def capabilities(self) -> Capabilities:
+            base = super().capabilities
+            return Capabilities(
+                name=base.name,
+                full_vocab=base.full_vocab,
+                prompt_logprobs=base.prompt_logprobs,
+                max_top_logprobs=base.max_top_logprobs,
+                can_force_token=base.can_force_token,
+                notes=base.notes,
+                supports_combined_echo_stream=True,
+            )
+
+        def supports_native_sampler(self, name, params):
+            return name == "greedy"
+
+        def stream_native_with_echo(
+            self,
+            prompt,
+            *,
+            sampler_name,
+            sampler_params,
+            max_tokens,
+            top_k,
+            stop_ids=None,
+            seed=0,
+            respect_eos=True,
+            service_tier=None,
+            prompt_cache_key=None,
+            session_id=None,
+            logit_bias=None,
+            echo_last=None,
+            watch_ids=(),
+            prefix_token_ids=(),
+        ):
+            seen["prompt"] = prompt
+            seen["prefix_token_ids"] = list(prefix_token_ids)
+            seen["watch_ids"] = list(watch_ids)
+            cand_x = TokenCandidate(10, "X", -0.01, 0)
+            yield GenStep(
+                step=0,
+                tokens_before=[1, 2, 5, 9],
+                step_result=StepResult(
+                    position=4, candidates=[cand_x], is_full_vocab=False, chosen=cand_x
+                ),
+                decision=SamplerDecision(
+                    token_id=10, token_text="X", kept=[], greedy_token_id=10, note=""
+                ),
+                stop_reason="max_tokens",
+            )
+
+    backend = _ComboFake()
+    app = build_test_app({"dsbx-host-py": backend})
+    with make_authed_client(app) as c:
+        r = c.post(
+            "/api/v1/generate/stream",
+            json={
+                "backend": "dsbx-host-py",
+                "prompt": "hi",
+                "sampler": {"name": "greedy", "params": {}},
+                "max_tokens": 1,
+                "top_k": 1,
+                "include_prompt": True,
+                "prefix_token_ids": [5, 9],
+                "watch_ids": [42],
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert seen["prefix_token_ids"] == [5, 9]
+    assert seen["watch_ids"] == [42]
+
+
 def test_generate_stream_emits_raw_output_event_and_forwards_logit_bias() -> None:
     """``raw_output`` lands as a dedicated SSE frame; ``logit_bias`` flows to backend.
 
@@ -772,6 +995,8 @@ def test_generate_stream_emits_raw_output_event_and_forwards_logit_bias() -> Non
             prompt_cache_key=None,
             session_id=None,
             logit_bias=None,
+            watch_ids=(),
+            prefix_token_ids=(),
         ):
             self.seen_logit_bias = logit_bias
             if self._sink is not None:
@@ -842,7 +1067,7 @@ def test_generate_stream_runtime_error_lands_in_done() -> None:
         def piece(self, tid):
             return chr(tid)
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             raise RuntimeError("kaboom")
 
     app = build_test_app({"boom": _Exploding()})

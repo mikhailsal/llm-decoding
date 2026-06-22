@@ -199,6 +199,36 @@ def test_info_static_caps_mirror_all_provider_supports_flags(env_with_secret) ->
     assert caps["notes"] == "static caps from provider config (backend not yet loaded)"
 
 
+def test_info_marks_chat_only_providers_generation_disabled(env_with_secret) -> None:
+    """NIM (chat-only -- ``has_completions=false``) advertises
+    ``generation_disabled=true`` in the static caps stub returned by
+    ``/api/v1/info``, plus a tooltip-ready note in ``capabilities.notes``.
+
+    The frontend backend picker uses these to render the option as
+    ``<option disabled title="chat-only...">``. The route guard in
+    ``/api/v1/generate/stream`` is the authoritative gate; this flag
+    is the pre-flight UX so the user sees the decision before clicking.
+    Fireworks (``has_completions=true``) must stay enabled.
+    """
+    backend = FakeBackend(
+        tokens={}, pieces={}, distributions={}, eos_token_ids=(99,)
+    )
+    cfg = make_test_config(providers=["fireworks", "nim"])
+    app = build_test_app({"dsbx-host-py": backend}, cfg=cfg)
+    with make_authed_client(app) as c:
+        r = c.get("/api/v1/info")
+    by_name = {b["name"]: b for b in r.json()["backends"]}
+
+    nim_caps = by_name["nim"]["capabilities"]
+    assert nim_caps is not None
+    assert nim_caps["generation_disabled"] is True
+    assert "chat-only" in nim_caps["notes"]
+
+    fw_caps = by_name["fireworks"]["capabilities"]
+    assert fw_caps is not None
+    assert fw_caps["generation_disabled"] is False
+
+
 def test_info_marks_cloud_without_key_as_unavailable(env_with_secret, monkeypatch) -> None:
     # Build a fresh app where NIM has no key set.
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)

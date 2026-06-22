@@ -97,7 +97,7 @@ def test_constructor_raises_when_server_returns_500() -> None:
         def piece(self, tid):
             return ""
 
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             return StepResult(0, [], False)
 
     app = make_app(_BrokenInfo())
@@ -226,7 +226,7 @@ def test_stream_generate_propagates_server_error_event() -> None:
     ``error`` field; the client surfaces it as RemoteBackendError."""
 
     class _BoomBackend(FakeBackend):
-        def next_distribution(self, token_ids, top_k):
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             raise RuntimeError("server side boom")
 
     remote = _make_remote(_BoomBackend(tokens={"ab": [97, 98]}, eos_token_ids=(99,)))
@@ -245,6 +245,51 @@ def test_stream_generate_marker_attribute_is_set() -> None:
     remote = _make_remote(_fake())
     assert RemoteBackend.supports_remote_stream is True
     assert hasattr(remote, "stream_generate")
+
+
+def test_stream_generate_forwards_watch_ids_and_prefix_token_ids_in_body() -> None:
+    """The unified Decode workbench's manual mode rides on
+    ``prefix_token_ids``; the inspect/generate watch panel rides on
+    ``watch_ids``. Both have to make it into the JSON body posted to
+    ``/v1/generate/stream`` -- if they don't, dsbx-serve has nothing to
+    forward to :func:`core.engine.generate` and the watched columns
+    silently render as "—" no matter what the backend supports.
+
+    We use a stub httpx-style client that captures the JSON body, then
+    drive a single token through so the call actually completes. The
+    response shape mirrors a real dsbx-serve stream.
+    """
+    captured: dict[str, object] = {}
+
+    def lines():
+        # One step + done frame -- enough to make stream_generate yield.
+        yield 'data: {"event":"step","step":{"step":0,"tokens_before":[97,98],"step_result":{"position":2,"candidates":[{"token_id":99,"text":"X","logprob":-0.1,"rank":0,"is_special":false,"sampling_mask_count":null}],"is_full_vocab":false,"chosen":{"token_id":99,"text":"X","logprob":-0.1,"rank":0,"is_special":false,"sampling_mask_count":null},"context_text":"","watched":[]},"decision":{"token_id":99,"token_text":"X","kept":[],"greedy_token_id":99,"note":""},"stop_reason":"max_tokens"}}'
+        yield 'data: {"event":"done","stop_reason":"max_tokens"}'
+
+    fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
+    # Intercept the JSON body the stream POST receives.
+    original_stream = fake.stream
+
+    def capturing_stream(method, path, *, json=None, **kw):
+        captured["json"] = json
+        return original_stream(method, path, json=json, **kw)
+
+    fake.stream = capturing_stream  # type: ignore[assignment]
+    rb = RemoteBackend("http://test", client=fake)
+    list(
+        rb.stream_generate(
+            "ab",
+            "greedy",
+            {},
+            max_tokens=1,
+            watch_ids=[111, 222],
+            prefix_token_ids=[42, 43, 44],
+        )
+    )
+    body = captured.get("json")
+    assert isinstance(body, dict)
+    assert body.get("watch_ids") == [111, 222]
+    assert body.get("prefix_token_ids") == [42, 43, 44]
 
 
 # --------------------------------------------------------------------------- #

@@ -152,6 +152,8 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
             stop_ids=tuple(int(i) for i in req.stop_ids),
             seed=int(req.seed),
             respect_eos=bool(req.respect_eos),
+            watch_ids=tuple(int(i) for i in (req.watch_ids or [])),
+            prefix_token_ids=tuple(int(i) for i in (req.prefix_token_ids or [])),
         )
 
         def event_stream() -> Iterator[bytes]:
@@ -253,6 +255,8 @@ def _run_generate_stream(
     stop_ids: tuple[int, ...],
     seed: int,
     respect_eos: bool,
+    watch_ids: tuple[int, ...] = (),
+    prefix_token_ids: tuple[int, ...] = (),
 ) -> Iterator[bytes]:
     """Drive ``core.engine.generate`` and yield SSE bytes per step.
 
@@ -276,6 +280,8 @@ def _run_generate_stream(
                 rng=rng,
                 stop_ids=stop_ids,
                 respect_eos=respect_eos,
+                watch_ids=watch_ids,
+                prefix_token_ids=prefix_token_ids,
             ):
                 event = S.StepEvent(step=S.genstep_to_wire(gs))
                 yield _sse(event.model_dump())

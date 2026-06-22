@@ -135,6 +135,16 @@ supports_new_logprobs = true           # logprobs:true + top_logprobs:N (NewLogP
 supports_logit_bias = true             # per-request token-id bias map [-100..100]
 supports_combined_echo_stream = true   # echo+stream in one request (Phase 5)
 
+# WARNING -- chat-only provider. Currently REGISTERED but INERT: the
+# decoding workbench refuses to generate / inspect / manual-decode against
+# these because the per-step "growing user message" emulation we used to
+# run on chat-only providers (re-sending ``detokenize(prompt + emitted_so_far)``
+# as a fresh user message on every step) was misleading-by-design -- the
+# displayed "continuation" was N independent first-responses rather than a
+# real continuation. Re-enable when proper chat-mode UI lands (system /
+# user / assistant turns, no per-step inspection inside an assistant turn).
+# See plan: Unify Decode Workbench, Phase 0. The block is left here as a
+# reference so re-enabling later is a one-line config change.
 [providers.nim]
 base_url = "https://integrate.api.nvidia.com/v1"
 api_key_env = "NVIDIA_API_KEY"
@@ -143,6 +153,8 @@ max_top_logprobs = 20
 supports_prompt_logprobs = false
 has_completions = false
 
+# WARNING -- chat-only provider. See the [providers.nim] banner above for
+# the rationale and the re-enable path; identical caveats apply.
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"

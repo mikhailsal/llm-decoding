@@ -255,53 +255,13 @@ def make_web_app(
             text = backend.piece(int(req.id))
         return S.PieceResponse(text=text)
 
-    # ------------------------------------------------------------ inspect
-    @app.post(
-        "/api/v1/inspect",
-        response_model=S.InspectResponse,
-        tags=["inspect"],
-        dependencies=[Depends(require_bearer)],
-    )
-    def inspect(req: S.InspectRequest) -> S.InspectResponse:
-        with _use_backend(registry, req.backend, model=req.model) as backend:
-            watches = _resolve_watches(
-                backend,
-                texts=list(req.watch_texts or []),
-                ids=list(req.watch_ids or []),
-                eos=bool(req.watch_eos),
-            )
-            caps = backend.capabilities
-            # Chat-only cloud paths: we fall back to a next-token distribution
-            # row exactly like the TUI does (see ``cmd_inspect``).
-            generated_only = (
-                backend.__class__.__name__ == "OpenAICompatBackend" and not caps.prompt_logprobs
-            )
-            if generated_only:
-                prompt_tokens = backend.tokenize(req.prompt)
-                step = backend.next_distribution(prompt_tokens, top_k=int(req.top_k))
-                step.context_text = req.prompt
-                step.watched = {w.token_id: backend.lookup_watch(step, w.token_id) for w in watches}
-                steps = [step]
-                note = (
-                    "this backend cannot score prompt tokens; showing the "
-                    "next-token distribution after the prompt instead"
-                )
-            else:
-                steps = backend.score_prompt(
-                    req.prompt,
-                    top_k=int(req.top_k),
-                    watch_ids=[w.token_id for w in watches],
-                )
-                note = ""
-            return S.InspectResponse(
-                steps=[step_to_wire(s) for s in steps],
-                watches=watches,
-                is_full_vocab=caps.full_vocab,
-                prompt_logprobs=caps.prompt_logprobs,
-                note=note,
-            )
-
     # ----------------------------------------------------------- generate
+    #
+    # The legacy ``/api/v1/inspect`` endpoint used to live here. It is
+    # gone -- inspect is now a degenerate case of generate (``max_tokens=1
+    # + include_prompt=true``) and the unified Decode workbench frontend
+    # calls ``/generate/stream`` for all three buttons. See plan: Unify
+    # Decode Workbench Phase 3.
     @app.post(
         "/api/v1/generate/stream",
         tags=["generate"],
@@ -333,11 +293,46 @@ def make_web_app(
         # stream (the registry's per-backend lock is re-entered there).
         backend_holder = _use_backend(registry, req.backend, model=req.model)
         with backend_holder as backend:
+            # Chat-only OpenAI-compat providers (NIM, OpenRouter) are
+            # registered but inert: the historical per-step "growing
+            # user message" emulation was misleading-by-design (every
+            # step re-sent ``prompt + emitted_so_far`` as a user
+            # message and grabbed the model's fresh first response as
+            # the next continuation token, yielding N independent
+            # first-responses rather than a real continuation). The
+            # underlying ``next_distribution`` now raises; we surface
+            # the same wording up front so the browser sees a clean
+            # 400 instead of a half-streamed SSE error. The frontend's
+            # backend picker also greys these out, but the route guard
+            # is the authoritative gate. Proper chat-mode UI is a
+            # separate PR; see plan: Unify Decode Workbench Phase 0.
+            if bool(getattr(backend.capabilities, "generation_disabled", False)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"backend {req.backend!r} is chat-only and "
+                        "generation is disabled until proper chat-mode "
+                        "UI lands. Use a /completions-capable provider "
+                        "(fireworks, lmstudio) or a local / remote "
+                        "dsbx backend."
+                    ),
+                )
             stop_ids = list(req.stop_ids or [])
             for s in req.stop_texts or []:
                 ids = backend.tokenize(s)
                 if len(ids) == 1:
                     stop_ids.append(ids[0])
+            # Resolve watch_texts + watch_eos into a flat list of token ids
+            # at this point so the stream loop only has to deal with
+            # ``list[int]``. The frontend reconstructs human-readable
+            # column labels from the original ``watch_texts`` / ``watch_ids``
+            # / ``watch_eos`` it sent (it knows what it asked for).
+            resolved_watch_ids = _resolve_watches(
+                backend,
+                texts=list(req.watch_texts or []),
+                ids=list(req.watch_ids or []),
+                eos=bool(req.watch_eos),
+            )
 
         # Now start the stream. The streaming body acquires the lock again
         # for its duration so the stream is internally consistent.
@@ -360,6 +355,8 @@ def make_web_app(
                     session_id=req.session_id,
                     logit_bias=_coerce_logit_bias(req.logit_bias),
                     echo_last=req.echo_last,
+                    watch_ids=list(resolved_watch_ids),
+                    prefix_token_ids=[int(i) for i in (req.prefix_token_ids or [])],
                 )
 
         return StreamingResponse(
@@ -686,15 +683,23 @@ def _snapshot(backend: Backend, entry) -> S.ManualSnapshot:
 
 def _resolve_watches(
     backend: Backend, *, texts: list[str], ids: list[int], eos: bool
-) -> list[S.ResolvedWatch]:
-    """Resolve --watch / --watch-id / --watch-eos to ResolvedWatch entries.
+) -> list[int]:
+    """Resolve ``watch_texts`` / ``watch_ids`` / ``watch_eos`` to token ids.
 
-    Mirrors :func:`decoding_sandbox.cli.app._collect_watch_targets` but does
-    *not* print warnings; instead, multi-token text watches silently use
-    their first token id (so the UI can still render a column rather than
-    nothing). The renderer can hint that case via ``piece`` text.
+    Returns a flat de-duplicated list of token ids that the generate
+    pipeline should populate in :attr:`StepResult.watched` on every step.
+    Multi-token text watches silently use their first token id (so the
+    UI can still render a column rather than nothing); the frontend
+    reconstructs human-readable header labels from the originally sent
+    ``watch_texts`` / ``watch_ids`` / ``watch_eos`` (no need for a
+    server-side label round trip).
+
+    Mirrors :func:`decoding_sandbox.cli.app._collect_watch_targets`
+    semantics minus the warning prints; the previous return type
+    (``list[ResolvedWatch]``) is gone because the inspect endpoint that
+    needed the labelled-shape wire schema was deleted in Phase 3.
     """
-    out: list[S.ResolvedWatch] = []
+    out: list[int] = []
     seen: set[int] = set()
     for txt in texts:
         toks = backend.tokenize(txt)
@@ -704,14 +709,7 @@ def _resolve_watches(
         if tid in seen:
             continue
         seen.add(tid)
-        out.append(
-            S.ResolvedWatch(
-                label=f"text:{txt!r}",
-                token_id=tid,
-                source="text",
-                piece=backend.piece(tid) if hasattr(backend, "piece") else "",
-            )
-        )
+        out.append(tid)
     for raw in ids:
         try:
             tid = int(raw)
@@ -720,24 +718,14 @@ def _resolve_watches(
         if tid in seen:
             continue
         seen.add(tid)
-        piece = backend.piece(tid) if hasattr(backend, "piece") else ""
-        suffix = f" {piece!r}" if piece else ""
-        out.append(
-            S.ResolvedWatch(label=f"id={tid}{suffix}", token_id=tid, source="id", piece=piece)
-        )
+        out.append(tid)
     if eos:
         for tid in backend.capabilities.eos_token_ids:
-            if int(tid) in seen:
+            t = int(tid)
+            if t in seen:
                 continue
-            seen.add(int(tid))
-            out.append(
-                S.ResolvedWatch(
-                    label=f"EOS:{int(tid)}",
-                    token_id=int(tid),
-                    source="eos",
-                    piece=backend.piece(int(tid)) if hasattr(backend, "piece") else "",
-                )
-            )
+            seen.add(t)
+            out.append(t)
     return out
 
 

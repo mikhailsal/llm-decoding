@@ -118,6 +118,53 @@ def test_openai_compat_next_distribution_completions_parses_dict(monkeypatch) ->
     assert mock.calls[-1]["json"]["logprobs"] == 3
 
 
+def test_openai_compat_next_distribution_populates_watched_from_top_k(monkeypatch) -> None:
+    """``watch_ids`` lights up the per-step ``watched`` map. For ids that
+    happen to be in the returned top-k we get the real candidate (with
+    the same logprob/rank the model returned); for ids that fall outside
+    the top-k we get a NaN-rank=-1 sentinel. Crucially, NO EXTRA HTTP
+    REQUEST fires -- the bias-probe trick is explicitly out of scope for
+    this PR; we just read what was already in the chunk. The same
+    bookkeeping powers the inspect / generate / manual watched columns
+    in the unified Decode workbench (Phase 4).
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [
+                    {
+                        "logprobs": {
+                            "top_logprobs": [
+                                {" Paris": -0.5, " London": -3.0, " Berlin": -4.0}
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        has_completions=True,
+    )
+    prompt_ids = backend.tokenize("The capital of France is")
+    # Resolve a watch id that IS in the top-k (" Paris") and one that
+    # ISN'T (a never-seen token id). The first comes back with a real
+    # logprob; the second comes back NaN.
+    paris_id = backend._intern(" Paris")
+    unknown_id = 999_999
+    step = backend.next_distribution(
+        prompt_ids, top_k=3, watch_ids=[paris_id, unknown_id]
+    )
+    assert paris_id in step.watched
+    assert step.watched[paris_id].logprob == pytest.approx(-0.5)
+    assert step.watched[paris_id].rank == 0
+    assert unknown_id in step.watched
+    assert step.watched[unknown_id].rank == -1
+    import math as _m
+    assert _m.isnan(step.watched[unknown_id].logprob)
+    # Only one /completions POST -- we did not fire a second probe call.
+    assert sum(1 for c in mock.calls if c["url"] == "/completions") == 1
+
+
 def test_openai_compat_new_logprobs_request_shape(monkeypatch) -> None:
     """``supports_new_logprobs`` flips the body from ``logprobs: N`` to ``true`` + ``top_logprobs``.
 
@@ -338,35 +385,62 @@ def test_openai_compat_stream_native_new_logprobs_parses_content(monkeypatch) ->
     ), gs.tokens_before
 
 
-def test_openai_compat_next_distribution_chat_parses_list(monkeypatch) -> None:
+def test_openai_compat_next_distribution_raises_on_chat_only_provider(
+    monkeypatch,
+) -> None:
+    """Chat-only providers (NIM, OpenRouter -- ``has_completions=false``) no
+    longer silently emulate ``next_distribution`` through ``/chat/completions``.
+
+    The historical emulation re-sent ``detokenize(prompt + emitted_so_far)``
+    as a fresh user message on every decode step, so the engine's
+    "continuation" was N independent first-responses to N slightly-different
+    user queries rather than a real continuation. Adjacent methods
+    (``score_prompt``, ``stream_native``, ``stream_native_with_echo``)
+    already raise on chat-only providers; this test pins that
+    ``next_distribution`` now raises the same way, surfacing the
+    inconsistency the audit caught. NO HTTP request fires -- the raise
+    short-circuits before any network I/O.
+    """
     backend, mock = _make_oc_backend(
         monkeypatch,
-        routes={
-            ("POST", "/chat/completions"): {
-                "choices": [
-                    {
-                        "logprobs": {
-                            "content": [
-                                {
-                                    "top_logprobs": [
-                                        {"token": "yes", "logprob": -0.2},
-                                        {"token": "no", "logprob": -2.0},
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-        },
+        routes={},
         has_completions=False,
     )
 
-    step = backend.next_distribution(backend.tokenize("Q"), top_k=2)
+    with pytest.raises(NotImplementedError, match="chat-completion emulation"):
+        backend.next_distribution(backend.tokenize("Q"), top_k=2)
+    assert mock.calls == []
 
-    assert [c.text for c in step.candidates] == ["yes", "no"]
-    assert step.candidates[0].rank == 0
-    assert mock.calls[-1]["url"] == "/chat/completions"
+
+def test_openai_compat_capabilities_flags_generation_disabled_for_chat_only(
+    monkeypatch,
+) -> None:
+    """Capability surface mirrors the runtime gate: chat-only providers
+    advertise ``generation_disabled=True`` plus the same human-readable
+    note the frontend renders as the picker tooltip. The route guard in
+    ``web/app.py`` is the authoritative gate; this flag is the UI-facing
+    pre-flight."""
+    backend, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=False,
+    )
+    caps = backend.capabilities
+    assert caps.generation_disabled is True
+    assert "chat-only" in caps.notes
+
+
+def test_openai_compat_capabilities_keeps_generation_enabled_for_completions(
+    monkeypatch,
+) -> None:
+    """The flip side of the chat-only gate: any provider with
+    ``has_completions=true`` (Fireworks, LM Studio) stays enabled."""
+    backend, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+    )
+    assert backend.capabilities.generation_disabled is False
 
 
 def test_openai_compat_clamps_top_k_to_provider_cap(monkeypatch) -> None:
@@ -383,14 +457,22 @@ def test_openai_compat_clamps_top_k_to_provider_cap(monkeypatch) -> None:
 
 
 def test_openai_compat_injects_require_parameters(monkeypatch) -> None:
+    """``provider.require_parameters`` rides on every outbound body so a
+    relaying provider (OpenRouter) only routes the request to upstreams
+    that honor every field we sent. Pre-Phase-0 this was exercised
+    against ``/chat/completions`` because OpenRouter was the canonical
+    chat-only require_parameters consumer; now that chat-only providers
+    are inert we exercise the same plumbing against ``/completions``
+    instead -- the actual code path that adds the field is shared
+    between the two routes (``_post`` runs before the route choice)."""
     backend, mock = _make_oc_backend(
         monkeypatch,
         routes={
-            ("POST", "/chat/completions"): {
-                "choices": [{"logprobs": {"content": [{"top_logprobs": []}]}}]
+            ("POST", "/completions"): {
+                "choices": [{"logprobs": {"top_logprobs": [{}]}}]
             }
         },
-        has_completions=False,
+        has_completions=True,
         require_parameters=True,
     )
 

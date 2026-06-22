@@ -22,7 +22,9 @@ directly. They share the GGUF on disk -- no extra download.
 
 from __future__ import annotations
 
+import math
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -210,7 +212,13 @@ class LlamaCppPyBackend(Backend):
         return i
 
     # -- Backend protocol -------------------------------------------------- #
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
         if not token_ids:
             return StepResult(position=0, candidates=[], is_full_vocab=True)
         np = self._numpy
@@ -230,7 +238,35 @@ class LlamaCppPyBackend(Backend):
             )
             for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
         ]
-        return StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
+        step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
+        # Full-vocab backend: read EXACT logprobs for each watched id
+        # from the same forward-pass tensor (no separate eval needed),
+        # including ids that fell outside the requested top_k.
+        for wid in watch_ids:
+            wid_i = int(wid)
+            if 0 <= wid_i < logp.shape[-1]:
+                lp = float(logp[wid_i])
+                # Rank = number of entries strictly greater than this one
+                # in the full distribution; cheap with numpy on vocab_size.
+                rank = int((logp > lp).sum())
+                step.watched[wid_i] = TokenCandidate(
+                    token_id=wid_i,
+                    text=self.piece(wid_i),
+                    logprob=lp,
+                    rank=rank,
+                    is_special=self._is_special(wid_i),
+                )
+            else:
+                # Out-of-vocab id: synthesize an unknown-prob candidate
+                # so the renderer can still show a row for it. Same
+                # contract as :meth:`Backend.lookup_watch`.
+                step.watched[wid_i] = TokenCandidate(
+                    token_id=wid_i,
+                    text=self.piece(wid_i),
+                    logprob=math.nan,
+                    rank=-1,
+                )
+        return step
 
     def score_prompt(
         self, prompt: str, top_k: int, watch_ids: list[int] | None = None

@@ -23,12 +23,17 @@
   <select {id} class="input font-mono" value={value} onchange={handle}>
     {#if $info.info}
       {#each $info.info.backends as b}
-        <option
-          value={b.name}
-          disabled={onlyAvailable && !b.available}
-          title={b.note || ''}
-        >
-          {b.label}{!b.available ? ` — ${b.note || 'unavailable'}` : ''}
+        {@const inert = !!b.capabilities?.generation_disabled}
+        {@const inertNote = inert ? b.capabilities?.notes || 'generation disabled' : ''}
+        {@const optDisabled = (onlyAvailable && !b.available) || inert}
+        {@const optTitle = inert ? inertNote : b.note || ''}
+        {@const suffix = !b.available
+          ? ` — ${b.note || 'unavailable'}`
+          : inert
+            ? ` — ${inertNote}`
+            : ''}
+        <option value={b.name} disabled={optDisabled} title={optTitle}>
+          {b.label}{suffix}
         </option>
       {/each}
     {/if}
