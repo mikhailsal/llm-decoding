@@ -133,11 +133,22 @@ _DEFAULTS: dict[str, Any] = {
             "supports_new_logprobs": True,
             "supports_logit_bias": True,
             "supports_combined_echo_stream": True,
+            # Curated list of models that are CURRENTLY deployed on
+            # Fireworks's serverless inference tier (verified by direct
+            # POST /v1/completions probes). Fireworks rotates serverless
+            # availability every few weeks -- the catalogue endpoint
+            # lists hundreds of "READY" models but most return 404 on
+            # an actual generate call. Keep this list synced with what
+            # the smoke probe (``scripts/probe_fireworks_models.py`` if
+            # ever ported) returns 200 for; the UI also unions the live
+            # catalogue on top of this so genuinely new releases show
+            # up automatically.
             "models": [
                 "accounts/fireworks/models/gpt-oss-120b",
                 "accounts/fireworks/models/gpt-oss-20b",
-                "accounts/fireworks/models/llama-v3p1-8b-instruct",
-                "accounts/fireworks/models/qwen2p5-7b-instruct",
+                "accounts/fireworks/models/glm-5p1",
+                "accounts/fireworks/models/glm-5p2",
+                "accounts/fireworks/models/deepseek-v4-flash",
             ],
             # Maps each Fireworks model id to a public HuggingFace repo that
             # ships the exact ``tokenizer.json`` the Fireworks deployment
@@ -148,21 +159,42 @@ _DEFAULTS: dict[str, Any] = {
             # ids in FRONT of the prompt so BOS-conditioning works on cloud
             # backends, (b) live token preview as the user types in the
             # Decode workbench, (c) auto-discovering bos_token_ids without
-            # hard-coding them per-model. Three of these four repos are
-            # public (gpt-oss-{20,120}b, Qwen2.5-7B-Instruct); the Llama
-            # repo is gated and silently degrades to "no local tokenizer"
-            # when ``HF_TOKEN`` is missing or lacks access -- the UI then
-            # disables the prepend chip-input + live preview for that
-            # model with a tooltip explaining the situation.
+            # hard-coding them per-model. ``zai-org/GLM-5`` is the public
+            # tokenizer Fireworks uses for both glm-5 point releases (5p1
+            # and 5p2 share the same vocab/specials -- only model weights
+            # differ). ``deepseek-ai/DeepSeek-V4-Flash`` is public too;
+            # its BOS uses full-width ``\uff5c`` separators (see
+            # ``_BOS_TOKEN_CANDIDATES``). A missing entry just means
+            # "no local tokenizer for this model" -- the backend still
+            # works for text-completion, just without live preview /
+            # BOS-prepend support, which the UI surfaces via greyed-out
+            # chip-inputs.
             "tokenizers": {
                 "accounts/fireworks/models/gpt-oss-120b": "openai/gpt-oss-120b",
                 "accounts/fireworks/models/gpt-oss-20b": "openai/gpt-oss-20b",
-                "accounts/fireworks/models/llama-v3p1-8b-instruct": (
-                    "meta-llama/Llama-3.1-8B-Instruct"
+                "accounts/fireworks/models/glm-5p1": "zai-org/GLM-5",
+                "accounts/fireworks/models/glm-5p2": "zai-org/GLM-5",
+                "accounts/fireworks/models/deepseek-v4-flash": (
+                    "deepseek-ai/DeepSeek-V4-Flash"
                 ),
-                "accounts/fireworks/models/qwen2p5-7b-instruct": (
-                    "Qwen/Qwen2.5-7B-Instruct"
-                ),
+            },
+            # Per-model overrides of provider-level ``supports_*`` flags.
+            # Fireworks's serverless contract is NOT uniform: the gpt-oss
+            # family was the first to add the ``sampling_mask: "count"``
+            # NewLogProbs extension, but it shipped to ``gpt-oss-120b``
+            # only -- ``gpt-oss-20b`` returns HTTP 400 ("Extra inputs
+            # are not permitted, field: 'sampling_mask'") for the exact
+            # same request body. Rather than papering over with version
+            # sniffing in the backend, we encode the divergence here:
+            # the OpenAICompatBackend's ``_provider_flag(name)`` helper
+            # consults this dict first, then falls back to the
+            # ``ProviderConfig.supports_*`` defaults. New per-model
+            # quirks ("model X dropped logit_bias") become a one-line
+            # config change rather than a code patch.
+            "model_overrides": {
+                "accounts/fireworks/models/gpt-oss-20b": {
+                    "supports_sampling_mask": False,
+                },
             },
         },
         "nim": {
@@ -264,6 +296,15 @@ class ProviderConfig:
     # ``HF_TOKEN`` is missing or lacks access; we log a warning the first
     # time and the UI surfaces a helpful tooltip.
     tokenizers: dict[str, str] = field(default_factory=dict)
+    # Per-model overrides of the provider-level ``supports_*`` flags. Maps
+    # ``model_id -> {flag_name: bool}``; the OpenAI-compat backend reads
+    # this via :meth:`flag_for_model`. Use case: a provider advertises a
+    # capability provider-wide but one model rejects it (Fireworks's
+    # ``gpt-oss-20b`` returning 400 on ``sampling_mask: "count"`` while
+    # ``gpt-oss-120b`` accepts it). Keeping the override here means the
+    # divergence is documented in config (greppable) instead of inside a
+    # request-builder branch in the backend.
+    model_overrides: dict[str, dict[str, bool]] = field(default_factory=dict)
     # -- provider-specific /completions extension flags ---------------------
     # These map 1:1 to optional fields in the Fireworks CompletionRequest
     # schema (https://docs.fireworks.ai/api-reference/post-completions).
@@ -320,6 +361,21 @@ class ProviderConfig:
             if m and m not in seen:
                 seen.append(m)
         return seen
+
+    def flag_for_model(self, model: str | None, flag_name: str) -> bool:
+        """Resolve a ``supports_*`` flag, honouring per-model overrides.
+
+        ``model`` may be ``None`` (use the provider-wide default) or any
+        string; an entry in ``model_overrides[model][flag_name]`` wins
+        over the provider-level attribute. Returns ``False`` if neither
+        an override nor a matching attribute exists -- mirroring the
+        "conservative by default" stance of the rest of ``ProviderConfig``.
+        """
+        if model:
+            override = self.model_overrides.get(model)
+            if override is not None and flag_name in override:
+                return bool(override[flag_name])
+        return bool(getattr(self, flag_name, False))
 
 
 @dataclass
@@ -421,6 +477,16 @@ def load_config(
     secrets_env_file = raw.get("secrets_env_file", "")
     if load_secrets and secrets_env_file:
         load_env_file(secrets_env_file)
+    # Also pick up a per-repository ``.env`` (if present) so contributors can
+    # park keys that are specific to this checkout -- chiefly ``HF_TOKEN``
+    # for the tokenizer-download path used by ``OpenAICompatBackend``.
+    # ``load_env_file`` never overwrites existing values, so the central
+    # ``secrets_env_file`` still wins when both define the same key. This
+    # was added after a confusing UX bug where the user dropped
+    # ``HF_TOKEN`` in ``llm-decoding/.env`` expecting it to be honoured;
+    # nothing read that file and gated repos kept failing silently.
+    if load_secrets:
+        load_env_file(REPO_ROOT / ".env")
 
     storage = StorageConfig(
         hf_home=raw["storage"]["hf_home"],
@@ -442,6 +508,11 @@ def load_config(
             has_completions=bool(pdata.get("has_completions", False)),
             models=list(pdata.get("models", [])),
             tokenizers=dict(pdata.get("tokenizers", {}) or {}),
+            model_overrides={
+                str(k): {str(fk): bool(fv) for fk, fv in (v or {}).items()}
+                for k, v in (pdata.get("model_overrides") or {}).items()
+                if isinstance(v, dict)
+            },
             supports_ignore_eos=bool(pdata.get("supports_ignore_eos", False)),
             supports_perf_metrics=bool(pdata.get("supports_perf_metrics", False)),
             supports_raw_output=bool(pdata.get("supports_raw_output", False)),

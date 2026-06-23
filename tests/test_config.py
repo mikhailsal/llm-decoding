@@ -87,6 +87,42 @@ def test_load_config_explicit_path_raises_when_missing(tmp_path) -> None:
         cfg_mod.load_config(tmp_path / "absent.toml")
 
 
+def test_load_config_pulls_in_repo_root_env_file(tmp_path, monkeypatch) -> None:
+    """A ``<repo>/.env`` is loaded alongside ``secrets_env_file``.
+
+    Without this contributors who park keys (chiefly ``HF_TOKEN``) in
+    the project-local ``.env`` -- the standard idiom -- find that the
+    web server silently ignores them, because only the central
+    ``secrets_env_file`` is sourced. The fix loads BOTH (central
+    first, then repo); ``load_env_file`` never overwrites existing
+    values so the central file still wins when both define a key.
+    """
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    (tmp_path / "config.toml").write_text("")
+    (tmp_path / ".env").write_text("HF_TOKEN=hf_test_repo_local\n")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    cfg_mod.load_config(load_secrets=True)
+
+    assert os.environ.get("HF_TOKEN") == "hf_test_repo_local"
+
+
+def test_load_config_repo_env_does_not_overwrite_central(tmp_path, monkeypatch) -> None:
+    """Central ``secrets_env_file`` wins when both define the same key."""
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    central = tmp_path / "central.env"
+    central.write_text("HF_TOKEN=central_wins\n")
+    (tmp_path / "config.toml").write_text(
+        f'secrets_env_file = "{central}"\n'
+    )
+    (tmp_path / ".env").write_text("HF_TOKEN=repo_loses\n")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    cfg_mod.load_config(load_secrets=True)
+
+    assert os.environ["HF_TOKEN"] == "central_wins"
+
+
 def test_provider_lookup_raises_keyerror_for_unknown_name() -> None:
     cfg = cfg_mod.load_config(load_secrets=False)
     with pytest.raises(KeyError, match="Unknown provider"):

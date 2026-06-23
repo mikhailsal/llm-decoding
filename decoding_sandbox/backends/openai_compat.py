@@ -160,6 +160,21 @@ class OpenAICompatBackend(Backend):
         # the helpers are no-ops.
         self._active_usage: usage_mod.UsageSink | None = None
 
+    def _provider_flag(self, name: str) -> bool:
+        """Resolve a ``supports_*`` flag with per-model override applied.
+
+        Thin wrapper around :meth:`ProviderConfig.flag_for_model` bound
+        to ``self.model``. Use this EVERYWHERE the backend reads a
+        ``self.provider.supports_*`` flag so a model-specific quirk
+        (e.g. Fireworks's ``gpt-oss-20b`` rejecting
+        ``sampling_mask: "count"``) automatically reaches the wire
+        body, the capabilities envelope, and any consumer that asks
+        ``does this model support X?``. Otherwise the override would
+        only kick in for ONE call site and silently leak the broken
+        flag elsewhere.
+        """
+        return self.provider.flag_for_model(self.model, name)
+
     def set_active_usage(self, sink: usage_mod.UsageSink | None) -> None:
         """Bind a usage sink for the duration of the next backend call(s).
 
@@ -199,6 +214,14 @@ class OpenAICompatBackend(Backend):
         "<|startoftext|>",       # gpt-oss family
         "<|begin_of_text|>",     # Llama 3.x
         "<s>",                   # Llama 2, Mistral
+        # DeepSeek uses U+FF5C FULLWIDTH VERTICAL LINE (｜) instead of the
+        # ASCII pipe -- the same string with regular ``|`` won't match.
+        # Two variants exist in the wild: the original (V2/V3) form
+        # spells "begin_of_sentence" with a U+2581 LOWER ONE EIGHTH BLOCK
+        # (▁) between words, and the V3.1+ form uses underscores. Try
+        # both so the discovery survives a model upgrade.
+        "<\uff5cbegin\u2581of\u2581sentence\uff5c>",
+        "<\uff5cbegin_of_sentence\uff5c>",
         "<|im_start|>",          # Qwen / ChatML chat marker (best-effort)
         "<|endoftext|>",         # GPT-2, Qwen Base (fallback only)
     )
@@ -262,6 +285,16 @@ class OpenAICompatBackend(Backend):
         from huggingface_hub import hf_hub_download
         from tokenizers import Tokenizer
 
+        # ``huggingface_hub`` reads ``HF_TOKEN`` from the environment when
+        # ``token=None``, but a project-local ``.env`` (loaded by
+        # ``decoding_sandbox.core.config.load_config``) only reaches the
+        # current process's environment -- which is enough here. Passing
+        # it explicitly via ``token=os.environ.get(...)`` would be
+        # equivalent; we leave the default so ``HF_TOKEN`` ALSO unlocks
+        # other paths the library may take (cached metadata refresh,
+        # offline lookups). Gated repos still fail when the token lacks
+        # access to the repo; the surrounding ``_ensure_tokenizer``
+        # catches that and degrades gracefully.
         path = hf_hub_download(repo_id=repo, filename="tokenizer.json")
         tok = Tokenizer.from_file(path)
         log.info(
@@ -418,7 +451,7 @@ class OpenAICompatBackend(Backend):
                 "chat-only provider; generation disabled until proper "
                 "chat-mode UI lands"
             )
-        elif self.provider.supports_prompt_logprobs:
+        elif self._provider_flag("supports_prompt_logprobs"):
             notes = "whole-context via echo"
         else:
             notes = "raw /completions"
@@ -441,20 +474,20 @@ class OpenAICompatBackend(Backend):
         return Capabilities(
             name=f"{self.provider.name}:{self.model}",
             full_vocab=False,
-            prompt_logprobs=self.provider.supports_prompt_logprobs,
+            prompt_logprobs=self._provider_flag("supports_prompt_logprobs"),
             max_top_logprobs=self.provider.max_top_logprobs,
             can_force_token=self.provider.has_completions,
             notes=notes,
             # Provider extension flags surfaced to the UI so the browser
             # can adapt without hard-coding provider names.
-            supports_ignore_eos=bool(self.provider.supports_ignore_eos),
-            supports_perf_metrics=bool(self.provider.supports_perf_metrics),
-            supports_service_tier=bool(self.provider.supports_service_tier),
-            supports_sampling_mask=bool(self.provider.supports_sampling_mask),
-            supports_raw_output=bool(self.provider.supports_raw_output),
-            supports_logit_bias=bool(self.provider.supports_logit_bias),
+            supports_ignore_eos=bool(self._provider_flag("supports_ignore_eos")),
+            supports_perf_metrics=bool(self._provider_flag("supports_perf_metrics")),
+            supports_service_tier=bool(self._provider_flag("supports_service_tier")),
+            supports_sampling_mask=bool(self._provider_flag("supports_sampling_mask")),
+            supports_raw_output=bool(self._provider_flag("supports_raw_output")),
+            supports_logit_bias=bool(self._provider_flag("supports_logit_bias")),
             supports_combined_echo_stream=bool(
-                self.provider.supports_combined_echo_stream
+                self._provider_flag("supports_combined_echo_stream")
             ),
             generation_disabled=is_chat_only,
             # Populated from the local HF tokenizer's special-tokens
@@ -509,9 +542,9 @@ class OpenAICompatBackend(Backend):
             return False
         if sampler_name in _NATIVE_SAMPLERS:
             return True
-        if sampler_name == "typical" and self.provider.supports_typical_p_native:
+        if sampler_name == "typical" and self._provider_flag("supports_typical_p_native"):
             return True
-        if sampler_name == "mirostat" and self.provider.supports_mirostat:
+        if sampler_name == "mirostat" and self._provider_flag("supports_mirostat"):
             return True
         return False
 
@@ -524,12 +557,12 @@ class OpenAICompatBackend(Backend):
         # prompt tokens) that turns the educational sandbox into a
         # proper "where is the time going" debugger. Cheap to send; the
         # server ignores the field when unsupported.
-        if self.provider.supports_perf_metrics:
+        if self._provider_flag("supports_perf_metrics"):
             body.setdefault("perf_metrics_in_response", True)
         # Same justification for ``raw_output``: cheap diagnostics on
         # every Fireworks call. The web layer flushes it via a dedicated
         # SSE frame so consumers that don't care just skip it.
-        if self.provider.supports_raw_output:
+        if self._provider_flag("supports_raw_output"):
             body.setdefault("raw_output", True)
         r = self._request("post", path, json=body)
         data = r.json()
@@ -695,7 +728,7 @@ class OpenAICompatBackend(Backend):
             self._attach_logprobs_request(body, top_k=top)
             data = self._post("/completions", body)
             lp = (data.get("choices") or [{}])[0].get("logprobs") or {}
-            if self.provider.supports_new_logprobs and "content" in lp:
+            if self._provider_flag("supports_new_logprobs") and "content" in lp:
                 # NewLogProbs (Fireworks): logprobs.content[0].top_logprobs[]
                 # carries real token_ids; the per-position
                 # ``sampling_mask_count`` rides on the same content entry.
@@ -770,10 +803,10 @@ class OpenAICompatBackend(Backend):
         form. Centralized here so every callsite (next_distribution,
         score_prompt, stream_native) stays in sync.
         """
-        if self.provider.supports_new_logprobs:
+        if self._provider_flag("supports_new_logprobs"):
             body["logprobs"] = True
             body["top_logprobs"] = int(top_k)
-            if self.provider.supports_sampling_mask:
+            if self._provider_flag("supports_sampling_mask"):
                 # 'count' asks the server to report how many vocab
                 # entries survived the sampler filter at each position;
                 # alternative values like 'mask' would return a full
@@ -817,7 +850,7 @@ class OpenAICompatBackend(Backend):
         "actual" prompt token at that position, and labeling the
         provider's continuation as one was misleading.
         """
-        if not self.provider.supports_prompt_logprobs:
+        if not self._provider_flag("supports_prompt_logprobs"):
             raise NotImplementedError(
                 f"{self.provider.name!r} has no prompt-logprob support; "
                 "this backend cannot do whole-context inspection. Check "
@@ -855,7 +888,7 @@ class OpenAICompatBackend(Backend):
         data = self._post("/completions", body)
         lp = (data.get("choices") or [{}])[0].get("logprobs") or {}
 
-        if self.provider.supports_new_logprobs and "content" in lp:
+        if self._provider_flag("supports_new_logprobs") and "content" in lp:
             return self._score_prompt_new_logprobs(lp, watch_ids)
         return self._score_prompt_legacy(lp, watch_ids)
 
@@ -1104,7 +1137,7 @@ class OpenAICompatBackend(Backend):
         # 'count'``) is decided by the provider's capabilities.
         self._attach_logprobs_request(body, top_k=top)
         if not respect_eos:
-            if self.provider.supports_ignore_eos:
+            if self._provider_flag("supports_ignore_eos"):
                 # The provider has the Fireworks-style escape hatch:
                 # ship ``ignore_eos: true`` and the model keeps emitting
                 # tokens past its EOS. The UI's "respect EOS" checkbox
@@ -1119,12 +1152,12 @@ class OpenAICompatBackend(Backend):
                     f"{self.provider.name!r} has no ignore_eos field; "
                     "respect_eos=False has no effect on this backend",
                 )
-        if self.provider.supports_perf_metrics:
+        if self._provider_flag("supports_perf_metrics"):
             # Same justification as _post: cheap to request, gives the UI
             # a server-timings panel. Ignored by providers that don't
             # implement it.
             body["perf_metrics_in_response"] = True
-        if self.provider.supports_raw_output:
+        if self._provider_flag("supports_raw_output"):
             # Always-on for Fireworks: ``raw_output: true`` makes the
             # provider attach a diagnostics block (prompt_fragments,
             # prompt_token_ids, grammar, ...) describing what the model
@@ -1136,11 +1169,11 @@ class OpenAICompatBackend(Backend):
             # this token?" often is "because the chat template ate your
             # system prompt".
             body["raw_output"] = True
-        if service_tier and self.provider.supports_service_tier:
+        if service_tier and self._provider_flag("supports_service_tier"):
             body["service_tier"] = str(service_tier)
-        if prompt_cache_key and self.provider.supports_prompt_cache_key:
+        if prompt_cache_key and self._provider_flag("supports_prompt_cache_key"):
             body["prompt_cache_key"] = str(prompt_cache_key)
-        if logit_bias and self.provider.supports_logit_bias:
+        if logit_bias and self._provider_flag("supports_logit_bias"):
             # OpenAI-shaped: {"<token_id>": float in [-100, 100]}.
             # Filter out NaN / out-of-range / non-int keys here rather
             # than at the wire-encoding boundary so we surface a clear
@@ -1179,7 +1212,7 @@ class OpenAICompatBackend(Backend):
         # Empty dict short-circuits a no-op down the stack so we don't
         # have to special-case "is there anything to send?" later.
         extra_headers: dict[str, str] = {}
-        if session_id and self.provider.supports_session_affinity:
+        if session_id and self._provider_flag("supports_session_affinity"):
             extra_headers["x-session-affinity"] = str(session_id)
             extra_headers["x-multi-turn-session-id"] = str(session_id)
 
@@ -1236,7 +1269,7 @@ class OpenAICompatBackend(Backend):
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
-            if self.provider.supports_new_logprobs and "content" in lp_obj:
+            if self._provider_flag("supports_new_logprobs") and "content" in lp_obj:
                 # NewLogProbs streaming: each chunk carries a content[]
                 # of per-position entries with real token_ids and
                 # sampling_mask_count. The legacy parallel-arrays
@@ -1274,7 +1307,7 @@ class OpenAICompatBackend(Backend):
         # terminal step (the provider sends it in the *last* chunk).
         total = len(pending)
         for i, (tok_id_real, tok_text, tok_lp, top_entry, smc) in enumerate(pending):
-            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
                 cands = self._cands_from_new_logprobs(top_entry)
             else:
                 cands = self._candidates_from_top_entry(top_entry)
@@ -1392,7 +1425,7 @@ class OpenAICompatBackend(Backend):
                 f"{self.provider.name!r} has no /completions endpoint; "
                 "stream_native_with_echo requires the raw text-completion path."
             )
-        if not self.provider.supports_combined_echo_stream:
+        if not self._provider_flag("supports_combined_echo_stream"):
             raise NotImplementedError(
                 f"{self.provider.name!r} doesn't advertise "
                 "supports_combined_echo_stream; use score_prompt + "
@@ -1435,14 +1468,14 @@ class OpenAICompatBackend(Backend):
             "echo": True,
         }
         self._attach_logprobs_request(body, top_k=top)
-        if echo_last is not None and self.provider.supports_echo_last:
+        if echo_last is not None and self._provider_flag("supports_echo_last"):
             # ``echo_last=N`` (Fireworks) returns logprobs only for the
             # last N tokens of the prompt instead of every position.
             # Saves wire bytes + parsing CPU when the user really only
             # cares about the recent context.
             body["echo_last"] = int(echo_last)
         if not respect_eos:
-            if self.provider.supports_ignore_eos:
+            if self._provider_flag("supports_ignore_eos"):
                 body["ignore_eos"] = True
             else:
                 usage_mod.add_note(
@@ -1450,15 +1483,15 @@ class OpenAICompatBackend(Backend):
                     f"{self.provider.name!r} has no ignore_eos field; "
                     "respect_eos=False has no effect on this backend",
                 )
-        if self.provider.supports_perf_metrics:
+        if self._provider_flag("supports_perf_metrics"):
             body["perf_metrics_in_response"] = True
-        if self.provider.supports_raw_output:
+        if self._provider_flag("supports_raw_output"):
             body["raw_output"] = True
-        if service_tier and self.provider.supports_service_tier:
+        if service_tier and self._provider_flag("supports_service_tier"):
             body["service_tier"] = str(service_tier)
-        if prompt_cache_key and self.provider.supports_prompt_cache_key:
+        if prompt_cache_key and self._provider_flag("supports_prompt_cache_key"):
             body["prompt_cache_key"] = str(prompt_cache_key)
-        if logit_bias and self.provider.supports_logit_bias:
+        if logit_bias and self._provider_flag("supports_logit_bias"):
             cleaned: dict[str, float] = {}
             for k, v in logit_bias.items():
                 try:
@@ -1483,7 +1516,7 @@ class OpenAICompatBackend(Backend):
         if self.provider.require_parameters:
             body.setdefault("provider", {})["require_parameters"] = True
         extra_headers: dict[str, str] = {}
-        if session_id and self.provider.supports_session_affinity:
+        if session_id and self._provider_flag("supports_session_affinity"):
             extra_headers["x-session-affinity"] = str(session_id)
             extra_headers["x-multi-turn-session-id"] = str(session_id)
 
@@ -1542,7 +1575,7 @@ class OpenAICompatBackend(Backend):
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
-            if self.provider.supports_new_logprobs and "content" in lp_obj:
+            if self._provider_flag("supports_new_logprobs") and "content" in lp_obj:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
                         continue
@@ -1643,7 +1676,7 @@ class OpenAICompatBackend(Backend):
             _text_off,
             _has_signal,
         ) in enumerate(prompt_records):
-            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
                 cands = self._cands_from_new_logprobs(top_entry)
             else:
                 cands = self._candidates_from_top_entry(top_entry)
@@ -1708,7 +1741,7 @@ class OpenAICompatBackend(Backend):
             _text_off,
             _has_signal,
         ) in enumerate(emit_records):
-            if isinstance(top_entry, list) and self.provider.supports_new_logprobs:
+            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
                 cands = self._cands_from_new_logprobs(top_entry)
             else:
                 cands = self._candidates_from_top_entry(top_entry)
@@ -1956,7 +1989,7 @@ class OpenAICompatBackend(Backend):
         if pres != 0.0:
             out["presence_penalty"] = pres
         rep = float(params.get("repetition_penalty", 1.0) or 1.0)
-        if rep != 1.0 and self.provider.supports_repetition_penalty:
+        if rep != 1.0 and self._provider_flag("supports_repetition_penalty"):
             out["repetition_penalty"] = rep
         return out
 

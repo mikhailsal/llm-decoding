@@ -49,6 +49,15 @@
      * its tokenizer failed to load (gated repo without HF_TOKEN).
      */
     enabled: boolean;
+    /**
+     * Token ids the user has staged to splice in FRONT of the prompt
+     * (the "prepend tokens" chip-input on the workbench). Rendered as
+     * a separate visual group at the head of the chip row, so the
+     * preview matches what the backend will actually receive in
+     * token-array prompt mode: ``[...prependIds, ...promptIds]``.
+     * Empty list = no prepend block rendered (default).
+     */
+    prependIds?: number[];
     /** ms to wait after the last keystroke before issuing a request. */
     debounceMs?: number;
     /** Show at most this many chips inline; the rest fold into a tail. */
@@ -60,6 +69,7 @@
     backend,
     model,
     enabled,
+    prependIds = [],
     debounceMs = 250,
     maxVisibleChips = 200
   }: Props = $props();
@@ -67,6 +77,17 @@
   interface TokenizePreview {
     ids: number[];
     pieces: string[];
+  }
+
+  // Resolved per-id surface form for prepend chips. We piggy-back on
+  // the existing /api/v1/piece endpoint via a tiny in-component cache
+  // so a list of e.g. [199998] is rendered as "<|startoftext|>" instead
+  // of the bare id. The map persists across renders within this
+  // component instance, so swapping models invalidates it via the
+  // ``key`` we include in the lookup.
+  let pieceCache = $state<Record<string, string>>({});
+  function cacheKey(b: string, m: string, id: number): string {
+    return `${b}|${m}|${id}`;
   }
 
   let preview = $state<TokenizePreview | null>(null);
@@ -215,9 +236,47 @@
         })
       : []
   );
+  // Prepend chips: derived directly from the staged ids. Pieces come
+  // from the in-component cache populated by the on-mount fetcher
+  // below; missing entries render as the bare id wrapped in `[id=...]`
+  // until the fetch resolves -- never blank, so the row visibly
+  // matches "your prepend chip-input + a comma + the prompt chips".
+  let prependChips = $derived<Chip[]>(
+    prependIds.map((id) => {
+      const cached = pieceCache[cacheKey(backend, model, id)];
+      const piece = cached ?? `[id=${id}]`;
+      return { id, piece, isSpecial: isSpecialText(piece) };
+    })
+  );
+  // On any change to (backend, model, prependIds) make sure we have a
+  // resolved piece for every id; skip ids we already cached.
+  $effect(() => {
+    if (!backend || !enabled) return;
+    const missing = prependIds.filter(
+      (id) => pieceCache[cacheKey(backend, model, id)] === undefined
+    );
+    if (missing.length === 0) return;
+    // Sequential fetches: prepend lists are typically 1-3 ids -- a
+    // batch endpoint would be premature.
+    for (const id of missing) {
+      const k = cacheKey(backend, model, id);
+      pieceCache = { ...pieceCache, [k]: '' };
+      void apiFetch<{ text: string }>('/api/v1/piece', {
+        method: 'POST',
+        body: JSON.stringify({ backend, model, id })
+      })
+        .then((r) => {
+          pieceCache = { ...pieceCache, [k]: r.text || `[id=${id}]` };
+        })
+        .catch(() => {
+          pieceCache = { ...pieceCache, [k]: `[id=${id}]` };
+        });
+    }
+  });
   let truncated = $derived(chips.length > maxVisibleChips);
   let shownChips = $derived(truncated ? chips.slice(0, maxVisibleChips) : chips);
   let isFresh = $derived(previewKey === inputKey());
+  let totalCount = $derived(prependChips.length + chips.length);
 </script>
 
 {#if enabled}
@@ -225,11 +284,14 @@
     <div class="tok-preview-header">
       <span
         class="label"
-        title="Tokens shown here are produced LOCALLY using the same tokenizer the provider runs server-side ({model}). Use this to learn how your text becomes tokens before generation. Click a chip to copy its id."
+        title="Tokens shown here are produced LOCALLY using the same tokenizer the provider runs server-side ({model}). The leading group (if any) is the staged 'prepend tokens' — they get spliced in FRONT of the prompt and the backend sees [...prepend, ...prompt] as one continuous sequence."
       >
         token preview
-        {#if preview}
-          · <span class="tok-count">{chips.length} {chips.length === 1 ? 'token' : 'tokens'}</span>
+        {#if preview || prependChips.length > 0}
+          · <span class="tok-count">{totalCount} {totalCount === 1 ? 'token' : 'tokens'}</span>
+          {#if prependChips.length > 0}
+            <span class="tok-prepend-count">({prependChips.length} prepend + {chips.length} prompt)</span>
+          {/if}
         {/if}
         {#if busy}
           · <span class="tok-busy">…</span>
@@ -242,13 +304,27 @@
         <span class="tok-err" title={error}>{error}</span>
       {/if}
     </div>
-    {#if preview === null && !busy && !error}
+    {#if preview === null && prependChips.length === 0 && !busy && !error}
       <div class="tok-empty">type to see how your prompt becomes tokens…</div>
-    {:else if preview && chips.length === 0}
-      <div class="tok-empty">(empty prompt)</div>
     {:else}
       <div class="tok-chips">
-        {#each shownChips as chip, i (i)}
+        {#each prependChips as chip, i (`prep-${i}`)}
+          <span class="tok-chip tok-chip-prepend" title={`prepend id: ${chip.id}`}>
+            <TokenInline
+              text={chip.piece || ''}
+              isSpecial={chip.isSpecial}
+              showMarkers={true}
+            />
+            <span class="tok-id">{chip.id}</span>
+          </span>
+        {/each}
+        {#if prependChips.length > 0 && chips.length > 0}
+          <span class="tok-sep" aria-hidden="true">┊</span>
+        {/if}
+        {#if preview && chips.length === 0 && prependChips.length > 0}
+          <span class="tok-chip-more">(empty prompt)</span>
+        {/if}
+        {#each shownChips as chip, i (`prom-${i}`)}
           <span class="tok-chip" title={`id: ${chip.id}`}>
             <TokenInline
               text={chip.piece || ''}
@@ -322,6 +398,21 @@
     border-radius: 0.25rem;
     line-height: 1.3;
   }
+  .tok-chip-prepend {
+    background: rgba(56, 189, 248, 0.10);
+    border-color: rgba(56, 189, 248, 0.45);
+  }
+  .tok-sep {
+    color: #888;
+    align-self: center;
+    font-size: 0.9rem;
+    user-select: none;
+  }
+  .tok-prepend-count {
+    color: #94a3b8;
+    margin-left: 0.25rem;
+    font-style: italic;
+  }
   .tok-id {
     font-size: 0.65rem;
     color: #888;
@@ -341,6 +432,10 @@
   :global(.dark) .tok-chip {
     background: rgba(255, 255, 255, 0.04);
     border-color: rgba(255, 255, 255, 0.1);
+  }
+  :global(.dark) .tok-chip-prepend {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.55);
   }
   :global(.dark) .tok-id {
     color: #aaa;

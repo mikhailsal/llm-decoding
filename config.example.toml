@@ -135,6 +135,21 @@ supports_new_logprobs = true           # logprobs:true + top_logprobs:N (NewLogP
 supports_logit_bias = true             # per-request token-id bias map [-100..100]
 supports_combined_echo_stream = true   # echo+stream in one request (Phase 5)
 
+# Curated list of models known to be deployed on serverless inference
+# today. Fireworks rotates serverless availability every few weeks, so
+# treat this as a starting set -- the UI also unions in whatever the
+# live /v1/accounts/fireworks/models endpoint returns at runtime. Models
+# not on serverless return 404 on /completions even if "READY" in the
+# catalogue. Add new entries by probing first (one POST with prompt="hi",
+# max_tokens=1, expect 200).
+models = [
+  "accounts/fireworks/models/gpt-oss-120b",
+  "accounts/fireworks/models/gpt-oss-20b",
+  "accounts/fireworks/models/glm-5p1",
+  "accounts/fireworks/models/glm-5p2",
+  "accounts/fireworks/models/deepseek-v4-flash",
+]
+
 # Per-model HuggingFace repo that ships the matching ``tokenizer.json``.
 # Fetched on first use via ``hf_hub_download`` and cached in
 # ~/.cache/huggingface/hub. Drives three features:
@@ -142,16 +157,29 @@ supports_combined_echo_stream = true   # echo+stream in one request (Phase 5)
 #     the "fill BOS" workflow works on cloud backends too);
 #   * live token preview as the user types in the Decode workbench;
 #   * auto-discovery of bos_token_ids (no per-model hardcoding).
-# Most Fireworks models are open-weights; three of the defaults below are
-# public on the HuggingFace Hub. The Llama repo is gated -- if you don't
-# have ``HF_TOKEN`` configured with access to meta-llama, that one model
-# gracefully degrades to "no local tokenizer" and the UI surfaces the
-# reason in the tooltip on the prepend chip-input / preview panel.
+# All defaults below are public on the HuggingFace Hub; gated repos
+# (Llama family) still work if ``HF_TOKEN`` is configured with access --
+# drop the token into a project-local ``.env`` and ``load_config`` picks
+# it up. Missing entries gracefully degrade to "no local tokenizer for
+# this model" and the UI dims the prepend chip-input + live preview.
 [providers.fireworks.tokenizers]
 "accounts/fireworks/models/gpt-oss-120b" = "openai/gpt-oss-120b"
 "accounts/fireworks/models/gpt-oss-20b" = "openai/gpt-oss-20b"
-"accounts/fireworks/models/llama-v3p1-8b-instruct" = "meta-llama/Llama-3.1-8B-Instruct"
-"accounts/fireworks/models/qwen2p5-7b-instruct" = "Qwen/Qwen2.5-7B-Instruct"
+"accounts/fireworks/models/glm-5p1" = "zai-org/GLM-5"
+"accounts/fireworks/models/glm-5p2" = "zai-org/GLM-5"
+"accounts/fireworks/models/deepseek-v4-flash" = "deepseek-ai/DeepSeek-V4-Flash"
+
+# Per-model overrides of provider-level ``supports_*`` flags. Fireworks's
+# serverless contract is NOT uniform: gpt-oss-120b accepts the
+# NewLogProbs ``sampling_mask: "count"`` extension, gpt-oss-20b rejects
+# it with HTTP 400 ("Extra inputs are not permitted, field:
+# 'sampling_mask'"). The OpenAI-compat backend's ``_provider_flag(name)``
+# helper consults this table first, then falls back to the provider-
+# level attribute, so a future divergence is a one-line config tweak
+# instead of a code patch. The override key is the FULL model id
+# (matches the value sent on the wire).
+[providers.fireworks.model_overrides."accounts/fireworks/models/gpt-oss-20b"]
+supports_sampling_mask = false
 
 # WARNING -- chat-only provider. Currently REGISTERED but INERT: the
 # decoding workbench refuses to generate / inspect / manual-decode against

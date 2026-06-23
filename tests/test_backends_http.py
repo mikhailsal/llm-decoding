@@ -853,6 +853,73 @@ def test_openai_compat_gracefully_degrades_when_tokenizer_load_fails(
         backend2.score_prompt("hi", top_k=5, prepend_token_ids=[1])
 
 
+def test_openai_compat_per_model_override_drops_sampling_mask_from_body(
+    monkeypatch,
+) -> None:
+    """``model_overrides`` flips a supports_* flag for ONE model only.
+
+    Fireworks's ``gpt-oss-20b`` returns HTTP 400 ("Extra inputs are
+    not permitted, field: 'sampling_mask'") for the exact request
+    body the 120b model accepts. The override lives in the provider
+    config; the backend's ``_provider_flag`` helper must consult it
+    so neither the request body NOR the capabilities envelope carries
+    the disallowed field. Without per-model gating ANY caller routing
+    through gpt-oss-20b would silently 400 every time.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={
+            ("POST", "/completions"): {
+                "choices": [
+                    {
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "x",
+                                    "token_id": 7,
+                                    "logprob": -0.1,
+                                    "top_logprobs": [
+                                        {"token": "x", "token_id": 7, "logprob": -0.1},
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        supports_new_logprobs=True,
+        supports_sampling_mask=True,
+    )
+    backend.provider.model_overrides = {
+        "test/m": {"supports_sampling_mask": False},
+    }
+    # Capabilities envelope must reflect the override (the UI gates the
+    # "eligible after filters" column on this flag; a leaked True would
+    # leave the column rendering "?" everywhere).
+    assert backend.capabilities.supports_sampling_mask is False
+    # And the wire body must NOT carry the field.
+    backend.next_distribution([10], top_k=3)
+    body = mock.calls[-1]["json"]
+    assert "sampling_mask" not in body
+    # Sanity: a sibling model on the same provider without the override
+    # still ships the field.
+    sibling = OpenAICompatBackend(
+        backend.provider,
+        model="test/other-model",
+        max_retries=0,
+        sleep=lambda _w: None,
+    )
+    # Reuse the same mock so we can read body[2]; in practice the new
+    # backend instantiates its own client but the same MockHTTPClient
+    # object answers because httpx.Client was patched at module level.
+    sibling._client = mock  # noqa: SLF001
+    assert sibling.capabilities.supports_sampling_mask is True
+    sibling.next_distribution([10], top_k=3)
+    body = mock.calls[-1]["json"]
+    assert body.get("sampling_mask") == "count"
+
+
 def test_openai_compat_score_prompt_switches_to_token_array_on_prepend(
     monkeypatch,
 ) -> None:

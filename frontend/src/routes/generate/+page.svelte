@@ -230,13 +230,27 @@
     $info.info?.backends.find((b) => b.name === backend) ?? null
   );
 
+  // Resolve the capabilities envelope for the CURRENTLY-SELECTED model.
+  // Cloud providers carry a per-model map (``models_caps``) so
+  // model-specific quirks reach the UI without leaking between models:
+  // e.g. picking glm-5p1 shouldn't inherit gpt-oss-120b's BOS, and
+  // gpt-oss-20b should NOT pretend it supports ``sampling_mask``
+  // (the upstream returns HTTP 400 for that field). For remote /
+  // local backends ``models_caps`` is empty and the fallback to
+  // ``backendInfo.capabilities`` keeps behaviour identical to before.
+  let activeCaps = $derived<BackendInfo['capabilities'] | null>(
+    (model ? (backendInfo?.models_caps?.[model] ?? null) : null)
+      ?? backendInfo?.capabilities
+      ?? null
+  );
+
   // ``respect EOS`` is locked only for cloud backends that DON'T advertise
   // the Fireworks-style ``ignore_eos`` field. Fireworks unlocks this
   // checkbox (we ship ``ignore_eos: true`` on the wire); NIM, OpenRouter,
   // and LM Studio still leave it pinned because they have no documented
   // escape hatch -- the upstream silently halts on EOS no matter what.
   let respectEosLocked = $derived<boolean>(
-    backendInfo?.family === 'cloud' && !backendInfo?.capabilities?.supports_ignore_eos
+    backendInfo?.family === 'cloud' && !activeCaps?.supports_ignore_eos
   );
   $effect(() => {
     if (respectEosLocked && !respectEos) respectEos = true;
@@ -245,13 +259,13 @@
   // (Fireworks). Other backends silently ignore the field anyway, but
   // showing a knob that does nothing is bad UX.
   let serviceTierSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_service_tier
+    !!activeCaps?.supports_service_tier
   );
   // Server-timings panel visibility tracks supports_perf_metrics; we only
   // render it when (a) the backend can report metrics and (b) we actually
   // received a non-empty perf frame in the last run.
   let perfPanelSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_perf_metrics
+    !!activeCaps?.supports_perf_metrics
   );
   // ``sampling_mask=count`` tells us how many tokens survived
   // server-side sampling filters at each position. When the backend
@@ -260,16 +274,16 @@
   // otherwise the column would just render "?" everywhere which is
   // worse than not showing it at all.
   let samplingMaskSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_sampling_mask
+    !!activeCaps?.supports_sampling_mask
   );
   let rawOutputSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_raw_output
+    !!activeCaps?.supports_raw_output
   );
   let logitBiasSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_logit_bias
+    !!activeCaps?.supports_logit_bias
   );
   let combinedEchoStreamSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_combined_echo_stream
+    !!activeCaps?.supports_combined_echo_stream
   );
   // Backends that can accept ``prepend_token_ids`` on score_prompt /
   // generate -- i.e. those that tokenize locally and can splice extra
@@ -279,7 +293,7 @@
   // prepend chip-input gate on this flag so a click never goes through
   // a path where it would silently no-op.
   let prependSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_prepend_token_ids
+    !!activeCaps?.supports_prepend_token_ids
   );
   // Whether the backend exposes a real local tokenizer through
   // ``/api/v1/tokenize`` (real ids per word piece, not the synthetic
@@ -291,7 +305,7 @@
   // (Fireworks gpt-oss / Qwen out of the box; Llama once HF_TOKEN
   // grants access to the gated repo).
   let localTokenizeSupported = $derived<boolean>(
-    !!backendInfo?.capabilities?.supports_local_tokenize
+    !!activeCaps?.supports_local_tokenize
   );
   // The model's canonical BOS token id(s), as reported by the backend.
   // For HF / llamacpp_py / remote-backed-by-either we read
@@ -300,7 +314,7 @@
   // the button is enabled and a click drops these ids into the
   // prepend chip-input.
   let backendBosIds = $derived<number[]>(
-    (backendInfo?.capabilities?.bos_token_ids ?? []).map((n: unknown) => Number(n))
+    (activeCaps?.bos_token_ids ?? []).map((n: unknown) => Number(n))
   );
   // Chat-only providers (NIM / OpenRouter) are registered but inert
   // until proper chat-mode UI lands; the middleware rejects
@@ -309,10 +323,10 @@
   // backend's ``notes`` as a tooltip explanation, instead of letting
   // the click round-trip and bounce off a 400.
   let generationDisabled = $derived<boolean>(
-    !!backendInfo?.capabilities?.generation_disabled
+    !!activeCaps?.generation_disabled
   );
   let generationDisabledNote = $derived<string>(
-    backendInfo?.capabilities?.notes ?? ''
+    activeCaps?.notes ?? ''
   );
 
   // ``alternatives`` ceiling comes from the backend's capabilities. Cloud
@@ -322,7 +336,7 @@
   // free-form free-for-all). Without the cap the user could ask for
   // ``top_k=100`` against Fireworks and silently get 5 back -- the
   // exact "silently ignored" UX the user pointed at.
-  let altsMax = $derived<number>(backendInfo?.capabilities?.max_top_logprobs ?? 50);
+  let altsMax = $derived<number>(activeCaps?.max_top_logprobs ?? 50);
   $effect(() => {
     // Whenever the cap shrinks (backend swap or capabilities refresh),
     // re-clamp the current value. Never grow it automatically -- if
@@ -344,7 +358,7 @@
   // still works but degrades to a single "what comes next?" row --
   // we leave the toggle enabled but flag the degraded mode.
   let promptScoreDegraded = $derived<boolean>(
-    backendInfo?.capabilities?.prompt_logprobs === false
+    activeCaps?.prompt_logprobs === false
   );
 
   onMount(async () => {
@@ -742,7 +756,7 @@
       out.push({ label: `id=${tid}${suffix}`, tokenId: tid, source: 'id' });
     }
     if (watchEos) {
-      for (const tid of backendInfo?.capabilities?.eos_token_ids ?? []) {
+      for (const tid of activeCaps?.eos_token_ids ?? []) {
         if (seen.has(tid)) continue;
         seen.add(tid);
         out.push({ label: `EOS:${tid}`, tokenId: tid, source: 'eos' });
@@ -902,17 +916,15 @@
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" rows="3" class="input font-mono" bind:value={prompt}></textarea>
       <!--
-        Live token preview: shows how the user's prompt is being tokenized
-        in real time, as a row of chips beneath the textarea. The component
-        hides itself when the active backend lacks a real local tokenizer
-        (so we never surface the synthetic-id stub as "your tokens").
+        Live token preview used to live here, directly under the
+        textarea. It now lives in the RIGHT column above "running
+        completion": that puts the three artefacts the user wants to
+        compare side-by-side ("what I typed" -> "what the model sees"
+        -> "what the model emits") and gives the chip row more
+        horizontal real-estate when prompts get long. The preview also
+        now folds in the staged ``prependTokenIds`` so the user can
+        see the exact sequence the backend will receive.
       -->
-      <PromptTokenPreview
-        text={prompt}
-        backend={backend}
-        model={model}
-        enabled={localTokenizeSupported}
-      />
     </div>
     <div class="grid grid-cols-2 gap-2">
       <div>
@@ -1098,7 +1110,7 @@
               ? `${backend} is a cloud provider — it tokenizes the prompt server-side from a plain string, so we can't splice in extra token ids without switching to token-array prompt mode (not wired today). For BOS-conditioning experiments, switch to a local backend (HF or llamacpp-py) or a remote dsbx-server that exposes supports_prepend_token_ids.`
               : `${backend} reports supports_prepend_token_ids=false. If this is a remote dsbx-server, it's probably running an older version of the engine that doesn't yet advertise prepend support — re-deploy the latest code on the remote side to enable it. For local backends, HF / llamacpp-py are the supported paths.`
             : backendBosIds.length === 0
-              ? `${backend}'s model has no canonical BOS id we can recommend. Type any token id manually if you want to experiment with conditioning on a specific marker (e.g. ${backendInfo?.capabilities?.eos_token_ids?.[0] ?? '<some-special-id>'}).`
+              ? `${backend}'s model has no canonical BOS id we can recommend. Type any token id manually if you want to experiment with conditioning on a specific marker (e.g. ${activeCaps?.eos_token_ids?.[0] ?? '<some-special-id>'}).`
               : `Fill the chip-input with the model's BOS id(s): [${backendBosIds.join(', ')}]. After scoring you'll see the BOS-conditioned distribution for your first prompt token in row K (where K = number of prepended ids) of the prompt-logits table.`}
           onclick={() => {
             prependTokenIds = backendBosIds.map((n) => String(n));
@@ -1374,6 +1386,30 @@
   </div>
 
   <div class="lg:col-span-2 space-y-3">
+    {#if localTokenizeSupported}
+      <div class="card py-2 px-3">
+        <!--
+          Live token preview lives in the right column (more horizontal
+          space for long prompts) and is gated on
+          ``localTokenizeSupported`` so we don't surface the synthetic-
+          id stub as "your tokens" on backends without a real local
+          tokenizer. The preview folds in any staged prepend token ids
+          as a separate visual group at the head of the chip row, so
+          the user can audit the exact sequence the backend receives
+          in token-array prompt mode (``[...prepend, ...prompt]``).
+        -->
+        <PromptTokenPreview
+          text={prompt}
+          backend={backend}
+          model={model}
+          enabled={localTokenizeSupported}
+          prependIds={prependTokenIds
+            .map((s) => Number.parseInt(s, 10))
+            .filter((n) => Number.isFinite(n))}
+        />
+      </div>
+    {/if}
+
     <div class="card">
       <div class="flex items-center justify-between mb-1">
         <div class="text-xs uppercase tracking-wider text-slate-500">running completion</div>

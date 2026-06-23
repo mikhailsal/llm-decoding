@@ -33,6 +33,11 @@ class _FakeLlama:
 
     EOS_ID = 250
     EOT_ID: int | None = None  # not all bindings expose token_eot()
+    # BOS plumbing: ``BOS_ID`` is what ``token_bos()`` returns;
+    # ``METADATA`` lets a test simulate GGUF metadata flags (a real
+    # llama.cpp model exposes this dict for tokenizer.ggml.* keys).
+    BOS_ID: int = 1
+    METADATA: dict[str, str] = {}
 
     def __init__(
         self,
@@ -62,6 +67,13 @@ class _FakeLlama:
         # what newer llama-cpp-python bindings do for chat templates.
         if self.EOT_ID is not None:
             self.token_eot = lambda: self.EOT_ID  # type: ignore[assignment]
+        # ``metadata`` is a plain dict on real llama-cpp-python; copy
+        # the class default so tests can mutate per-instance without
+        # bleeding across runs.
+        self.metadata = dict(self.METADATA)
+
+    def token_bos(self) -> int:
+        return self.BOS_ID
 
     def token_eos(self) -> int:
         return self.EOS_ID
@@ -442,6 +454,107 @@ def test_negative_eos_id_is_dropped(monkeypatch, tmp_path) -> None:
         verbose=False,
     )
     assert b.capabilities.eos_token_ids == ()
+
+
+def test_capabilities_drop_bos_when_metadata_says_add_bos_token_false(
+    monkeypatch, tmp_path
+) -> None:
+    """``tokenizer.ggml.add_bos_token=false`` -> ``bos_token_ids == ()``.
+
+    Qwen3.5-9B-Base in particular ships this metadata and has NO
+    ``bos_token_id`` declared. ``Llama.token_bos()`` then falls back
+    to id 11, which happens to be ``,`` in Qwen's vocab. Without the
+    metadata veto we would advertise ``[11]`` as BOS and the workbench
+    would helpfully prepend a literal comma to every prompt -- exactly
+    the bug the dsbx-host-py "running completion starts with a comma" UX
+    pointed at. The fix: trust the model author, return an empty tuple.
+    """
+
+    class _NoBosViaMetadata(_FakeLlama):
+        BOS_ID = 11
+        METADATA = {"tokenizer.ggml.add_bos_token": "false"}
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _NoBosViaMetadata
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
+    )
+    assert b.capabilities.bos_token_ids == ()
+
+
+def test_capabilities_drop_bos_when_metadata_omits_bos_token_id(
+    monkeypatch, tmp_path
+) -> None:
+    """No ``tokenizer.ggml.bos_token_id`` key -> empty tuple.
+
+    Same shape as above but the model author left the key off entirely
+    instead of saying ``add_bos_token=false``. We still want the empty
+    tuple: if the model didn't bother declaring a BOS, ``token_bos()``'s
+    fallback id is uninterpretable noise.
+    """
+
+    class _NoBosId(_FakeLlama):
+        BOS_ID = 42  # some arbitrary fallback
+        METADATA: dict[str, str] = {}  # no bos_token_id key at all
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _NoBosId
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
+    )
+    assert b.capabilities.bos_token_ids == ()
+
+
+def test_capabilities_expose_bos_when_metadata_declares_real_one(
+    monkeypatch, tmp_path
+) -> None:
+    """add_bos_token=true + bos_token_id present -> tuple carries the id.
+
+    The happy path: Llama-3 style models declare a real BOS in
+    metadata, ``token_bos()`` returns the matching id, and the UI's
+    "fill BOS" helper picks it up automatically.
+    """
+
+    class _WithBos(_FakeLlama):
+        BOS_ID = 128000
+        METADATA = {
+            "tokenizer.ggml.add_bos_token": "true",
+            "tokenizer.ggml.bos_token_id": "128000",
+        }
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _WithBos
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf),
+        n_gpu_layers=20,
+        n_ctx=64,
+        logits_all=True,
+        verbose=False,
+    )
+    assert b.capabilities.bos_token_ids == (128000,)
 
 
 def test_is_special_true_for_eos_token(monkeypatch, tmp_path) -> None:

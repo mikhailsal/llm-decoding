@@ -255,6 +255,23 @@ class BackendRegistry:
                     caps = capabilities_to_wire(inst.capabilities)
                 except Exception:  # noqa: BLE001
                     caps = None
+            # Per-model capability envelopes for cloud providers. We
+            # emit one entry per CURRENTLY-LOADED variant; the static
+            # config fallback below handles the "not yet loaded" case.
+            # This is what lets the UI render the correct
+            # ``bos_token_ids`` for a model the user just switched to:
+            # the first tokenize/generate call loads the variant,
+            # ``PromptTokenPreview`` triggers ``info.refresh()`` after
+            # success, and the next /info response carries the
+            # per-model caps -- so glm-5p1's empty ``bos_token_ids``
+            # no longer "inherits" gpt-oss-120b's ``[199998]``.
+            models_caps: dict[str, "WireCapabilities"] = {}
+            if entry.family == "cloud":
+                for mkey, minst in entry.cloud_variants.items():
+                    try:
+                        models_caps[mkey] = capabilities_to_wire(minst.capabilities)
+                    except Exception:  # noqa: BLE001
+                        continue
             # For cloud providers we can synthesize the capability envelope
             # from static ProviderConfig data even before a single request
             # has loaded the backend. Without this, the UI couldn't enforce
@@ -265,89 +282,34 @@ class BackendRegistry:
             # because that depends on the tokenizer the upstream uses, but
             # the fields the UI cares about up front (max_top_logprobs,
             # prompt_logprobs, full_vocab) come straight from config.
+            # Also synthesize static envelopes for every CURATED model
+            # that doesn't have a loaded variant yet. The frontend will
+            # use these as placeholders for models the user hasn't
+            # selected/loaded -- crucially honouring per-model
+            # ``model_overrides`` so e.g. ``gpt-oss-20b`` reports
+            # ``supports_sampling_mask=False`` even before its first
+            # tokenize call. Without this the UI would advertise the
+            # provider-wide default and the first generate request
+            # would 400 with a confusing "Extra inputs are not
+            # permitted" upstream error.
+            if entry.family == "cloud":
+                prov = self._cfg.providers.get(entry.name)
+                if prov is not None:
+                    for mkey in prov.known_models():
+                        if mkey in models_caps:
+                            continue
+                        synthetic = self._synthetic_cloud_caps(prov, mkey)
+                        if synthetic is not None:
+                            models_caps[mkey] = synthetic
             if caps is None and entry.family == "cloud":
                 prov = self._cfg.providers.get(entry.name)
                 if prov is not None:
-                    # Mirror EVERY supports_* flag we publish on the
-                    # loaded backend's capabilities here too -- otherwise
-                    # the UI sees a "stripped down" capability set for
-                    # cloud backends until the first real request lands
-                    # and the proper OpenAICompatBackend instance is
-                    # constructed. That was the exact "respect EOS
-                    # locked for Fireworks before first run" UX glitch
-                    # the manual Chrome MCP check caught.
-                    #
-                    # ``generation_disabled`` falls out of
-                    # ``has_completions=false`` (chat-only providers --
-                    # NIM, OpenRouter). The frontend backend picker
-                    # uses the flag to render the option as
-                    # ``<option disabled>`` with ``notes`` as tooltip
-                    # text, and the generate-stream route enforces the
-                    # same gate authoritatively. We pre-fill ``notes``
-                    # with the same wording the loaded backend would
-                    # publish so the tooltip is identical pre- and
-                    # post-first-use.
-                    is_chat_only = not bool(prov.has_completions)
-                    if is_chat_only:
-                        notes = (
-                            "chat-only provider; generation disabled "
-                            "until proper chat-mode UI lands"
-                        )
-                    else:
-                        notes = (
-                            "static caps from provider config (backend not yet loaded)"
-                        )
-                    # Optimistic prediction of the "local tokenizer
-                    # available" flag: if the provider config maps the
-                    # default model (or ANY model) to an HF repo, we
-                    # advertise local-tokenize + prepend support
-                    # upfront. The actual load happens lazily on first
-                    # use; if it fails the loaded backend will downgrade
-                    # the capability and the UI will reflect that on the
-                    # next /info fetch. We prefer the optimistic stance
-                    # because the alternative (start False, flip True
-                    # after first request) makes the "fill BOS" button
-                    # appear disabled until the user happens to click
-                    # generate -- a confusing UX regression for cloud
-                    # backends where the mapping is configured and
-                    # ready to go.
-                    has_tokenizer_mapping = bool(
-                        prov.tokenizers and prov.tokenizers.get(
-                            prov.default_model
-                        )
-                    )
-                    caps = WireCapabilities(
-                        name=f"openai_compat:{entry.name}",
-                        full_vocab=False,
-                        prompt_logprobs=bool(prov.supports_prompt_logprobs),
-                        max_top_logprobs=int(prov.max_top_logprobs),
-                        can_force_token=bool(prov.has_completions),
-                        notes=notes,
-                        eos_token_ids=[],
-                        # BOS ids stay empty here because we discover
-                        # them from the actual tokenizer.json at load
-                        # time. Surfacing a pre-load best-guess would
-                        # require parsing tokenizer_config.json per
-                        # model, which is not worth the complexity --
-                        # the loaded-backend path fills the real value
-                        # in within seconds of the first request.
-                        bos_token_ids=[],
-                        supports_ignore_eos=bool(prov.supports_ignore_eos),
-                        supports_perf_metrics=bool(prov.supports_perf_metrics),
-                        supports_service_tier=bool(prov.supports_service_tier),
-                        supports_sampling_mask=bool(prov.supports_sampling_mask),
-                        supports_raw_output=bool(prov.supports_raw_output),
-                        supports_logit_bias=bool(prov.supports_logit_bias),
-                        supports_combined_echo_stream=bool(
-                            prov.supports_combined_echo_stream
-                        ),
-                        supports_prepend_token_ids=(
-                            has_tokenizer_mapping
-                            and not is_chat_only
-                        ),
-                        supports_local_tokenize=has_tokenizer_mapping,
-                        generation_disabled=is_chat_only,
-                    )
+                    # Reuse the per-model synthesizer for the default
+                    # model: the top-level ``capabilities`` field is
+                    # semantically "the envelope for the default model
+                    # when nothing else is selected", so a parallel
+                    # code path would just drift.
+                    caps = self._synthetic_cloud_caps(prov, prov.default_model)
             label = self._public_label(entry)
             loaded_model, suggested, editable = self._public_model_info(entry)
             out.append(
@@ -356,6 +318,7 @@ class BackendRegistry:
                     label=label,
                     family=entry.family,  # type: ignore[arg-type]
                     capabilities=caps,
+                    models_caps=models_caps,
                     available=not entry.unavailable_reason,
                     note=entry.unavailable_reason,
                     loaded_model=loaded_model,
@@ -364,6 +327,72 @@ class BackendRegistry:
                 )
             )
         return out
+
+    def _synthetic_cloud_caps(
+        self,
+        prov,  # type: ignore[no-untyped-def]
+        model: str | None,
+    ) -> "WireCapabilities | None":
+        """Build a :class:`WireCapabilities` from static ``ProviderConfig``.
+
+        Used both for the top-level ``capabilities`` of an unloaded
+        cloud entry AND for ``models_caps`` placeholders for models the
+        user might pick next. Honours :meth:`ProviderConfig.flag_for_model`
+        so per-model overrides (e.g. ``gpt-oss-20b`` rejecting
+        ``sampling_mask``) propagate to the UI before the backend has
+        actually been instantiated. ``bos_token_ids`` stays empty here
+        -- discovery happens against the real tokenizer.json at first
+        load, and the loaded-instance path (above) takes over once
+        ``cloud_variants`` is populated.
+        """
+        from decoding_sandbox.server.schemas import WireCapabilities
+
+        if prov is None:
+            return None
+        is_chat_only = not bool(prov.has_completions)
+        if is_chat_only:
+            notes = (
+                "chat-only provider; generation disabled "
+                "until proper chat-mode UI lands"
+            )
+        else:
+            notes = "static caps from provider config (backend not yet loaded)"
+        # Optimistic prediction of "local tokenizer available": if THIS
+        # specific model has a tokenizer mapping (or the default model
+        # does, for the top-level envelope) we advertise it upfront.
+        # If the actual load fails the loaded-backend envelope will
+        # downgrade the flag on the next /info fetch.
+        lookup_model = model or prov.default_model
+        has_tokenizer_mapping = bool(
+            prov.tokenizers and prov.tokenizers.get(lookup_model)
+        )
+        # Helper so each call site below stays readable; per-model
+        # overrides are applied uniformly.
+        def flag(name: str) -> bool:
+            return prov.flag_for_model(lookup_model, name)
+
+        return WireCapabilities(
+            name=f"openai_compat:{prov.name}",
+            full_vocab=False,
+            prompt_logprobs=flag("supports_prompt_logprobs"),
+            max_top_logprobs=int(prov.max_top_logprobs),
+            can_force_token=bool(prov.has_completions),
+            notes=notes,
+            eos_token_ids=[],
+            bos_token_ids=[],
+            supports_ignore_eos=flag("supports_ignore_eos"),
+            supports_perf_metrics=flag("supports_perf_metrics"),
+            supports_service_tier=flag("supports_service_tier"),
+            supports_sampling_mask=flag("supports_sampling_mask"),
+            supports_raw_output=flag("supports_raw_output"),
+            supports_logit_bias=flag("supports_logit_bias"),
+            supports_combined_echo_stream=flag("supports_combined_echo_stream"),
+            supports_prepend_token_ids=(
+                has_tokenizer_mapping and not is_chat_only
+            ),
+            supports_local_tokenize=has_tokenizer_mapping,
+            generation_disabled=is_chat_only,
+        )
 
     def _public_model_info(self, entry: _BackendEntry) -> tuple[str | None, list[str], bool]:
         """Compute (loaded_model, suggested_models, model_editable) for a row.

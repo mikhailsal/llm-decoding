@@ -90,6 +90,21 @@ export interface BackendInfo {
   label: string;
   family: 'remote' | 'cloud' | 'local';
   capabilities: Capabilities | null;
+  /**
+   * Per-model capability envelopes for cloud providers (always empty for
+   * remote / local). The OpenAI-compat backend caches one instance per
+   * model, and each variant can report different ``supports_*`` flags
+   * (Fireworks's ``gpt-oss-20b`` rejects ``sampling_mask`` while
+   * ``gpt-oss-120b`` accepts it) and different ``bos_token_ids``
+   * (auto-discovered from the loaded HF tokenizer). The frontend uses
+   * ``models_caps[selectedModel] ?? capabilities`` to render the active
+   * envelope so glm-5p1 stops "inheriting" gpt-oss-120b's BOS.
+   * Populated optimistically for every curated model in the provider's
+   * config (synthetic envelopes that honour ``model_overrides``) plus
+   * the real loaded-backend envelopes once their tokenizer has been
+   * fetched.
+   */
+  models_caps: Record<string, Capabilities>;
   available: boolean;
   note: string;
   // Model the backend is currently running (or its default for deferred-load

@@ -70,6 +70,19 @@ class BackendInfo(BaseModel):
     label: str
     family: Literal["remote", "cloud", "local"]
     capabilities: WireCapabilities | None = None
+    # Per-model capability envelopes for ``family == "cloud"`` providers.
+    # The OpenAI-compat backend caches one instance per model in
+    # ``cloud_variants``, and each variant may report different
+    # ``supports_*`` flags (Fireworks's ``gpt-oss-20b`` rejects
+    # ``sampling_mask``, ``gpt-oss-120b`` accepts it) and different
+    # ``bos_token_ids`` (auto-discovered from the loaded HF tokenizer).
+    # Without this map the listing endpoint could only surface ONE
+    # envelope per backend -- the default-model variant -- and the UI
+    # would happily suggest a gpt-oss BOS for glm-5p1. Frontend looks
+    # up ``models_caps[currentModel] ?? capabilities`` so models whose
+    # variant isn't loaded yet still get the static fallback. Always
+    # empty for remote/local families (one instance == one envelope).
+    models_caps: dict[str, WireCapabilities] = Field(default_factory=dict)
     available: bool = True
     note: str = ""
     loaded_model: str | None = None

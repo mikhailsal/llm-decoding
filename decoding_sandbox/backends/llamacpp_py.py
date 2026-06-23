@@ -147,14 +147,37 @@ class LlamaCppPyBackend(Backend):
     def _discover_bos_ids(self) -> tuple[int, ...]:
         """Best-effort BOS extraction from the llama.cpp binding.
 
-        ``Llama.token_bos()`` is the canonical source. Some GGUF builds
-        return ``-1`` to mean "no canonical BOS configured for this
-        model" -- we drop those, leaving the tuple empty so the UI's
-        "fill BOS" helper greys out. Qwen-style models that overload
-        the EOS as a document-boundary marker still report a real
-        ``token_bos()``; we trust the binding.
+        Two-layer veto on top of ``Llama.token_bos()``:
+
+        1. ``tokenizer.ggml.add_bos_token = false`` in the GGUF metadata
+           means the model author explicitly declared "do NOT prefix a
+           BOS". Many BASE models (Qwen3.5-9B-Base in particular) ship
+           with this set and have no BOS field at all -- llama.cpp then
+           returns a fallback id (often 11, which happens to be ``,``
+           in Qwen's vocab) from ``token_bos()``. Without this guard we
+           would happily advertise ``[11]`` as "the BOS" and the
+           workbench would helpfully prepend a literal comma to every
+           prompt. Honour the metadata and report an empty tuple.
+
+        2. Even when ``add_bos_token`` is true or unset, require that
+           ``tokenizer.ggml.bos_token_id`` is ACTUALLY present in the
+           metadata. Missing key == "model author didn't declare one"
+           == empty tuple, regardless of what ``token_bos()`` defaulted
+           to. Models with a real BOS always set the metadata field
+           (the GGUF converters do it automatically).
+
+        Result: the UI's "fill BOS" helper greys out for genuine
+        no-BOS models and stays accurate for ones that have a real
+        canonical start token. Users who insist on a custom prepend
+        can still type any id by hand.
         """
-        out: list[int] = []
+        meta = getattr(self._llama, "metadata", {}) or {}
+        add_bos = str(meta.get("tokenizer.ggml.add_bos_token", "")).strip().lower()
+        if add_bos in {"false", "0"}:
+            return ()
+        if "tokenizer.ggml.bos_token_id" not in meta:
+            return ()
+
         fn = getattr(self._llama, "token_bos", None)
         if fn is None:
             return ()
@@ -162,9 +185,9 @@ class LlamaCppPyBackend(Backend):
             tid = int(fn())
         except Exception:  # noqa: BLE001
             return ()
-        if tid >= 0:
-            out.append(tid)
-        return tuple(out)
+        if tid < 0:
+            return ()
+        return (tid,)
 
     def _is_special(self, token_id: int) -> bool:
         if token_id in self._eos_ids:
