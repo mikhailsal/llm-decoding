@@ -65,6 +65,7 @@ class HFBackend(Backend):
         self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
         self.model.eval()
         self._eos_ids: tuple[int, ...] = _gather_eos_ids(self.model.config, self.tokenizer)
+        self._bos_ids: tuple[int, ...] = _gather_bos_ids(self.model.config, self.tokenizer)
         self._special_ids: frozenset[int] = frozenset(
             int(i) for i in (getattr(self.tokenizer, "all_special_ids", []) or [])
         )
@@ -80,6 +81,8 @@ class HFBackend(Backend):
             can_force_token=True,
             notes="exact full-vocab distribution; whole-context in one forward pass.",
             eos_token_ids=self._eos_ids,
+            bos_token_ids=self._bos_ids,
+            supports_prepend_token_ids=True,
         )
 
     def _is_special(self, token_id: int) -> bool:
@@ -191,7 +194,12 @@ class HFBackend(Backend):
         )
 
     def score_prompt(
-        self, prompt: str, top_k: int, watch_ids: list[int] | None = None
+        self,
+        prompt: str,
+        top_k: int,
+        watch_ids: list[int] | None = None,
+        *,
+        prepend_token_ids: Sequence[int] = (),
     ) -> list[StepResult]:
         """Whole-context inspection, including the trailing "what comes next?".
 
@@ -202,10 +210,22 @@ class HFBackend(Backend):
         is no ground-truth next token; that's the row that answers "did
         the model want to stop here?". The same forward pass produces all
         N rows for free, so this is no slower than the old behaviour.
+
+        ``prepend_token_ids`` lets callers seed the sequence with extra
+        tokens BEFORE the tokenized prompt (typically the model's BOS
+        marker) so the user can observe what the model would predict for
+        position 0 of their prompt -- an otherwise-unscorable position
+        because autoregressive models compute ``P(next | prior)`` and the
+        first token has no prior. The prepended tokens become the leading
+        StepResults; the row whose ``chosen`` is the user's first prompt
+        token is the answer to "what does the model expect to see after
+        my prepend".
         """
         torch = self._torch
         watch_ids = watch_ids or []
-        ids = self.tokenize(prompt)
+        prepend_ids = [int(t) for t in (prepend_token_ids or [])]
+        prompt_ids = self.tokenize(prompt)
+        ids = prepend_ids + list(prompt_ids)
         if not ids:
             return []
         input_ids = torch.tensor([ids], device=self.model.device)
@@ -271,4 +291,36 @@ def _gather_eos_ids(model_config, tokenizer) -> tuple[int, ...]:
 
     _absorb(getattr(model_config, "eos_token_id", None))
     _absorb(getattr(tokenizer, "eos_token_id", None))
+    return tuple(out)
+
+
+def _gather_bos_ids(model_config, tokenizer) -> tuple[int, ...]:
+    """Pull BOS ids from both the model config and the tokenizer.
+
+    Mirror of ``_gather_eos_ids`` for the begin-of-sequence marker. Most
+    HF models expose a single ``bos_token_id``; we collect both the
+    config and tokenizer values in case they diverge. Returns an empty
+    tuple when the model has no canonical BOS (e.g. some GPT-2 variants)
+    -- the UI uses that to grey out the "fill BOS" helper.
+    """
+    out: list[int] = []
+    seen: set[int] = set()
+
+    def _absorb(v):
+        if v is None:
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _absorb(x)
+            return
+        try:
+            tid = int(v)
+        except (TypeError, ValueError):
+            return
+        if tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+
+    _absorb(getattr(model_config, "bos_token_id", None))
+    _absorb(getattr(tokenizer, "bos_token_id", None))
     return tuple(out)

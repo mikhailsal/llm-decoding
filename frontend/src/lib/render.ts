@@ -111,6 +111,12 @@ export function renderTokenPlain(text: string, isSpecial = false): string {
 /** Format a probability for tables -- mirrors ``cli/render.fmt_prob``. */
 export function fmtProb(p: number | null | undefined): string {
   if (p === null || p === undefined || !Number.isFinite(p)) return '?';
+  // Same honesty contract as ``formatProbPct``: a token with a
+  // genuine but tiny probability (e.g. the chosen one falling at
+  // rank 247 with p≈1e-7) should NOT render as ``0.00%`` -- that
+  // reads like the model assigned zero mass, which is a lie. Show
+  // ``<0.1%`` instead so the student sees "small but nonzero".
+  if (p < 0.001) return '<0.1%';
   return (p * 100).toFixed(2) + '%';
 }
 

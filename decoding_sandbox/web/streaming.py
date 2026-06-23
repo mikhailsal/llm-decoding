@@ -69,6 +69,7 @@ def stream_generate(
     echo_last: int | None = None,
     watch_ids: list[int] | None = None,
     prefix_token_ids: list[int] | None = None,
+    prepend_token_ids: list[int] | None = None,
 ) -> Iterator[bytes]:
     """Yield SSE frames for a generate call against ``backend``.
 
@@ -92,6 +93,18 @@ def stream_generate(
     use_remote_stream = hasattr(backend, "stream_generate")
     watch_id_list: list[int] = [int(i) for i in (watch_ids or [])]
     prefix_id_list: list[int] = [int(i) for i in (prefix_token_ids or [])]
+    prepend_id_list: list[int] = [int(i) for i in (prepend_token_ids or [])]
+    # Only forward prepend_token_ids to the backend when it actually
+    # supports them. Cloud backends (openai_compat) raise on non-empty
+    # values; we'd rather drop the field silently than 400 the entire
+    # generate stream over a stale UI state. The UI itself gates the
+    # chip-input on the same capability, so a properly-synced client
+    # will never hit this branch with a non-empty list.
+    caps = backend.capabilities
+    if prepend_id_list and not bool(
+        getattr(caps, "supports_prepend_token_ids", False)
+    ):
+        prepend_id_list = []
 
     # Per-run usage accounting. Backends implementing
     # :class:`decoding_sandbox.core.usage.UsageAware` (OpenAICompatBackend
@@ -159,6 +172,7 @@ def stream_generate(
                     top_k=top_k,
                     watch_ids=watch_id_list,
                     prefix_token_ids=prefix_id_list,
+                    prepend_token_ids=prepend_id_list,
                 )
             if use_remote_stream:
                 for gs in _iter_remote_stream(
@@ -456,6 +470,7 @@ def _emit_prompt_score(
     top_k: int,
     watch_ids: list[int] | None = None,
     prefix_token_ids: list[int] | None = None,
+    prepend_token_ids: list[int] | None = None,
 ) -> Iterator[bytes]:
     """Emit a single ``prompt_score`` SSE frame for the given prompt.
 
@@ -471,10 +486,24 @@ def _emit_prompt_score(
     backends with a 400 before the stream opens -- but the fallback
     keeps the function robust if a future backend type lands here
     without prompt-logprobs support.
+
+    ``prefix_token_ids`` is the historical "after-prompt suffix" used
+    by manual decoding (the browser holds the user's picks and resends
+    a growing list). It's still concatenated to the prompt as
+    detokenized text so the inspect view shows the manual-pick context
+    too. ``prepend_token_ids`` is the NEW front-of-prompt injection
+    (the BOS-conditioning workflow): we pass it directly to
+    ``backend.score_prompt(..., prepend_token_ids=...)`` so the
+    backend can splice ids in at the *token* level (no detokenize
+    round-trip that would risk tokenization parity issues) -- the
+    leading rows of the returned steps then correspond to those
+    injected ids, and the row whose ``chosen`` is the user's first
+    prompt token finally carries a real BOS-conditioned probability.
     """
     caps = backend.capabilities
     watch_id_list: list[int] = [int(i) for i in (watch_ids or [])]
     prefix_id_list: list[int] = [int(i) for i in (prefix_token_ids or [])]
+    prepend_id_list: list[int] = [int(i) for i in (prepend_token_ids or [])]
     effective_prompt = prompt
     if prefix_id_list:
         try:
@@ -483,7 +512,10 @@ def _emit_prompt_score(
             effective_prompt = prompt
     try:
         steps = backend.score_prompt(
-            effective_prompt, top_k=int(top_k), watch_ids=watch_id_list
+            effective_prompt,
+            top_k=int(top_k),
+            watch_ids=watch_id_list,
+            prepend_token_ids=prepend_id_list,
         )
         steps_wire = [step_to_wire(s).model_dump() for s in steps]
         note = ""

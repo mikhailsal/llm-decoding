@@ -221,6 +221,17 @@ class OpenAICompatBackend(Backend):
                 self.provider.supports_combined_echo_stream
             ),
             generation_disabled=is_chat_only,
+            # Cloud providers take a plain ``prompt: str`` and tokenize
+            # server-side. We don't have a safe way to inject extra
+            # token ids without going through token-array prompt mode
+            # (Fireworks supports it, openai_compat doesn't wire it
+            # today), so we leave the BOS info empty and the prepend
+            # toggle off. The UI then greys out the "fill BOS" helper
+            # for this backend and shows the explanatory tooltip
+            # instead of inviting the user to click a button that
+            # would silently no-op.
+            bos_token_ids=(),
+            supports_prepend_token_ids=False,
         )
 
     # -- requests ---------------------------------------------------------- #
@@ -523,7 +534,12 @@ class OpenAICompatBackend(Backend):
             body["logprobs"] = int(top_k)
 
     def score_prompt(
-        self, prompt: str, top_k: int, watch_ids: list[int] | None = None
+        self,
+        prompt: str,
+        top_k: int,
+        watch_ids: list[int] | None = None,
+        *,
+        prepend_token_ids: Sequence[int] = (),
     ) -> list[StepResult]:
         """Whole-context inspection. Uses /completions echo where supported.
 
@@ -558,6 +574,24 @@ class OpenAICompatBackend(Backend):
                 "this backend cannot do whole-context inspection. Check "
                 "capabilities.prompt_logprobs and fall back to "
                 "next_distribution() on the prompt instead."
+            )
+        if prepend_token_ids:
+            # Cloud providers tokenize ``prompt: str`` server-side, so
+            # there is no safe way for us to splice extra token ids in
+            # front of the prompt without going through token-array
+            # prompt mode (Fireworks supports it for /completions, but
+            # we don't wire token-array prompts through this path
+            # today). Refusing loudly is friendlier than silently
+            # detokenize+concat -- the latter would round-trip through
+            # the user-visible prompt and break tokenization parity.
+            # The web layer checks ``capabilities.supports_prepend_token_ids``
+            # before passing this argument and falls back to ignoring
+            # the field for cloud backends.
+            raise NotImplementedError(
+                f"{self.provider.name!r} does not support prepend_token_ids "
+                "(cloud providers tokenize the prompt server-side; we'd need "
+                "to switch to token-array prompt mode to inject extra ids "
+                "safely). Check capabilities.supports_prepend_token_ids first."
             )
 
         watch_ids = watch_ids or []

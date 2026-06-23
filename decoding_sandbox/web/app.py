@@ -357,6 +357,7 @@ def make_web_app(
                     echo_last=req.echo_last,
                     watch_ids=list(resolved_watch_ids),
                     prefix_token_ids=[int(i) for i in (req.prefix_token_ids or [])],
+                    prepend_token_ids=[int(i) for i in (req.prepend_token_ids or [])],
                 )
 
         return StreamingResponse(

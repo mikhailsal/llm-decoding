@@ -72,6 +72,70 @@ def test_score_prompt_watch_records_top_k_member_with_correct_rank() -> None:
         assert not math.isnan(st.watched[3].logprob)
 
 
+def test_score_prompt_prepend_token_ids_adds_leading_bos_conditioned_row() -> None:
+    """``prepend_token_ids`` lets the caller seed scoring with extra ids.
+
+    Pedagogical use case: "predict position 0 from BOS". For the
+    autoregressive model the user's first prompt token is normally
+    unscorable (no prior to condition on); injecting the model's BOS
+    in front gives the first scoring row a meaningful distribution.
+
+    We pin the contract with a tiny FakeBackend whose distributions
+    are unique per context so the prepended row can be unambiguously
+    identified: after ``[bos=99]`` the model is asked to predict
+    ``ids[0]`` of the (prepend + prompt) sequence, which is the BOS
+    itself (the only "real" StepResult comparing against an actual
+    next token between bos and the prompt is the row scoring the
+    BOS's prediction of the first user token). When we DON'T pass
+    ``prepend_token_ids`` we get the historical 2-row output for the
+    2-token prompt; WITH a single prepended id we get 3 rows, and
+    the leading row's ``context_text`` is the BOS piece while its
+    ``chosen`` is the user's first prompt token with the
+    BOS-conditioned probability. The trailing row still has
+    ``chosen=None`` as before. Same fixture data, two assertion
+    paths, so the diff between the two cases is exactly the leading
+    BOS-conditioned row.
+    """
+    backend = FakeBackend(
+        tokens={"AB": [1, 2]},
+        pieces={1: "A", 2: "B", 3: "C", 99: "<BOS>"},
+        distributions={
+            (1,): [cand(2, "B", 0.9, 0)],
+            (1, 2): [cand(3, "C", 0.8, 0)],
+            (99,): [cand(1, "A", 0.4, 0), cand(2, "B", 0.3, 1)],
+            (99, 1): [cand(2, "B", 0.85, 0)],
+            (99, 1, 2): [cand(3, "C", 0.75, 0)],
+        },
+    )
+
+    # Baseline: no prepend -> 2 rows, no BOS-conditioned leading row.
+    plain = backend.score_prompt("AB", top_k=2)
+    assert [s.position for s in plain] == [1, 2]
+    assert plain[0].context_text == "A"  # context is the first user token
+
+    # With prepend=[99]: 3 rows. The first row scores what the model
+    # predicts AFTER seeing the BOS -- chosen is the user's first
+    # prompt token (id=1, "A") with the BOS-conditioned probability
+    # (0.4 from our fixture, NOT 0.0 or NaN -- this is the whole
+    # point of the feature).
+    with_bos = backend.score_prompt("AB", top_k=2, prepend_token_ids=[99])
+    assert [s.position for s in with_bos] == [1, 2, 3]
+    assert with_bos[0].context_text == "<BOS>"
+    assert with_bos[0].chosen is not None
+    assert with_bos[0].chosen.token_id == 1  # user's first prompt token
+    assert with_bos[0].chosen.text == "A"
+    assert with_bos[0].chosen.rank == 0  # top-1 under BOS context
+    assert with_bos[0].chosen.logprob == pytest.approx(math.log(0.4))
+    # Subsequent rows are the usual per-prompt-token rows but with
+    # extended context (BOS + ids[:i]); the trailing row still has
+    # chosen=None because there's nothing after the user's last token.
+    assert with_bos[1].context_text == "A"
+    assert with_bos[1].chosen is not None
+    assert with_bos[1].chosen.token_id == 2
+    assert with_bos[2].context_text == "B"
+    assert with_bos[2].chosen is None
+
+
 def test_score_prompt_trailing_step_has_chosen_none() -> None:
     """The trailing step's chosen=None is part of the public contract: it
     distinguishes "predicting" from "scoring against ground truth"."""

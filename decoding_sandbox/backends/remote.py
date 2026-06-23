@@ -167,12 +167,18 @@ class RemoteBackend(Backend):
         return _step_from_dict(data)
 
     def score_prompt(
-        self, prompt: str, top_k: int, watch_ids: list[int] | None = None
+        self,
+        prompt: str,
+        top_k: int,
+        watch_ids: list[int] | None = None,
+        *,
+        prepend_token_ids: Sequence[int] = (),
     ) -> list[StepResult]:
         body = {
             "prompt": prompt,
             "top_k": int(top_k),
             "watch_ids": [int(i) for i in (watch_ids or [])],
+            "prepend_token_ids": [int(i) for i in (prepend_token_ids or [])],
         }
         data = self._post("/v1/score_prompt", body)
         return [_step_from_dict(s) for s in data.get("steps", [])]
@@ -387,6 +393,8 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         supports_combined_echo_stream=bool(
             d.get("supports_combined_echo_stream", False)
         ),
+        bos_token_ids=tuple(int(i) for i in d.get("bos_token_ids", [])),
+        supports_prepend_token_ids=bool(d.get("supports_prepend_token_ids", False)),
     )
 
 

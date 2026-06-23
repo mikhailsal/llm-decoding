@@ -101,12 +101,18 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
         with lock:
             try:
                 steps = backend.score_prompt(
-                    req.prompt, top_k=int(req.top_k), watch_ids=list(req.watch_ids)
+                    req.prompt,
+                    top_k=int(req.top_k),
+                    watch_ids=list(req.watch_ids),
+                    prepend_token_ids=list(req.prepend_token_ids),
                 )
             except NotImplementedError as exc:
-                # OpenAICompatBackend raises this for chat-only providers.
-                # In practice we don't host those on the server, but keep
-                # the error path explicit so future backends behave too.
+                # OpenAICompatBackend raises this for chat-only providers
+                # or unsupported features (e.g. prepend_token_ids on
+                # cloud backends that tokenize server-side from a plain
+                # prompt string). In practice we don't host those on
+                # the server, but keep the error path explicit so future
+                # backends behave too.
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         return S.ScorePromptResponse(steps=[S.step_to_wire(s) for s in steps])
 

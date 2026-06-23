@@ -116,6 +116,32 @@ class Capabilities:
     can_force_token: bool = False  # supports manual/forced token decoding
     notes: str = ""
     eos_token_ids: tuple[int, ...] = ()
+    # Token ids the model considers a "beginning of sequence" marker --
+    # either a true BOS (Llama family ``<|begin_of_text|>``) or a
+    # document-boundary token reused as such (Qwen Base uses
+    # ``<|endoftext|>`` for both ends). Empty tuple means "this model
+    # has no canonical BOS we can recommend"; the UI's "fill BOS"
+    # helper greys out in that case. Used by the pedagogical
+    # ``prepend_token_ids`` workflow: when the user clicks "fill BOS"
+    # we drop these ids into the prepend chip-input so they can see
+    # the BOS-conditioned distribution for what would otherwise be an
+    # unscorable position 0. Backends discover the value differently
+    # (HF: tokenizer.bos_token_id; llama-cpp-py: Llama.token_bos();
+    # openai-compat: a small known-model table; remote: forwarded from
+    # the upstream dsbx serve's /v1/info). When discovery returns
+    # ``None`` we leave the tuple empty.
+    bos_token_ids: tuple[int, ...] = ()
+    # When true, ``Backend.score_prompt`` and ``Backend.stream_native``
+    # accept a non-empty ``prepend_token_ids`` argument: those tokens
+    # are concatenated BEFORE the tokenized prompt, so the model sees
+    # ``prepend_token_ids + tokenize(prompt)`` as one continuous
+    # sequence. Used by the "predict position 0 from BOS" workflow.
+    # False for cloud providers that take a plain ``prompt: str`` and
+    # tokenize server-side (we can't safely inject prepended token ids
+    # without going through token-array prompt mode, which Fireworks
+    # supports but openai_compat doesn't wire today). The frontend
+    # gates the prepend chip-input on this flag.
+    supports_prepend_token_ids: bool = False
     # Provider-specific completion extensions (Fireworks today). Stay
     # False for HF / llamacpp / chat-only cloud providers; surfaced over
     # the wire so the browser doesn't need to know which provider it is

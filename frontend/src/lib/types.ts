@@ -15,6 +15,17 @@ export interface Capabilities {
   can_force_token: boolean;
   notes: string;
   eos_token_ids: number[];
+  /**
+   * Begin-of-sequence marker token id(s) the model uses -- either a
+   * true BOS (Llama family ``<|begin_of_text|>``) or a document-
+   * boundary token reused as such (Qwen Base uses ``<|endoftext|>``
+   * for both ends). Empty array on models with no canonical BOS or
+   * on cloud backends that tokenize server-side (and therefore can't
+   * be helped by client-side prepend). The Decode workbench's "fill
+   * BOS" helper greys out when this is empty and drops the listed
+   * ids into the prepend chip-input when clicked.
+   */
+  bos_token_ids: number[];
   // Provider-specific /v1/completions extension flags. Surfaced so the
   // UI can adapt without hard-coding provider names: ``supports_ignore_eos``
   // unlocks the "respect EOS" checkbox for Fireworks; ``supports_perf_metrics``
@@ -28,6 +39,20 @@ export interface Capabilities {
   supports_sampling_mask: boolean;
   supports_raw_output: boolean;
   supports_logit_bias: boolean;
+  /**
+   * When true, the backend accepts a non-empty
+   * ``prepend_token_ids`` on score_prompt / generate / inspect --
+   * those ids get spliced in FRONT of the tokenized prompt before
+   * scoring, which unlocks the pedagogical "predict position 0 from
+   * BOS" workflow (otherwise unscorable: autoregressive models have
+   * no prior to condition on at position 0). False on cloud
+   * providers that tokenize ``prompt: str`` server-side and can't
+   * accept token ids without switching to token-array prompt mode
+   * (not wired today). The Decode workbench's prepend chip-input
+   * gates on this flag and the "fill BOS" button is disabled when
+   * it's false.
+   */
+  supports_prepend_token_ids: boolean;
   /**
    * When true, ``include_prompt`` runs as a single ``echo=true`` +
    * ``stream=true`` request instead of two separate calls

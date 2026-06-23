@@ -288,6 +288,11 @@ class BackendRegistry:
                         can_force_token=bool(prov.has_completions),
                         notes=notes,
                         eos_token_ids=[],
+                        # Cloud providers tokenize ``prompt: str``
+                        # server-side; we can't safely splice extra
+                        # token ids in front, so we report no BOS and
+                        # gate the UI's prepend chip-input off.
+                        bos_token_ids=[],
                         supports_ignore_eos=bool(prov.supports_ignore_eos),
                         supports_perf_metrics=bool(prov.supports_perf_metrics),
                         supports_service_tier=bool(prov.supports_service_tier),
@@ -297,6 +302,7 @@ class BackendRegistry:
                         supports_combined_echo_stream=bool(
                             prov.supports_combined_echo_stream
                         ),
+                        supports_prepend_token_ids=False,
                         generation_disabled=is_chat_only,
                     )
             label = self._public_label(entry)

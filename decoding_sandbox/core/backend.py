@@ -60,7 +60,12 @@ class Backend(ABC):
     # -- derived ----------------------------------------------------------- #
 
     def score_prompt(
-        self, prompt: str, top_k: int, watch_ids: list[int] | None = None
+        self,
+        prompt: str,
+        top_k: int,
+        watch_ids: list[int] | None = None,
+        *,
+        prepend_token_ids: Sequence[int] = (),
     ) -> list[StepResult]:
         """Per-position inspection of an existing prompt (whole context).
 
@@ -75,8 +80,22 @@ class Backend(ABC):
         ``chosen=None`` and answers "what does the model predict comes
         next?". Watched ids are looked up on this row too, so e.g. P(EOS)
         after the period in "...dry." finally has a place to live.
+
+        ``prepend_token_ids`` lets callers seed the scoring with extra
+        tokens BEFORE the tokenized prompt -- typically the model's BOS
+        marker, so a UI can show the BOS-conditioned distribution for
+        what would otherwise be an unscorable position 0 (an
+        autoregressive model has no prior context for the very first
+        token without help). The prepended ids become rows 1..K of the
+        result; row K+1 is the first real prompt-token row, finally with
+        an actual model probability instead of "no data". Backends that
+        can't safely inject extra token ids (cloud providers that
+        tokenize server-side from a plain ``prompt: str``) should raise
+        ``NotImplementedError`` when ``prepend_token_ids`` is non-empty;
+        ``Capabilities.supports_prepend_token_ids`` is the per-backend
+        opt-in the web layer / UI consult before sending the field.
         """
-        ids = self.tokenize(prompt)
+        ids = list(int(t) for t in (prepend_token_ids or [])) + self.tokenize(prompt)
         watch_ids = watch_ids or []
         results: list[StepResult] = []
         for i in range(1, len(ids) + 1):

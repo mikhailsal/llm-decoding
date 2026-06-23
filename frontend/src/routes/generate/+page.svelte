@@ -53,6 +53,23 @@
   // to ids in ``_resolve_watches``.
   let watchTexts = $state<string[]>([]);
   let watchIds = $state<string[]>([]);
+  // Token ids to splice in BEFORE the user's prompt -- the
+  // "prepend tokens" workflow. Same string-of-ints shape as ``watchIds``
+  // so it can use the existing ChipInput component; the request body
+  // assembler parses to numbers and drops anything non-finite. Most
+  // users will populate this via the "fill BOS" helper next to the
+  // chip-input; advanced users can type any id to see how the model
+  // conditions on it.
+  let prependTokenIds = $state<string[]>([]);
+  // Snapshot of how many prepend ids were actually sent for the last
+  // generate/inspect/manual call. Read by the prompt-logits table to
+  // mark which row carries the BOS-conditioned first-real-prompt-token
+  // prediction (row at position == prependCount). We pin the count at
+  // request time rather than reading ``prependTokenIds.length``
+  // directly so the highlight survives the user editing the chip
+  // between requests -- the rendered table reflects the run that
+  // produced it.
+  let lastRunPrependCount = $state<number>(0);
   let watchEos = $state(false);
   // ``echo_last=N`` (Fireworks combined echo+stream path only): echo
   // logprobs for the LAST N prompt tokens instead of every position.
@@ -253,6 +270,25 @@
   let combinedEchoStreamSupported = $derived<boolean>(
     !!backendInfo?.capabilities?.supports_combined_echo_stream
   );
+  // Backends that can accept ``prepend_token_ids`` on score_prompt /
+  // generate -- i.e. those that tokenize locally and can splice extra
+  // ids into the sequence at the TOKEN level. Cloud providers
+  // (Fireworks today) tokenize ``prompt: str`` server-side and can't
+  // safely inject extra ids; the UI's "fill BOS" helper and the
+  // prepend chip-input gate on this flag so a click never goes through
+  // a path where it would silently no-op.
+  let prependSupported = $derived<boolean>(
+    !!backendInfo?.capabilities?.supports_prepend_token_ids
+  );
+  // The model's canonical BOS token id(s), as reported by the backend.
+  // For HF / llamacpp_py / remote-backed-by-either we read
+  // tokenizer.bos_token_id (or Llama.token_bos()); cloud providers
+  // leave this empty. Used by the "fill BOS" button: when non-empty
+  // the button is enabled and a click drops these ids into the
+  // prepend chip-input.
+  let backendBosIds = $derived<number[]>(
+    (backendInfo?.capabilities?.bos_token_ids ?? []).map((n: unknown) => Number(n))
+  );
   // Chat-only providers (NIM / OpenRouter) are registered but inert
   // until proper chat-mode UI lands; the middleware rejects
   // generate-stream requests against them with a 400. We mirror the
@@ -403,6 +439,19 @@
       watch_ids: watch_ids_resolved,
       watch_eos: watchEos,
       prefix_token_ids: opts.prefix ?? [],
+      prepend_token_ids: (() => {
+        const ids = prependSupported
+          ? prependTokenIds
+              .map((s) => Number.parseInt(s, 10))
+              .filter((n) => Number.isFinite(n))
+          : [];
+        // Pinned at request time so the prompt-logits table can
+        // highlight the "BOS-conditioned" row even after the user
+        // edits the chip-input between runs (the rendered table
+        // reflects the run that produced it, not the current input).
+        lastRunPrependCount = ids.length;
+        return ids;
+      })(),
       // Manual mode pins both UUIDs so Fireworks can reuse the KV cache
       // and MoE expert routing across picks; for the other modes we
       // leave them ``undefined`` so each click is a fresh request.
@@ -978,6 +1027,79 @@
       <input type="checkbox" bind:checked={watchEos} class="accent-sky-500" />
       Watch EOS tokens
     </label>
+    <!--
+      "Prepend tokens" workflow: splice extra token ids in FRONT of
+      the tokenized prompt before scoring / generating. The motivating
+      use case is "predict position 0 from BOS" -- without anything in
+      front of the user's first token, an autoregressive model has no
+      prior context to predict it from, so the first row of the
+      prompt-logits table arrives unscored. Dropping the model's BOS
+      in here gives the model SOMETHING to condition on, so the
+      previously-unscorable position 0 finally shows real top alts and
+      a real probability for what the user actually typed.
+
+      The chip-input is always rendered (advanced users can experiment
+      with arbitrary token ids; pedagogically valuable for "what does
+      the model expect to see after this special marker?"), but a
+      stale UI state can't escape: the request-body assembler clears
+      the field when ``prependSupported`` is false, the backend's
+      ``Capabilities.supports_prepend_token_ids`` gates the same flag
+      server-side, and the cloud-backend score_prompt path raises
+      loudly on a non-empty value as a third belt-and-suspenders.
+
+      The "fill BOS" button is the one-click pedagogical entrypoint;
+      it's disabled when the model has no canonical BOS or the
+      backend can't accept prepend ids, with the disabled-state
+      tooltip explaining WHY (so the user understands the limit
+      instead of wondering why a button doesn't work).
+    -->
+    <div class="space-y-1">
+      <div class="flex items-center justify-between">
+        <label
+          class="label"
+          title="Token ids spliced in FRONT of the tokenized prompt. Pedagogical use: drop the model's BOS in here to see the BOS-conditioned distribution for what would otherwise be an unscorable position 0 (autoregressive models compute P(next | prior); position 0 has no prior). For non-BOS use cases this is a generic 'condition the model on these tokens first' knob."
+        >
+          prepend tokens
+          <span class="ml-1 normal-case text-[10px] text-slate-500"
+            >{prependTokenIds.length} ids</span
+          >
+        </label>
+        <button
+          type="button"
+          class="text-xs px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-slate-700"
+          disabled={!prependSupported || backendBosIds.length === 0}
+          title={!prependSupported
+            ? backendInfo?.family === 'cloud'
+              ? `${backend} is a cloud provider — it tokenizes the prompt server-side from a plain string, so we can't splice in extra token ids without switching to token-array prompt mode (not wired today). For BOS-conditioning experiments, switch to a local backend (HF or llamacpp-py) or a remote dsbx-server that exposes supports_prepend_token_ids.`
+              : `${backend} reports supports_prepend_token_ids=false. If this is a remote dsbx-server, it's probably running an older version of the engine that doesn't yet advertise prepend support — re-deploy the latest code on the remote side to enable it. For local backends, HF / llamacpp-py are the supported paths.`
+            : backendBosIds.length === 0
+              ? `${backend}'s model has no canonical BOS id we can recommend. Type any token id manually if you want to experiment with conditioning on a specific marker (e.g. ${backendInfo?.capabilities?.eos_token_ids?.[0] ?? '<some-special-id>'}).`
+              : `Fill the chip-input with the model's BOS id(s): [${backendBosIds.join(', ')}]. After scoring you'll see the BOS-conditioned distribution for your first prompt token in row K (where K = number of prepended ids) of the prompt-logits table.`}
+          onclick={() => {
+            prependTokenIds = backendBosIds.map((n) => String(n));
+          }}
+        >
+          fill BOS
+          {#if backendBosIds.length > 0}
+            <span class="ml-0.5 text-slate-500 tabular-nums">[{backendBosIds.join(',')}]</span>
+          {/if}
+        </button>
+      </div>
+      <ChipInput
+        bind:values={prependTokenIds}
+        label=""
+        placeholder={prependSupported ? 'numeric token id' : 'unsupported on this backend'}
+        preserveSpace={false}
+      />
+      <p class="text-[10px] text-slate-500 leading-snug">
+        Spliced BEFORE the prompt. Autoregressive models predict
+        P(next | prior tokens); position 0 has no prior, so the
+        leading prompt-logits row is normally unscored. Drop the
+        model's BOS in here to give the model something to condition
+        on — the formerly-unscorable position will then show a real
+        BOS-conditioned distribution.
+      </p>
+    </div>
     {#if logitBiasSupported}
       <div class="space-y-1">
         <div class="flex items-center justify-between">
@@ -1565,8 +1687,44 @@
               {@const isUnscored =
                 (!s.candidates || s.candidates.length === 0) &&
                 (chosenLP === null || !Number.isFinite(chosenLP))}
-              <tr class="border-b border-slate-800/60">
-                <td class="table-cell font-mono text-slate-400">{s.position}</td>
+              <!--
+                When the user is using the "prepend tokens" workflow,
+                rows at positions 1..prependCount-1 carry CHOSEN =
+                another prepended id (the model predicting its own
+                injected seed sequence -- mostly noise, but still
+                meaningful: see what the model thinks "after BOS"
+                etc.). The row at position == prependCount is the
+                interesting one: its chosen is the user's FIRST
+                actual prompt token, scored against the
+                BOS/prepended-conditioned distribution. We highlight
+                that row with an emerald left-border + a discrete
+                "BOS-conditioned" badge so the pedagogical payoff is
+                obvious at a glance instead of buried in the
+                "previous" column.
+              -->
+              {@const promptScorePrependCount = lastRunPrependCount}
+              {@const isBosConditioned =
+                promptScorePrependCount > 0 && s.position === promptScorePrependCount}
+              {@const isPrependedSeedRow =
+                promptScorePrependCount > 0 && s.position < promptScorePrependCount}
+              <tr
+                class="border-b border-slate-800/60 {isBosConditioned
+                  ? 'border-l-2 border-l-emerald-500/60'
+                  : isPrependedSeedRow
+                    ? 'border-l-2 border-l-slate-700/60'
+                    : ''}"
+              >
+                <td class="table-cell font-mono text-slate-400"
+                  >{s.position}{#if isPrependedSeedRow}<span
+                      class="ml-1 text-[9px] uppercase tracking-wider text-slate-600"
+                      title="Row from prepended-seed context: chosen is another prepended token (positions 1..K-1, where K=number of prepended ids). The pedagogically interesting row is the one marked 'BOS-conditioned' just below — its chosen is your first real prompt token."
+                      >seed</span
+                    >{:else if isBosConditioned}<span
+                      class="ml-1 text-[9px] uppercase tracking-wider text-emerald-400/90"
+                      title="BOS-conditioned: chosen is your first REAL prompt token, finally scored against a distribution the model actually computed (the rows above were the prepended seed; this row's chosen is the first thing you actually typed)."
+                      >BOS-conditioned</span
+                    >{/if}</td
+                >
                 <td class="table-cell font-mono text-slate-500 text-xs">
                   {#if isUnscored}
                     <span

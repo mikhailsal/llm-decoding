@@ -225,6 +225,20 @@ class GenerateRequest(BaseModel):
     # engine path the engine appends them directly to the token
     # buffer. Empty list = no prefix (historical behaviour).
     prefix_token_ids: list[int] = Field(default_factory=list)
+    # Token ids to splice in BEFORE the tokenized prompt -- the
+    # opposite end of ``prefix_token_ids`` (which historically
+    # acts as a SUFFIX-after-prompt for manual decoding). Sent to
+    # ``backend.score_prompt(..., prepend_token_ids=...)`` so the
+    # prompt-logits frame includes the BOS-conditioned distribution
+    # for the user's first prompt token (otherwise unscorable: an
+    # autoregressive model has nothing to predict from at position
+    # 0 without prior context). Gated by
+    # ``Capabilities.supports_prepend_token_ids``; the UI's
+    # "fill BOS" helper drops the model's known BOS ids in here.
+    # Backends that can't handle non-empty values (cloud providers
+    # that tokenize server-side from a plain prompt string) raise
+    # NotImplementedError; the web layer reports that as a 400.
+    prepend_token_ids: list[int] = Field(default_factory=list)
     # Token ids whose per-step probability the caller wants to track
     # even when they fall outside the returned top-k. Forwarded to
     # every per-token GenStep (and to the prompt-echo StepResults

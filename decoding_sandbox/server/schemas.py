@@ -83,6 +83,9 @@ class WireCapabilities(BaseModel):
     can_force_token: bool = False
     notes: str = ""
     eos_token_ids: list[int] = Field(default_factory=list)
+    # BOS marker(s) the model uses; empty for models with no canonical
+    # BOS (the frontend greys out the "fill BOS" helper in that case).
+    bos_token_ids: list[int] = Field(default_factory=list)
     # Provider extensions, see Capabilities docstring.
     supports_ignore_eos: bool = False
     supports_perf_metrics: bool = False
@@ -91,6 +94,11 @@ class WireCapabilities(BaseModel):
     supports_raw_output: bool = False
     supports_logit_bias: bool = False
     supports_combined_echo_stream: bool = False
+    # When true, score_prompt / stream_native accept a non-empty
+    # ``prepend_token_ids`` argument; backends that tokenize server-side
+    # from a plain ``prompt: str`` cannot inject extra ids safely and
+    # leave this False. The UI's prepend chip-input is gated on this.
+    supports_prepend_token_ids: bool = False
     # ``True`` for backends that are registered but inert. Currently set
     # only on chat-only OpenAI-compat providers (NIM / OpenRouter) until
     # proper chat-mode UI lands. The web layer rejects generate-stream
@@ -153,6 +161,19 @@ class ScorePromptRequest(BaseModel):
     prompt: str
     top_k: int = 8
     watch_ids: list[int] = Field(default_factory=list)
+    # Token ids to splice in BEFORE the tokenized prompt. The backend
+    # scores the combined sequence as one long context, so the first
+    # ``len(prepend_token_ids)`` rows of the response correspond to
+    # these injected tokens. The motivating use case is "predict
+    # position 0 from BOS": without an injected token the very first
+    # row of a score_prompt response would have no prior context to
+    # condition the model on and the upstream can't produce a real
+    # distribution there. Backends that can't safely inject extra ids
+    # (cloud providers that tokenize server-side from a plain
+    # prompt string) raise NotImplementedError when this is non-empty;
+    # the web layer should check capabilities.supports_prepend_token_ids
+    # before populating it.
+    prepend_token_ids: list[int] = Field(default_factory=list)
 
 
 class ScorePromptResponse(BaseModel):
@@ -307,6 +328,7 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         can_force_token=bool(caps.can_force_token),
         notes=caps.notes or "",
         eos_token_ids=list(caps.eos_token_ids or ()),
+        bos_token_ids=list(getattr(caps, "bos_token_ids", ()) or ()),
         supports_ignore_eos=bool(getattr(caps, "supports_ignore_eos", False)),
         supports_perf_metrics=bool(getattr(caps, "supports_perf_metrics", False)),
         supports_service_tier=bool(getattr(caps, "supports_service_tier", False)),
@@ -315,6 +337,9 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         supports_logit_bias=bool(getattr(caps, "supports_logit_bias", False)),
         supports_combined_echo_stream=bool(
             getattr(caps, "supports_combined_echo_stream", False)
+        ),
+        supports_prepend_token_ids=bool(
+            getattr(caps, "supports_prepend_token_ids", False)
         ),
         generation_disabled=bool(getattr(caps, "generation_disabled", False)),
     )

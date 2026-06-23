@@ -75,6 +75,24 @@ def test_info_returns_capabilities_and_backend_kind(client) -> None:
     assert isinstance(data["engine_version"], str) and data["engine_version"]
 
 
+def test_info_exposes_bos_token_ids_and_prepend_support() -> None:
+    """``bos_token_ids`` and ``supports_prepend_token_ids`` flow through /info.
+
+    The frontend's "fill BOS" helper reads these two fields out of the
+    same payload it uses to decide which sampling knobs to show. We pin
+    the wire shape here so a future refactor of Capabilities can't
+    silently drop the fields and quietly grey out the helper for
+    everyone -- the kind of regression that only surfaces when a user
+    notices the button no longer works on their model.
+    """
+    backend = _make_fake(bos_token_ids=(7, 8), supports_prepend_token_ids=True)
+    app = make_app(backend, backend_kind="fake-kind")
+    with TestClient(app) as c:
+        caps = c.get("/v1/info").json()["capabilities"]
+    assert caps["bos_token_ids"] == [7, 8]
+    assert caps["supports_prepend_token_ids"] is True
+
+
 def test_info_loaded_model_is_optional() -> None:
     """When the wrapped backend exposes no model attribute, the server
     reports null rather than guessing."""
@@ -173,7 +191,7 @@ def test_score_prompt_maps_notimplemented_to_400() -> None:
         def next_distribution(self, token_ids, top_k, *, watch_ids=()):
             return StepResult(position=len(token_ids), candidates=[], is_full_vocab=False)
 
-        def score_prompt(self, prompt, top_k, watch_ids=None):
+        def score_prompt(self, prompt, top_k, watch_ids=None, *, prepend_token_ids=()):
             raise NotImplementedError("chat-only providers cannot score prompts")
 
     app = make_app(_ChatOnly())
@@ -181,6 +199,64 @@ def test_score_prompt_maps_notimplemented_to_400() -> None:
         r = c.post("/v1/score_prompt", json={"prompt": "hi", "top_k": 5})
     assert r.status_code == 400
     assert "chat-only" in r.json()["detail"]
+
+
+def test_score_prompt_forwards_prepend_token_ids_to_backend() -> None:
+    """The /v1/score_prompt endpoint forwards prepend ids verbatim.
+
+    Without this wiring the frontend's "fill BOS" helper would silently
+    no-op on remote dsbx-server-backed backends (dsbx-host-py): the field
+    would be parsed off the request, then dropped on the floor before
+    reaching the backend. We use a tiny capture-only fake here rather
+    than a full FakeBackend so the assertion is exactly "the kwarg
+    reached the backend" with no other moving parts.
+    """
+    captured: dict = {}
+
+    class _Capturing(Backend):
+        @property
+        def capabilities(self):
+            from decoding_sandbox.core.types import Capabilities
+            return Capabilities(
+                name="capture",
+                full_vocab=True,
+                prompt_logprobs=True,
+                max_top_logprobs=5,
+                supports_prepend_token_ids=True,
+                bos_token_ids=(42,),
+            )
+
+        def tokenize(self, text):
+            return [97, 98]
+
+        def detokenize(self, ids):
+            return ""
+
+        def piece(self, tid):
+            return ""
+
+        def next_distribution(self, token_ids, top_k, *, watch_ids=()):
+            return StepResult(position=len(token_ids), candidates=[], is_full_vocab=True)
+
+        def score_prompt(self, prompt, top_k, watch_ids=None, *, prepend_token_ids=()):
+            captured["prepend"] = list(prepend_token_ids)
+            captured["watch_ids"] = list(watch_ids or [])
+            return []
+
+    app = make_app(_Capturing())
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/score_prompt",
+            json={
+                "prompt": "x",
+                "top_k": 5,
+                "watch_ids": [1, 2],
+                "prepend_token_ids": [42, 43],
+            },
+        )
+    assert r.status_code == 200
+    assert captured["prepend"] == [42, 43]
+    assert captured["watch_ids"] == [1, 2]
 
 
 def test_verify_greedy_endpoint() -> None:

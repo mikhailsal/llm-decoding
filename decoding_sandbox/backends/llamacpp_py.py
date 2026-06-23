@@ -97,6 +97,7 @@ class LlamaCppPyBackend(Backend):
         # (end-of-generation) -- if the binding exposes a list, take all of them;
         # otherwise fall back to the single token_eos().
         self._eos_ids: tuple[int, ...] = self._discover_eos_ids()
+        self._bos_ids: tuple[int, ...] = self._discover_bos_ids()
 
     # -- introspection ----------------------------------------------------- #
     @property
@@ -115,6 +116,8 @@ class LlamaCppPyBackend(Backend):
                 else "in-process llama.cpp; logits_all=False -> last-position only."
             ),
             eos_token_ids=self._eos_ids,
+            bos_token_ids=self._bos_ids,
+            supports_prepend_token_ids=True,
         )
 
     def _discover_eos_ids(self) -> tuple[int, ...]:
@@ -136,6 +139,28 @@ class LlamaCppPyBackend(Backend):
                 continue
             if tid >= 0 and tid not in out:
                 out.append(tid)
+        return tuple(out)
+
+    def _discover_bos_ids(self) -> tuple[int, ...]:
+        """Best-effort BOS extraction from the llama.cpp binding.
+
+        ``Llama.token_bos()`` is the canonical source. Some GGUF builds
+        return ``-1`` to mean "no canonical BOS configured for this
+        model" -- we drop those, leaving the tuple empty so the UI's
+        "fill BOS" helper greys out. Qwen-style models that overload
+        the EOS as a document-boundary marker still report a real
+        ``token_bos()``; we trust the binding.
+        """
+        out: list[int] = []
+        fn = getattr(self._llama, "token_bos", None)
+        if fn is None:
+            return ()
+        try:
+            tid = int(fn())
+        except Exception:  # noqa: BLE001
+            return ()
+        if tid >= 0:
+            out.append(tid)
         return tuple(out)
 
     def _is_special(self, token_id: int) -> bool:
@@ -269,7 +294,12 @@ class LlamaCppPyBackend(Backend):
         return step
 
     def score_prompt(
-        self, prompt: str, top_k: int, watch_ids: list[int] | None = None
+        self,
+        prompt: str,
+        top_k: int,
+        watch_ids: list[int] | None = None,
+        *,
+        prepend_token_ids: Sequence[int] = (),
     ) -> list[StepResult]:
         """Whole-context inspection including the trailing "next" prediction.
 
@@ -278,10 +308,20 @@ class LlamaCppPyBackend(Backend):
         is the distribution *after* the last prompt token, with
         ``chosen=None``. The same Llama.scores tensor already holds that
         row, so the only extra work is one more numpy argpartition.
+
+        ``prepend_token_ids`` lets the caller seed the sequence with extra
+        tokens BEFORE the tokenized prompt (e.g. the model's BOS) so the
+        user can observe the BOS-conditioned distribution for what would
+        otherwise be an unscorable position 0. The prepended tokens become
+        the leading rows of the result; the chosen at row K (= number of
+        prepended tokens) is the user's first prompt token, finally with
+        a real model probability instead of "no data".
         """
         np = self._numpy
         watch_ids = watch_ids or []
-        ids = self.tokenize(prompt)
+        prepend_ids = [int(t) for t in (prepend_token_ids or [])]
+        prompt_ids = self.tokenize(prompt)
+        ids = prepend_ids + list(prompt_ids)
         if not ids:
             return []
         logp = self._logsoftmax_all(ids)  # [seq, vocab]

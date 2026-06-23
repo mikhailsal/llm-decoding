@@ -555,6 +555,38 @@ def test_openai_compat_score_prompt_raises_on_chat_only_provider(monkeypatch) ->
         backend.score_prompt("anything", top_k=5)
 
 
+def test_openai_compat_score_prompt_rejects_prepend_token_ids(monkeypatch) -> None:
+    """Cloud providers can't safely splice extra ids into a string prompt.
+
+    The pedagogical "predict position 0 from BOS" workflow only makes
+    sense for backends that tokenize locally and can append extra ids
+    at the token level (HF, llamacpp_py, remote-backed-by-either).
+    Cloud providers like Fireworks take a plain ``prompt: str`` and
+    tokenize server-side, so injecting prepend ids would require
+    either (a) detokenize-then-concat (lossy: round-trip through text
+    might re-tokenize differently and silently shift positions) or
+    (b) switching to token-array prompt mode (a separate refactor we
+    haven't shipped). Pinning the loud refusal here prevents a future
+    "silent ignore" regression: the web layer relies on the
+    ``Capabilities.supports_prepend_token_ids`` flag to gate the
+    field, and if either the flag or this raise drifted we want the
+    test suite to scream.
+    """
+    backend, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_prompt_logprobs=True,
+    )
+    # Sanity: capability advertises False so the UI / web layer will
+    # never even SEND a non-empty list. The defensive raise inside
+    # score_prompt is a belt-and-suspenders against a stale client.
+    assert backend.capabilities.supports_prepend_token_ids is False
+    assert backend.capabilities.bos_token_ids == ()
+    with pytest.raises(NotImplementedError, match="prepend_token_ids"):
+        backend.score_prompt("hello", top_k=5, prepend_token_ids=[42])
+
+
 def test_openai_compat_capabilities_reflect_provider(monkeypatch) -> None:
     backend_a, _ = _make_oc_backend(
         monkeypatch,
