@@ -80,11 +80,25 @@ def discover_gguf_models(
         for match in sorted(d.glob(glob)):
             if not match.is_file():
                 continue
-            p = str(match.resolve())
-            if p in seen:
+            # Skip multimodal projector weights: LM Studio ships a
+            # ``mmproj-*.gguf`` alongside vision models, but it is not a
+            # standalone LLM and would fail to load as one.
+            if match.name.lower().startswith("mmproj"):
                 continue
-            seen.add(p)
-            out.append((p, match.stem))
+            # Dedup by the resolved target (HF hub keeps the real file under
+            # ``blobs/<sha>`` with a ``snapshots/.../name.gguf`` symlink, and
+            # two search dirs may overlap) but expose the *symlink* path as
+            # the id: it's human-readable and, crucially, matches the
+            # ``loaded_model`` the backend reports, so the picker can show
+            # the current model as selected.
+            try:
+                key = str(match.resolve())
+            except OSError:
+                key = str(match)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((str(match), match.stem))
     return out
 
 

@@ -14,8 +14,15 @@
    */
   interface Props {
     backend: BackendInfo;
+    // Optional: called with the newly-loaded model id whenever a load
+    // finishes ``ready`` (and once on mount if the slot is already ready).
+    // The Decode page uses this to keep its ``model`` field in sync with
+    // whatever the host actually has loaded.
+    onReady?: (model: string | null) => void;
+    // Compact layout for embedding in the Decode sidebar (no outer border).
+    compact?: boolean;
   }
-  let { backend }: Props = $props();
+  let { backend, onReady, compact = false }: Props = $props();
 
   let status = $state<RemoteStatus | null>(null);
   let models = $state<string[]>([]);
@@ -94,6 +101,7 @@
         // loaded model -- refresh the shared info store so every page's
         // backend dropdown + capability badges update.
         await info.refresh();
+        if (s === 'ready') onReady?.(status?.loaded_model ?? null);
       }
     }, 2000);
   }
@@ -108,6 +116,7 @@
       } else {
         busy = false;
         await info.refresh();
+        if (status.state === 'ready') onReady?.(status.loaded_model ?? null);
       }
     } catch (exc) {
       busy = false;
@@ -120,13 +129,15 @@
     if (status?.state === 'loading') {
       busy = true;
       schedulePoll();
+    } else if (status?.state === 'ready') {
+      onReady?.(status.loaded_model ?? null);
     }
   });
 
   onDestroy(stopPolling);
 </script>
 
-<div class="remote-control">
+<div class="remote-control" class:compact>
   <div class="flex items-center justify-between gap-2 mb-2">
     <div class="flex items-center gap-2">
       <span class="font-mono text-sm text-slate-200">{backend.name}</span>
@@ -183,6 +194,11 @@
     border-radius: 0.5rem;
     padding: 0.75rem;
     background: rgb(15 23 42 / 0.4);
+  }
+  .remote-control.compact {
+    border: none;
+    padding: 0;
+    background: transparent;
   }
   .badge {
     font-size: 0.7rem;

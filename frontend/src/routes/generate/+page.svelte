@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import BackendSelect from '$lib/components/BackendSelect.svelte';
   import ModelInput from '$lib/components/ModelInput.svelte';
+  import RemoteModelControl from '$lib/components/RemoteModelControl.svelte';
   import CapabilityBadges from '$lib/components/CapabilityBadges.svelte';
   import ChipInput from '$lib/components/ChipInput.svelte';
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
@@ -914,7 +915,24 @@
       prefix_token_ids = [your picks]</span>.
     </p>
     <BackendSelect bind:value={backend} onChange={onBackendChange} />
-    <ModelInput backend={backendInfo} bind:value={model} />
+    {#if backendInfo?.model_reloadable}
+      <!--
+        Remote dsbx-serve hosts own a swappable model slot, so the Decode
+        page lets you load/swap the model right here instead of bouncing to
+        the Status page. ``onReady`` keeps the local ``model`` field in sync
+        with whatever the host actually has loaded.
+      -->
+      <div>
+        <span class="label">model (remote host)</span>
+        <RemoteModelControl
+          backend={backendInfo}
+          compact={true}
+          onReady={(m) => { if (m) model = m; }}
+        />
+      </div>
+    {:else}
+      <ModelInput backend={backendInfo} bind:value={model} />
+    {/if}
     <CapabilityBadges backend={backend} />
     <!--
       The prompt input itself lives in the RIGHT column now (the
