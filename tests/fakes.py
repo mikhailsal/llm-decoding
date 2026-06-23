@@ -33,6 +33,7 @@ class FakeBackend(Backend):
         eos_token_ids: tuple[int, ...] = (),
         bos_token_ids: tuple[int, ...] = (),
         supports_prepend_token_ids: bool = True,
+        special_tokens: list[tuple[int, str]] | None = None,
     ) -> None:
         self.tokens = tokens or {}
         self.pieces = pieces or {}
@@ -44,6 +45,7 @@ class FakeBackend(Backend):
         self.eos_token_ids = eos_token_ids
         self.bos_token_ids = bos_token_ids
         self.supports_prepend_token_ids_flag = supports_prepend_token_ids
+        self._special_tokens = special_tokens or []
         self.closed = False
 
     @property
@@ -69,6 +71,9 @@ class FakeBackend(Backend):
 
     def piece(self, token_id: int) -> str:
         return self.pieces.get(token_id, chr(token_id))
+
+    def special_tokens(self) -> list[tuple[int, str]]:
+        return list(self._special_tokens)
 
     def next_distribution(
         self,

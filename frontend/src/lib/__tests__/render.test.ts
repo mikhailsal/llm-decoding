@@ -22,8 +22,11 @@ describe('renderTokenSegments', () => {
   });
 
   it('renders leading and trailing spaces as ␣ markers', () => {
-    expect(renderTokenPlain(' I ')).toBe('\u2423I\u2423');
-    expect(renderTokenPlain('  Paris')).toBe('\u2423\u2423Paris');
+    // Each space marker is ␣ + a zero-width space (U+200B) so long runs can
+    // still wrap and be selected; assert against the real marker.
+    const S = '\u2423\u200B';
+    expect(renderTokenPlain(' I ')).toBe(`${S}I${S}`);
+    expect(renderTokenPlain('  Paris')).toBe(`${S}${S}Paris`);
   });
 
   it('leaves internal spaces alone', () => {
@@ -35,14 +38,28 @@ describe('renderTokenSegments', () => {
     expect(renderTokenPlain('a\tb')).toBe('a\u2192b');
   });
 
-  it('marks special tokens distinctly when their text is empty whitespace', () => {
+  it('marks an explicitly-special token as <special> even when its text is empty', () => {
+    // Regression: backends that detokenize control tokens to "" must NOT
+    // render the dim <empty> placeholder (which reads as "model emitted
+    // nothing"); the is_special flag takes priority over the empty check.
     const segs = renderTokenSegments('', true);
-    expect(segs[0].kind).toBe('empty');
+    expect(segs[0].kind).toBe('special');
+    expect(segs[0].text).toBe('<special>');
+  });
+
+  it('still renders a genuinely empty, non-special token as <empty>', () => {
+    expect(renderTokenSegments('', false)).toEqual([{ kind: 'empty', text: '<empty>' }]);
   });
 
   it('renders <|endoftext|> as a special token via the heuristic', () => {
     expect(isSpecialText('<|endoftext|>')).toBe(true);
     expect(renderTokenSegments('<|endoftext|>')[0].kind).toBe('special');
+  });
+
+  it('recognizes DeepSeek fullwidth-pipe specials (<｜begin▁of▁sentence｜>)', () => {
+    const ds = '<\uFF5Cbegin\u2581of\u2581sentence\uFF5C>';
+    expect(isSpecialText(ds)).toBe(true);
+    expect(renderTokenSegments(ds)[0].kind).toBe('special');
   });
 
   it('renders other control bytes as \\xNN', () => {

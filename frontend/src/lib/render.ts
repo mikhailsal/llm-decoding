@@ -30,7 +30,12 @@ const TAB = '\u2192'; // →
 
 export function isSpecialText(text: string): boolean {
   if (!text) return false;
-  return /^<\|[^|]*\|>$/.test(text);
+  // ASCII-pipe markers (``<|endoftext|>``, gpt-oss / Qwen / GLM) AND the
+  // FULLWIDTH-pipe variant DeepSeek ships (``<｜begin▁of▁sentence｜>``,
+  // U+FF5C). Without the second alternative DeepSeek's BOS/EOS would slip
+  // through the heuristic and render as plain text instead of a magenta
+  // special chip whenever the backend didn't also set the is_special flag.
+  return /^<\|[^|]*\|>$/.test(text) || /^<\uFF5C[^\uFF5C]*\uFF5C>$/.test(text);
 }
 
 /**
@@ -42,14 +47,24 @@ export function renderTokenSegments(
   text: string,
   isSpecial = false
 ): TokenSegment[] {
-  if (text === '') {
-    return [{ kind: 'empty', text: '<empty>' }];
-  }
+  // SPECIAL takes priority over the empty-string check. A special token
+  // (EOS / BOS / chat marker) whose surface form is empty -- e.g. a
+  // backend that detokenizes control tokens to ``""`` -- must read as
+  // ``<special>`` (magenta), NOT the dim ``<empty>`` placeholder, which
+  // reads as "the model emitted nothing" and confused users who saw
+  // their model predict EOS rendered as ``<empty>``. Backends that can
+  // surface the real name (llama.cpp ``detokenize(special=True)``,
+  // HF ``decode(skip_special_tokens=False)``) will pass non-empty text
+  // here and it shows verbatim; this branch is the safety net for the
+  // ones that can't.
   if (isSpecial || isSpecialText(text)) {
     if (text.trim() === '') {
       return [{ kind: 'special', text: '<special>' }];
     }
     return [{ kind: 'special', text }];
+  }
+  if (text === '') {
+    return [{ kind: 'empty', text: '<empty>' }];
   }
   const out: TokenSegment[] = [];
   // Leading spaces

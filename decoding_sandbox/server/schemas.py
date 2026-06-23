@@ -157,6 +157,15 @@ class PieceResponse(BaseModel):
     text: str
 
 
+class SpecialToken(BaseModel):
+    id: int
+    text: str
+
+
+class SpecialTokensResponse(BaseModel):
+    tokens: list[SpecialToken]
+
+
 class NextDistributionRequest(BaseModel):
     ids: list[int]
     top_k: int = 8

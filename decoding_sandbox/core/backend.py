@@ -125,6 +125,19 @@ class Backend(ABC):
             results.append(step)
         return results
 
+    def special_tokens(self) -> list[tuple[int, str]]:
+        """Return the tokenizer's special / added tokens as ``(id, text)``.
+
+        Powers the Decode workbench's "insert special token" palette: the
+        user gets a model-specific list of BOS / EOS / chat markers they
+        can splice into the prompt, each guaranteed to tokenize back to the
+        single id it names (HF tokenizers match added tokens inside the
+        text; llama.cpp does the same with ``special=True``). Default: no
+        tokenizer introspection available -> empty list, so chat-only /
+        stub backends simply render no palette rather than lying.
+        """
+        return []
+
     def lookup_watch(self, step: StepResult, token_id: int) -> TokenCandidate:
         """Resolve a watch token's candidate from a step (or mark as <top-k).
 

@@ -789,6 +789,25 @@ def test_openai_compat_loads_tokenizer_and_tokenizes_locally(monkeypatch) -> Non
     assert caps.supports_prepend_token_ids is True
 
 
+def test_openai_compat_special_tokens_from_added_decoder(monkeypatch) -> None:
+    """``special_tokens`` surfaces the tokenizer's added special tokens, sorted."""
+    backend, _ = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={},
+        specials={2: "<|endoftext|>", 1: "<|startoftext|>"},
+    )
+    specials = backend.special_tokens()
+    assert (1, "<|startoftext|>") in specials
+    assert (2, "<|endoftext|>") in specials
+    assert specials == sorted(specials, key=lambda pair: pair[0])
+
+
+def test_openai_compat_special_tokens_empty_without_tokenizer(monkeypatch) -> None:
+    """No mapped tokenizer (chat-only / unmapped) -> empty palette, no crash."""
+    backend, _ = _make_oc_backend(monkeypatch, routes={})
+    assert backend.special_tokens() == []
+
+
 def test_openai_compat_capabilities_autodiscover_bos_from_tokenizer(
     monkeypatch,
 ) -> None:

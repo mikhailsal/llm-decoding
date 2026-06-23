@@ -380,6 +380,30 @@ class OpenAICompatBackend(Backend):
             return provider_text
         return self.piece(int(token_id))
 
+    def special_tokens(self) -> list[tuple[int, str]]:
+        """Special / added tokens from the mapped HF ``tokenizer.json``.
+
+        Source is ``Tokenizer.get_added_tokens_decoder()`` ({id: AddedToken});
+        we keep the entries flagged ``special`` and return ``(id, content)``
+        sorted by id. The content string is exactly what ``encode`` matches
+        back to the single id, so the Decode workbench can drop it into the
+        prompt and trust the round-trip. No tokenizer (chat-only / unmapped
+        model) -> empty list (no palette).
+        """
+        tok = self._ensure_tokenizer()
+        if tok is None:
+            return []
+        out: list[tuple[int, str]] = []
+        try:
+            decoder = tok.get_added_tokens_decoder()
+            for tid, added in decoder.items():
+                if getattr(added, "special", False):
+                    out.append((int(tid), str(added.content)))
+        except Exception:  # noqa: BLE001
+            return []
+        out.sort(key=lambda pair: pair[0])
+        return out
+
     def piece(self, token_id: int) -> str:
         tok = self._ensure_tokenizer()
         if tok is None:

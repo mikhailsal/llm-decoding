@@ -89,6 +89,14 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
             text = backend.piece(int(req.id))
         return S.PieceResponse(text=text)
 
+    @app.post("/v1/special_tokens", response_model=S.SpecialTokensResponse)
+    def special_tokens() -> S.SpecialTokensResponse:
+        with lock:
+            pairs = backend.special_tokens()
+        return S.SpecialTokensResponse(
+            tokens=[S.SpecialToken(id=int(i), text=str(t)) for i, t in pairs]
+        )
+
     # ---------------------------------------------------------- inference
     @app.post("/v1/next_distribution", response_model=S.WireStepResult)
     def next_distribution(req: S.NextDistributionRequest) -> S.WireStepResult:

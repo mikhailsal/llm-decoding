@@ -7,7 +7,7 @@
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
   import TokenInline from '$lib/components/TokenInline.svelte';
-  import PromptTokenPreview from '$lib/components/PromptTokenPreview.svelte';
+  import TokenComposer from '$lib/components/TokenComposer.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
@@ -307,15 +307,19 @@
   let localTokenizeSupported = $derived<boolean>(
     !!activeCaps?.supports_local_tokenize
   );
-  // The model's canonical BOS token id(s), as reported by the backend.
-  // For HF / llamacpp_py / remote-backed-by-either we read
-  // tokenizer.bos_token_id (or Llama.token_bos()); cloud providers
-  // leave this empty. Used by the "fill BOS" button: when non-empty
-  // the button is enabled and a click drops these ids into the
-  // prepend chip-input.
-  let backendBosIds = $derived<number[]>(
-    (activeCaps?.bos_token_ids ?? []).map((n: unknown) => Number(n))
-  );
+  // Empty-prompt guard. An autoregressive model computes P(next | prior
+  // tokens); with ZERO input tokens there is literally nothing to
+  // condition the first prediction on, so a run can't even begin (and
+  // every provider rejects / no-ops an empty prompt). Rather than fire a
+  // request that silently does nothing, we disable the run buttons and
+  // explain why -- and point at the fix (type text, or insert a special
+  // token like BOS from the palette to give the model a starting point).
+  let promptEmpty = $derived<boolean>(prompt.length === 0);
+  const emptyPromptNote =
+    'Empty prompt — nothing to run. An autoregressive model predicts the ' +
+    'next token from the tokens before it; with zero input tokens there is ' +
+    'nothing to condition on. Type some text, or insert a special token ' +
+    '(e.g. the model’s BOS) from the palette to seed generation.';
   // Chat-only providers (NIM / OpenRouter) are registered but inert
   // until proper chat-mode UI lands; the middleware rejects
   // generate-stream requests against them with a 400. We mirror the
@@ -912,20 +916,14 @@
     <BackendSelect bind:value={backend} onChange={onBackendChange} />
     <ModelInput backend={backendInfo} bind:value={model} />
     <CapabilityBadges backend={backend} />
-    <div>
-      <label class="label" for="prompt">Prompt</label>
-      <textarea id="prompt" rows="3" class="input font-mono" bind:value={prompt}></textarea>
-      <!--
-        Live token preview used to live here, directly under the
-        textarea. It now lives in the RIGHT column above "running
-        completion": that puts the three artefacts the user wants to
-        compare side-by-side ("what I typed" -> "what the model sees"
-        -> "what the model emits") and gives the chip row more
-        horizontal real-estate when prompts get long. The preview also
-        now folds in the staged ``prependTokenIds`` so the user can
-        see the exact sequence the backend will receive.
-      -->
-    </div>
+    <!--
+      The prompt input itself lives in the RIGHT column now (the
+      ``TokenComposer`` above "running completion"): it carries inline
+      token-boundary highlighting plus the special-token palette, so the
+      three artefacts a student compares sit side-by-side -- "what I typed
+      / how it tokenizes" -> "what the model emits". This left card keeps
+      the run controls (backend / model / sampler / stops / buttons).
+    -->
     <div class="grid grid-cols-2 gap-2">
       <div>
         <label class="label" for="mt">max tokens</label>
@@ -1065,78 +1063,12 @@
       Watch EOS tokens
     </label>
     <!--
-      "Prepend tokens" workflow: splice extra token ids in FRONT of
-      the tokenized prompt before scoring / generating. The motivating
-      use case is "predict position 0 from BOS" -- without anything in
-      front of the user's first token, an autoregressive model has no
-      prior context to predict it from, so the first row of the
-      prompt-logits table arrives unscored. Dropping the model's BOS
-      in here gives the model SOMETHING to condition on, so the
-      previously-unscorable position 0 finally shows real top alts and
-      a real probability for what the user actually typed.
-
-      The chip-input is always rendered (advanced users can experiment
-      with arbitrary token ids; pedagogically valuable for "what does
-      the model expect to see after this special marker?"), but a
-      stale UI state can't escape: the request-body assembler clears
-      the field when ``prependSupported`` is false, the backend's
-      ``Capabilities.supports_prepend_token_ids`` gates the same flag
-      server-side, and the cloud-backend score_prompt path raises
-      loudly on a non-empty value as a third belt-and-suspenders.
-
-      The "fill BOS" button is the one-click pedagogical entrypoint;
-      it's disabled when the model has no canonical BOS or the
-      backend can't accept prepend ids, with the disabled-state
-      tooltip explaining WHY (so the user understands the limit
-      instead of wondering why a button doesn't work).
+      The old "prepend tokens" chip-input + "fill BOS" button lived here.
+      They're gone: the TokenComposer (right column) lets you insert the
+      model's BOS -- or any special token -- directly at the start of the
+      prompt, which is the same BOS-conditioning experiment expressed in
+      the token stream itself. One composer, no separate splice field.
     -->
-    <div class="space-y-1">
-      <div class="flex items-center justify-between">
-        <label
-          class="label"
-          title="Token ids spliced in FRONT of the tokenized prompt. Pedagogical use: drop the model's BOS in here to see the BOS-conditioned distribution for what would otherwise be an unscorable position 0 (autoregressive models compute P(next | prior); position 0 has no prior). For non-BOS use cases this is a generic 'condition the model on these tokens first' knob."
-        >
-          prepend tokens
-          <span class="ml-1 normal-case text-[10px] text-slate-500"
-            >{prependTokenIds.length} ids</span
-          >
-        </label>
-        <button
-          type="button"
-          class="text-xs px-2 py-0.5 rounded border border-slate-700 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-slate-700"
-          disabled={!prependSupported || backendBosIds.length === 0}
-          title={!prependSupported
-            ? backendInfo?.family === 'cloud'
-              ? `${backend} is a cloud provider — it tokenizes the prompt server-side from a plain string, so we can't splice in extra token ids without switching to token-array prompt mode (not wired today). For BOS-conditioning experiments, switch to a local backend (HF or llamacpp-py) or a remote dsbx-server that exposes supports_prepend_token_ids.`
-              : `${backend} reports supports_prepend_token_ids=false. If this is a remote dsbx-server, it's probably running an older version of the engine that doesn't yet advertise prepend support — re-deploy the latest code on the remote side to enable it. For local backends, HF / llamacpp-py are the supported paths.`
-            : backendBosIds.length === 0
-              ? `${backend}'s model has no canonical BOS id we can recommend. Type any token id manually if you want to experiment with conditioning on a specific marker (e.g. ${activeCaps?.eos_token_ids?.[0] ?? '<some-special-id>'}).`
-              : `Fill the chip-input with the model's BOS id(s): [${backendBosIds.join(', ')}]. After scoring you'll see the BOS-conditioned distribution for your first prompt token in row K (where K = number of prepended ids) of the prompt-logits table.`}
-          onclick={() => {
-            prependTokenIds = backendBosIds.map((n) => String(n));
-          }}
-        >
-          fill BOS
-          {#if backendBosIds.length > 0}
-            <span class="ml-0.5 text-slate-500 tabular-nums">[{backendBosIds.join(',')}]</span>
-          {/if}
-        </button>
-      </div>
-      <ChipInput
-        bind:values={prependTokenIds}
-        label=""
-        placeholder={prependSupported ? 'numeric token id' : 'unsupported on this backend'}
-        preserveSpace={false}
-      />
-      <p class="text-[10px] text-slate-500 leading-snug">
-        Spliced BEFORE the prompt. Autoregressive models predict
-        P(next | prior tokens); position 0 has no prior, so the
-        leading prompt-logits row is normally unscored. Drop the
-        model's BOS in here to give the model something to condition
-        on — the formerly-unscorable position will then show a real
-        BOS-conditioned distribution.
-      </p>
-    </div>
     {#if logitBiasSupported}
       <div class="space-y-1">
         <div class="flex items-center justify-between">
@@ -1329,86 +1261,94 @@
         </p>
       </div>
     {/if}
-    <div class="grid grid-cols-3 gap-2">
-      <button
-        class="btn flex-1 {lastMode === 'inspect' && !busy ? 'btn-primary' : 'btn-ghost'}"
-        onclick={runInspect}
-        disabled={busy || !backend || generationDisabled}
-        title={generationDisabled
-          ? generationDisabledNote
-          : 'Score every prompt position (max_tokens=1 + include_prompt). Same wire path as generate; just stops after one emitted token.'}
-      >
-        {busy && lastMode === 'inspect' ? '…' : 'inspect'}
-      </button>
-      <button
-        class="btn flex-1 {lastMode === 'generate' && !busy ? 'btn-primary' : 'btn-ghost'}"
-        onclick={runGenerate}
-        disabled={busy || !backend || generationDisabled}
-        title={generationDisabled
-          ? generationDisabledNote
-          : 'Stream N tokens with the current sampler.'}
-      >
-        {busy && lastMode === 'generate' ? '…' : 'generate'}
-      </button>
-      <button
-        class="btn flex-1 {manualMode ? 'btn-primary' : 'btn-ghost'}"
-        onclick={enterManual}
-        disabled={busy || !backend || generationDisabled}
-        title={generationDisabled
-          ? generationDisabledNote
-          : 'Open the inline picker: pick or force each token by hand. Browser state only; one /generate/stream call per pick (Fireworks reuses KV cache via session_id + prompt_cache_key).'}
-      >
-        {busy && lastMode === 'manual' ? '…' : 'manual'}
-      </button>
-    </div>
-    {#if busy}
-      <div class="mt-2 flex justify-end">
-        <button class="btn btn-ghost text-xs" onclick={cancel}>stop streaming</button>
-      </div>
-    {/if}
-    {#if generationDisabled}
-      <p class="mt-1 text-[11px] text-amber-400 leading-snug">
-        {generationDisabledNote || 'generation disabled for this backend'}
-      </p>
-    {/if}
-    {#if manualMode}
-      <p class="mt-2 text-[11px] text-sky-400/80 leading-snug">
-        manual mode active — pick a candidate in the right panel; each pick fires
-        one <span class="font-mono">/generate/stream</span> call with
-        <span class="font-mono">prefix_token_ids = [your picks]</span>.
-        <button
-          type="button"
-          class="ml-1 underline decoration-dotted hover:text-sky-200"
-          onclick={exitManual}
-        >exit manual</button>
-      </p>
-    {/if}
   </div>
 
   <div class="lg:col-span-2 space-y-3">
-    {#if localTokenizeSupported}
-      <div class="card py-2 px-3">
-        <!--
-          Live token preview lives in the right column (more horizontal
-          space for long prompts) and is gated on
-          ``localTokenizeSupported`` so we don't surface the synthetic-
-          id stub as "your tokens" on backends without a real local
-          tokenizer. The preview folds in any staged prepend token ids
-          as a separate visual group at the head of the chip row, so
-          the user can audit the exact sequence the backend receives
-          in token-array prompt mode (``[...prepend, ...prompt]``).
-        -->
-        <PromptTokenPreview
-          text={prompt}
-          backend={backend}
-          model={model}
-          enabled={localTokenizeSupported}
-          prependIds={prependTokenIds
-            .map((s) => Number.parseInt(s, 10))
-            .filter((n) => Number.isFinite(n))}
-        />
+    <div class="card py-2 px-3">
+      <!--
+        The prompt composer: an editable field with INLINE token-boundary
+        highlighting plus a model-specific special-token palette. It lives
+        here (right column, above "running completion") so the student sees
+        "what I typed / how it tokenizes" right next to "what the model
+        emits". ``enabled`` gates the highlight + palette on a real local
+        tokenizer; without one it degrades to a plain textarea.
+
+        The run controls (inspect / generate / manual) sit DIRECTLY under
+        the composer -- they used to live at the bottom of the left config
+        card where they got lost far from the input the user is editing.
+      -->
+      <TokenComposer
+        bind:value={prompt}
+        backend={backend}
+        model={model}
+        enabled={localTokenizeSupported}
+      />
+      <div class="mt-3 grid grid-cols-3 gap-2">
+        <button
+          class="btn flex-1 {lastMode === 'inspect' && !busy ? 'btn-primary' : 'btn-ghost'}"
+          onclick={runInspect}
+          disabled={busy || !backend || generationDisabled || promptEmpty}
+          title={generationDisabled
+            ? generationDisabledNote
+            : promptEmpty
+              ? emptyPromptNote
+              : 'Score every prompt position (max_tokens=1 + include_prompt). Same wire path as generate; just stops after one emitted token.'}
+        >
+          {busy && lastMode === 'inspect' ? '…' : 'inspect'}
+        </button>
+        <button
+          class="btn flex-1 {lastMode === 'generate' && !busy ? 'btn-primary' : 'btn-ghost'}"
+          onclick={runGenerate}
+          disabled={busy || !backend || generationDisabled || promptEmpty}
+          title={generationDisabled
+            ? generationDisabledNote
+            : promptEmpty
+              ? emptyPromptNote
+              : 'Stream N tokens with the current sampler.'}
+        >
+          {busy && lastMode === 'generate' ? '…' : 'generate'}
+        </button>
+        <button
+          class="btn flex-1 {manualMode ? 'btn-primary' : 'btn-ghost'}"
+          onclick={enterManual}
+          disabled={busy || !backend || generationDisabled || promptEmpty}
+          title={generationDisabled
+            ? generationDisabledNote
+            : promptEmpty
+              ? emptyPromptNote
+              : 'Open the inline picker: pick or force each token by hand. Browser state only; one /generate/stream call per pick (Fireworks reuses KV cache via session_id + prompt_cache_key).'}
+        >
+          {busy && lastMode === 'manual' ? '…' : 'manual'}
+        </button>
       </div>
-    {/if}
+      {#if busy}
+        <div class="mt-2 flex justify-end">
+          <button class="btn btn-ghost text-xs" onclick={cancel}>stop streaming</button>
+        </div>
+      {/if}
+      {#if promptEmpty && !generationDisabled}
+        <p class="mt-2 text-[11px] text-amber-400 leading-snug">
+          {emptyPromptNote}
+        </p>
+      {/if}
+      {#if generationDisabled}
+        <p class="mt-1 text-[11px] text-amber-400 leading-snug">
+          {generationDisabledNote || 'generation disabled for this backend'}
+        </p>
+      {/if}
+      {#if manualMode}
+        <p class="mt-2 text-[11px] text-sky-400/80 leading-snug">
+          manual mode active — pick a candidate in the right panel; each pick fires
+          one <span class="font-mono">/generate/stream</span> call with
+          <span class="font-mono">prefix_token_ids = [your picks]</span>.
+          <button
+            type="button"
+            class="ml-1 underline decoration-dotted hover:text-sky-200"
+            onclick={exitManual}
+          >exit manual</button>
+        </p>
+      {/if}
+    </div>
 
     <div class="card">
       <div class="flex items-center justify-between mb-1">

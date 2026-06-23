@@ -108,6 +108,7 @@ class RemoteBackend(Backend):
         # every step; without caching every render becomes a noticeable
         # network burst.
         self._piece_cache: dict[int, str] = {}
+        self._special_tokens_cache: list[tuple[int, str]] | None = None
 
     # ------------------------------------------------------------------ #
     @property
@@ -160,6 +161,26 @@ class RemoteBackend(Backend):
         text = str(data.get("text", ""))
         self._piece_cache[token_id] = text
         return text
+
+    def special_tokens(self) -> list[tuple[int, str]]:
+        """Proxy to the remote server's ``/v1/special_tokens``.
+
+        Degrades to an empty list when the remote is an OLDER dsbx-server
+        that predates the endpoint (404) -- the Decode workbench just won't
+        render a palette for that backend instead of erroring. Result is
+        cached for the lifetime of this backend handle.
+        """
+        if self._special_tokens_cache is not None:
+            return self._special_tokens_cache
+        out: list[tuple[int, str]] = []
+        try:
+            data = self._post("/v1/special_tokens", {})
+            for entry in data.get("tokens", []) or []:
+                out.append((int(entry["id"]), str(entry["text"])))
+        except RemoteBackendError:
+            out = []
+        self._special_tokens_cache = out
+        return out
 
     def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
         body = {"ids": [int(i) for i in token_ids], "top_k": int(top_k)}

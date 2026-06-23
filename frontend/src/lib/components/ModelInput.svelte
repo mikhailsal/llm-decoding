@@ -183,6 +183,22 @@
     void loadModels(true);
   }
 
+  // The trailing button is a DROPDOWN TOGGLE (chevron), not a refresh
+  // icon: a bare ``↻`` next to the field read as "three dots that do
+  // nothing" because clicking it refetched the catalogue invisibly while
+  // the list was closed. Now it opens/closes the list like any combobox;
+  // an explicit "refresh" link lives inside the open list for the rare
+  // re-fetch case.
+  function toggleDropdown() {
+    if (!editable) return;
+    if (open) {
+      closeDropdown();
+    } else {
+      openDropdown();
+      inputEl?.focus();
+    }
+  }
+
   function fmtSource(): string {
     if (!liveSource) return '';
     if (liveSource === 'live') return 'live';
@@ -233,12 +249,14 @@
         />
         <button
           type="button"
-          class="btn btn-ghost text-xs px-2"
-          onclick={refresh}
-          disabled={loading}
-          title="re-fetch the provider's model catalogue"
+          class="btn btn-ghost text-xs px-2 combobox-toggle"
+          class:open
+          onclick={toggleDropdown}
+          aria-expanded={open}
+          aria-label="show model list"
+          title={open ? 'hide model list' : 'show model list'}
         >
-          {loading ? '…' : '↻'}
+          {loading ? '…' : '▾'}
         </button>
       </div>
       {#if open}
@@ -272,6 +290,20 @@
               </button>
             {/each}
           {/if}
+          <div class="combobox-footer">
+            <button
+              type="button"
+              class="combobox-refresh"
+              onmousedown={(e) => {
+                e.preventDefault();
+                refresh();
+              }}
+              disabled={loading}
+              title="re-fetch the provider's model catalogue from the API"
+            >
+              {loading ? 'refreshing…' : '↻ refresh catalogue'}
+            </button>
+          </div>
         </div>
       {/if}
       <p class="combobox-status">
@@ -312,6 +344,32 @@
     display: flex;
     gap: 0.375rem;
     align-items: stretch;
+  }
+  .combobox-toggle {
+    transition: transform 0.12s ease;
+  }
+  .combobox-toggle.open {
+    transform: rotate(180deg);
+  }
+  .combobox-footer {
+    border-top: 1px solid rgb(51 65 85);
+    margin-top: 0.25rem;
+    padding-top: 0.25rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .combobox-refresh {
+    background: none;
+    border: 0;
+    color: rgb(148 163 184);
+    font-size: 0.72rem;
+    cursor: pointer;
+    padding: 0.2rem 0.35rem;
+    border-radius: 0.25rem;
+  }
+  .combobox-refresh:hover {
+    color: rgb(226 232 240);
+    background: rgb(30 41 59);
   }
   .combobox-list {
     position: absolute;

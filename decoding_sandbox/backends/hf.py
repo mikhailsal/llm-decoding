@@ -103,6 +103,29 @@ class HFBackend(Backend):
             self._piece_cache[token_id] = self.tokenizer.decode([token_id])
         return self._piece_cache[token_id]
 
+    def special_tokens(self) -> list[tuple[int, str]]:
+        """Special / added tokens from the transformers tokenizer.
+
+        Prefers ``added_tokens_decoder`` ({id: AddedToken}) filtered to the
+        ``special`` entries; falls back to zipping ``all_special_ids`` with
+        ``all_special_tokens`` on older tokenizers that don't expose the
+        decoder map. Returns ``(id, text)`` sorted by id -- the same
+        contract the Decode workbench palette consumes for every backend.
+        """
+        out: list[tuple[int, str]] = []
+        decoder = getattr(self.tokenizer, "added_tokens_decoder", None)
+        if decoder:
+            for tid, added in decoder.items():
+                if getattr(added, "special", False):
+                    out.append((int(tid), str(getattr(added, "content", added))))
+        else:
+            ids = list(getattr(self.tokenizer, "all_special_ids", []) or [])
+            toks = list(getattr(self.tokenizer, "all_special_tokens", []) or [])
+            for tid, txt in zip(ids, toks):
+                out.append((int(tid), str(txt)))
+        out.sort(key=lambda pair: pair[0])
+        return out
+
     def _logprobs_at_last(self, token_ids: list[int]):
         torch = self._torch
         input_ids = torch.tensor([token_ids], device=self.model.device)

@@ -81,10 +81,10 @@ class _FakeLlama:
     def n_vocab(self) -> int:
         return self._vocab
 
-    def tokenize(self, data: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, data: bytes, add_bos: bool = True, special: bool = False) -> list[int]:
         return [b for b in data]
 
-    def detokenize(self, ids: list[int]) -> bytes:
+    def detokenize(self, ids: list[int], special: bool = False) -> bytes:
         return bytes(int(i) & 0xFF for i in ids)
 
     def reset(self) -> None:
@@ -569,11 +569,11 @@ def test_is_special_true_for_braced_tokens(monkeypatch, tmp_path) -> None:
     """Tokens whose detokenized text matches ``<|...|>`` also get is_special."""
 
     class _LlamaWithBracedToken(_FakeLlama):
-        def detokenize(self, ids):
+        def detokenize(self, ids, special: bool = False):
             # Mark id 7 as a special braced token; everything else is identity.
             if list(ids) == [7]:
                 return b"<|im_end|>"
-            return super().detokenize(ids)
+            return super().detokenize(ids, special=special)
 
     mod = types.ModuleType("llama_cpp")
     mod.Llama = _LlamaWithBracedToken
@@ -595,3 +595,84 @@ def test_is_special_true_for_braced_tokens(monkeypatch, tmp_path) -> None:
     # And id 7 specifically -- not every candidate -- is flagged.
     others = [c.is_special for c in step.candidates if c.token_id != 7 and c.token_id != 250]
     assert all(s is False for s in others)
+
+
+def test_piece_renders_special_token_name(monkeypatch, tmp_path) -> None:
+    """``piece`` must surface a control token's name, never an empty string.
+
+    Real llama.cpp detokenizes control tokens to ``""`` UNLESS special=True;
+    the backend passes special=True so EOS/BOS read as ``<|endoftext|>`` in
+    the UI instead of the misleading dim ``<empty>``.
+    """
+
+    class _LlamaSpecialAware(_FakeLlama):
+        def detokenize(self, ids, special: bool = False):
+            if list(ids) == [42]:
+                # Control token: blank without special, named with it.
+                return b"<|endoftext|>" if special else b""
+            return super().detokenize(ids, special=special)
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _LlamaSpecialAware
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
+    )
+    assert b.piece(42) == "<|endoftext|>"
+
+
+def test_special_tokens_scans_control_and_user_defined(monkeypatch, tmp_path) -> None:
+    """``special_tokens`` enumerates CONTROL / USER_DEFINED ids via attr API."""
+
+    class _Model:
+        model = object()
+
+    class _LlamaWithVocab(_FakeLlama):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._model = _Model()
+
+        def detokenize(self, ids, special: bool = False):
+            names = {5: b"<|im_start|>", 9: b"<|endoftext|>"}
+            if special and list(ids) and list(ids)[0] in names:
+                return names[list(ids)[0]]
+            return super().detokenize(ids, special=special)
+
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _LlamaWithVocab
+    mod.llama_model_get_vocab = lambda m: "VOCAB"  # noqa: ARG005
+    # id 5 = CONTROL (1<<3), id 9 = USER_DEFINED (1<<4), rest = normal.
+    attr_map = {5: 1 << 3, 9: 1 << 4}
+    mod.llama_vocab_get_attr = lambda vocab, i: attr_map.get(i, 0)  # noqa: ARG005
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
+    )
+    specials = b.special_tokens()
+    assert (5, "<|im_start|>") in specials
+    assert (9, "<|endoftext|>") in specials
+    # Caching: a second call returns the same object without re-scanning.
+    assert b.special_tokens() is specials
+
+
+def test_special_tokens_empty_when_attr_api_missing(monkeypatch, tmp_path) -> None:
+    """No low-level attr API on this llama_cpp build -> empty list, no crash."""
+    mod = types.ModuleType("llama_cpp")
+    mod.Llama = _FakeLlama  # no llama_model_get_vocab / llama_vocab_get_attr
+    monkeypatch.setitem(sys.modules, "llama_cpp", mod)
+    fake_gguf = tmp_path / "fake.gguf"
+    fake_gguf.write_bytes(b"")
+    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+
+    b = LlamaCppPyBackend(
+        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
+    )
+    assert b.special_tokens() == []

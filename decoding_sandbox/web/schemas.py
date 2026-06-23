@@ -174,6 +174,20 @@ class PieceResponse(BaseModel):
     text: str
 
 
+class SpecialTokensRequest(BaseModel):
+    backend: str
+    model: str | None = None
+
+
+class SpecialTokenEntry(BaseModel):
+    id: int
+    text: str
+
+
+class SpecialTokensResponse(BaseModel):
+    tokens: list[SpecialTokenEntry]
+
+
 # --------------------------------------------------------------------------- #
 # Generate (SSE body re-uses WireGenStep verbatim)
 # --------------------------------------------------------------------------- #

@@ -267,6 +267,24 @@ def make_web_app(
             text = backend.piece(int(req.id))
         return S.PieceResponse(text=text)
 
+    @app.post(
+        "/api/v1/special_tokens",
+        response_model=S.SpecialTokensResponse,
+        tags=["backend"],
+        dependencies=[Depends(require_bearer)],
+    )
+    def special_tokens(req: S.SpecialTokensRequest) -> S.SpecialTokensResponse:
+        # Model-specific palette of special / added tokens for the Decode
+        # workbench's composer. Cloud providers resolve this from the mapped
+        # HF tokenizer.json (loaded lazily on first tokenize); remote
+        # dsbx-servers proxy to their own /v1/special_tokens; chat-only /
+        # unmapped backends return an empty list and the UI hides the palette.
+        with _use_backend(registry, req.backend, model=req.model) as backend:
+            pairs = backend.special_tokens()
+        return S.SpecialTokensResponse(
+            tokens=[S.SpecialTokenEntry(id=int(i), text=str(t)) for i, t in pairs]
+        )
+
     # ----------------------------------------------------------- generate
     #
     # The legacy ``/api/v1/inspect`` endpoint used to live here. It is

@@ -89,6 +89,11 @@ class LlamaCppPyBackend(Backend):
         self._logits_all = bool(logits_all)
         self._n_vocab = int(self._llama.n_vocab())
         self._piece_cache: dict[int, str] = {}
+        # Lazily-built (id, surface_text) list of every CONTROL / USER_DEFINED
+        # token in the GGUF vocab -- powers the Decode workbench's special-
+        # token palette. ``None`` == not scanned yet; ``[]`` == scanned and
+        # the low-level attr API was unavailable.
+        self._special_tokens_cache: list[tuple[int, str]] | None = None
         # Tracks how many tokens are in the model's KV cache. We can skip
         # re-eval'ing a prefix when the new context is a strict extension.
         self._cached_ids: list[int] = []
@@ -202,18 +207,72 @@ class LlamaCppPyBackend(Backend):
     def tokenize(self, text: str) -> list[int]:
         # ``add_bos=False`` so token ids align with what the user wrote -- the
         # GGUF's prefilled chat templates aren't relevant for base-model
-        # inspection. Result is a list of ints.
-        return list(self._llama.tokenize(text.encode("utf-8"), add_bos=False))
+        # inspection. ``special=True`` so a special-token STRING typed into
+        # the prompt (``<|im_start|>``, ``<|endoftext|>`` -- e.g. via the
+        # Decode workbench's special-token palette) is matched to its single
+        # control-token id instead of being split into literal ``<``, ``|``,
+        # ``im_start`` ... pieces. This is what makes "insert a special
+        # token anywhere in the prompt" round-trip to exactly one id.
+        return list(
+            self._llama.tokenize(text.encode("utf-8"), add_bos=False, special=True)
+        )
 
     def detokenize(self, token_ids: list[int]) -> str:
-        return self._llama.detokenize(list(token_ids)).decode("utf-8", errors="replace")
+        # ``special=True`` so control tokens render as their ``<|...|>``
+        # surface form instead of the empty string llama.cpp emits for them
+        # by default -- keeps the running-completion / prompt-logits views
+        # honest when the model emits or is conditioned on EOS / BOS.
+        return self._llama.detokenize(list(token_ids), special=True).decode(
+            "utf-8", errors="replace"
+        )
 
     def piece(self, token_id: int) -> str:
         if token_id not in self._piece_cache:
-            self._piece_cache[token_id] = self._llama.detokenize([token_id]).decode(
-                "utf-8", errors="replace"
-            )
+            # ``special=True``: a bare EOS / BOS id (e.g. Qwen ``<|endoftext|>``
+            # = 248044) detokenizes to ``""`` without this flag, which the UI
+            # then renders as the misleading dim ``<empty>``. With the flag it
+            # comes back as ``<|endoftext|>`` and reads as the special token it
+            # actually is.
+            self._piece_cache[token_id] = self._llama.detokenize(
+                [token_id], special=True
+            ).decode("utf-8", errors="replace")
         return self._piece_cache[token_id]
+
+    def special_tokens(self) -> list[tuple[int, str]]:
+        """Enumerate the GGUF vocab's CONTROL / USER_DEFINED tokens.
+
+        Scans every vocab id once (≈0.2 s for a 248k vocab) via the
+        low-level ``llama_vocab_get_attr`` and keeps the CONTROL (1<<3)
+        and USER_DEFINED (1<<4) ones -- exactly the BOS/EOS/chat/markers a
+        student would want to splice into a prompt. Each is rendered with
+        :meth:`piece` (``special=True``) so the surface form is the real
+        ``<|...|>`` name. Result is cached on the instance; if the
+        low-level API isn't importable on this llama_cpp build we cache an
+        empty list so the palette simply doesn't render rather than
+        erroring.
+        """
+        if self._special_tokens_cache is not None:
+            return self._special_tokens_cache
+        out: list[tuple[int, str]] = []
+        try:
+            import llama_cpp  # type: ignore
+
+            get_vocab = getattr(llama_cpp, "llama_model_get_vocab", None)
+            get_attr = getattr(llama_cpp, "llama_vocab_get_attr", None)
+            if get_vocab is not None and get_attr is not None:
+                vocab = get_vocab(self._llama._model.model)
+                control = 1 << 3
+                user_defined = 1 << 4
+                for i in range(self._n_vocab):
+                    attr = int(get_attr(vocab, i))
+                    if attr & (control | user_defined):
+                        text = self.piece(i)
+                        if text:
+                            out.append((i, text))
+        except Exception:  # noqa: BLE001
+            out = []
+        self._special_tokens_cache = out
+        return out
 
     # -- core: full-vocab logits over a prompt ----------------------------- #
     def _logsoftmax_all(self, token_ids: list[int]):
