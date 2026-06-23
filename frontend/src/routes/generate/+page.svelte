@@ -735,6 +735,60 @@
   // need to colorize the prefix, so we leave the prompt rendering
   // plain grey in that case.
   let promptHasFullTokenization = $derived(promptPrefixSteps.length > 1);
+  // First-token alignment: backends that go through the generic
+  // ``Backend.score_prompt`` (dsbx-host-py, anything backed by a per-prefix
+  // ``next_distribution`` loop) iterate ``range(1, N+1)`` and so the
+  // FIRST prompt token is never emitted as a row's ``chosen`` -- it
+  // only shows up as the ``context_text`` of row 1. Fireworks
+  // ``stream_native_with_echo`` is the outlier: it iterates from
+  // position 0 and emits ``chosen=tokens[i]`` for every echoed
+  // position including the first, so the first token appears
+  // naturally. To make the running-completion view consistent across
+  // both shapes we detect the "first row starts at position > 0" case
+  // and prepend the missing first-token text from row 1's
+  // ``context_text``. Rendered as plain grey because we have no
+  // model-assigned prob for position 0.
+  let firstPromptTokenText = $derived.by<string | null>(() => {
+    if (promptPrefixSteps.length === 0) return null;
+    const first = promptPrefixSteps[0];
+    if ((first.position ?? 0) <= 0) return null;
+    return first.context_text ?? null;
+  });
+
+  // Inspect mode is implemented as ``max_tokens=1 + include_prompt=true``,
+  // so the wire shape is: prompt_score (N rows + trailing predict-next
+  // on backends that emit one) + ONE step. That single step is the
+  // exact same "what does the model predict next" payload as the
+  // trailing predict-next prompt-score row -- showing it as a
+  // separate generation step both inflates the running-completion
+  // view (adds a phantom token the user did NOT ask to generate) and
+  // duplicates the predict-next table row. So in inspect mode we
+  // hide ``steps`` rendering entirely. Generate / Manual modes are
+  // unaffected.
+  let hideStepsInRunningCompletion = $derived(lastMode === 'inspect');
+  let hideGenerationStepsTable = $derived(lastMode === 'inspect');
+
+  // ``eligible`` badge visibility: the badge marks candidates that
+  // survived the current sampler's filter (``decision.kept``). Local
+  // backends (dsbx-host-py, HF, llamacpp_py) run the sampler in-process
+  // and populate ``kept`` on every step. Cloud-native streaming
+  // (Fireworks ``stream_native`` / ``stream_native_with_echo``) runs
+  // the sampler server-side and the upstream tells us nothing about
+  // per-candidate eligibility -- so ``kept`` is left empty. Rendering
+  // the badge based purely on per-row ``kept`` membership produces
+  // "every greedy step shows ONE eligible / no Fireworks step shows
+  // any" -- both technically correct but the asymmetry between
+  // backends looks like a bug. We instead derive a page-level flag:
+  // show the badge column only when ``kept`` is meaningful for AT
+  // LEAST one rendered step, and surface a one-line note for the
+  // server-side-sampler case so the user knows why the column is
+  // absent rather than wondering whether nothing is eligible.
+  let keptIsMeaningful = $derived<boolean>(
+    steps.some((s) => (s.decision?.kept ?? []).length > 0)
+  );
+  let serverSideSamplerInUse = $derived<boolean>(
+    steps.length > 0 && !keptIsMeaningful
+  );
 </script>
 
 <Toast message={streamError} onClose={() => (streamError = null)} />
@@ -1185,7 +1239,12 @@
         </div>
       </div>
       <div class="font-mono text-sm text-slate-200 whitespace-pre-wrap min-h-[2.5rem] leading-relaxed">
-        {#if promptHasFullTokenization}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
+        {#if promptHasFullTokenization}{#if firstPromptTokenText !== null}<TokenInline
+              text={firstPromptTokenText}
+              showMarkers={showMarkers}
+              bgClass=""
+              title="first prompt token · not scored (no prior context)"
+            />{/if}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
               text={ps.chosen?.text ?? ''}
               isSpecial={ps.chosen?.is_special ?? false}
               showMarkers={showMarkers}
@@ -1196,12 +1255,12 @@
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(pp)}
             title={`manual pick #${i + 1}${pp !== null ? ` · p=${(pp * 100).toFixed(2)}%` : ' · forced'}`}
-          />{/each}{#each steps as s}<TokenInline
+          />{/each}{#if !hideStepsInRunningCompletion}{#each steps as s}<TokenInline
             text={s.decision.token_text}
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(chosenProb(s))}
             title={`p=${chosenProb(s) !== null ? ((chosenProb(s) ?? 0) * 100).toFixed(2) + '%' : '?'}`}
-          />{/each}{#if busy}<span class="animate-pulse text-sky-400">▌</span>{/if}
+          />{/each}{/if}{#if busy}<span class="animate-pulse text-sky-400">▌</span>{/if}
       </div>
       {#if stopReason}
         <div class="text-xs text-slate-500 mt-2">stopped: <span class="font-mono">{stopReason}</span></div>
@@ -1468,11 +1527,16 @@
               {#if samplingMaskSupported}
                 <th
                   class="table-cell text-left"
-                  title="Number of tokens that survived server-side sampling filters (sampling_mask=count). Lower means a more constrained next-token distribution."
-                  >eligible</th
+                  title="Number of tokens above the active sampling threshold (Fireworks sampling_mask=count). Lower means a more constrained next-token distribution. Per-row, not per-candidate."
+                  >mask</th
                 >
               {/if}
-              <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
+              <th
+                class="table-cell text-left"
+                title="Top-K candidates by logprob, returned by the backend. For prompt-logits these are the model's predictions BEFORE sampling at each position."
+              >
+                top alts (rank 1..{alternatives})
+              </th>
               {#each watchColumns as w}
                 <th class="table-cell text-left" title={`watch column · ${w.label}`}>{w.label}</th>
               {/each}
@@ -1531,9 +1595,19 @@
       </div>
     {/if}
 
-    {#if steps.length}
+    {#if steps.length && !hideGenerationStepsTable}
       <div class="card overflow-x-auto">
-        <div class="text-xs uppercase tracking-wider text-slate-500 mb-2">generation steps</div>
+        <div class="text-xs uppercase tracking-wider text-slate-500 mb-2 flex items-center flex-wrap gap-x-3">
+          <span>generation steps</span>
+          {#if serverSideSamplerInUse}
+            <span
+              class="normal-case text-[10px] text-slate-500"
+              title="The provider's server-side sampler ran (Fireworks native streaming). Per-candidate eligibility (which tokens survived the sampler filter) is not reported by the upstream, so the 'eligible' marker is hidden for this run. Switch to a custom sampler or a full-vocab backend (dsbx-host-py / HF / llamacpp-py) to see it."
+            >
+              sampler ran server-side · per-candidate eligibility not reported
+            </span>
+          {/if}
+        </div>
         <table class="w-full text-sm">
           <thead class="text-xs text-slate-400 border-b border-slate-800">
             <tr>
@@ -1544,10 +1618,15 @@
                 <th
                   class="table-cell text-left"
                   title="Number of tokens that survived server-side sampling filters (sampling_mask=count) at this step."
-                  >eligible</th
+                  >mask</th
                 >
               {/if}
-              <th class="table-cell text-left">top alts (rank 1..{alternatives})</th>
+              <th
+                class="table-cell text-left"
+                title="Top-K candidates by logprob, returned by the backend BEFORE the sampler runs. With a stochastic sampler (e.g. temperature=1) the chosen token may have been sampled from outside this top-K — when that happens we still surface it as a row marked 'chosen, outside top-K'."
+              >
+                top alts (rank 1..{alternatives})
+              </th>
               {#each watchColumns as w}
                 <th class="table-cell text-left" title={`watch column · ${w.label}`}>{w.label}</th>
               {/each}
@@ -1555,6 +1634,10 @@
           </thead>
           <tbody>
             {#each steps as s}
+              {@const chosenInTopK = s.step_result.candidates
+                .slice(0, alternatives)
+                .some((c) => c.token_id === s.decision.token_id)}
+              {@const chosenCand = s.step_result.chosen}
               <tr class="border-b border-slate-800/60" data-token-row>
                 <td class="table-cell font-mono text-slate-400">{s.step}</td>
                 <td class="table-cell">
@@ -1575,17 +1658,55 @@
                 {/if}
                 <td class="table-cell">
                   <div class="flex flex-col gap-0.5">
+                    {#if !chosenInTopK && chosenCand}
+                      <!--
+                        The sampler picked something the backend didn't
+                        return in top-K (Fireworks caps top_logprobs at
+                        5; with temperature=1 the chosen token can sit
+                        at rank 6+ in the real distribution). Render
+                        the chosen as a synthetic top row with its
+                        real logprob (the provider sends the sampled
+                        token's logprob on the choice itself even when
+                        omitting it from top_logprobs), so the user
+                        sees WHAT was picked alongside the visible
+                        alternatives.
+                      -->
+                      <div class="flex items-center gap-2 border-l-2 border-sky-500/60 pl-1.5">
+                        {@render biasable(
+                          chosenCand.token_id,
+                          chosenCand.text,
+                          chosenCand.is_special,
+                          'font-mono text-xs'
+                        )}
+                        <span class="text-xs text-slate-500 tabular-nums">
+                          {chosenCand.logprob !== null
+                            ? (Math.exp(chosenCand.logprob) * 100).toFixed(1) + '%'
+                            : '?'}
+                        </span>
+                        <span
+                          class="text-[9px] uppercase tracking-wider text-sky-300/90"
+                          title="The sampler picked this token; it falls outside the top-{alternatives} the provider returned (top_logprobs cap)."
+                        >← chosen · outside top-{alternatives}</span>
+                      </div>
+                    {/if}
                     {#each s.step_result.candidates.slice(0, alternatives) as c}
                       {@const eligible = (s.decision.kept ?? []).some((k) => k.token_id === c.token_id)}
+                      {@const isChosen = c.token_id === s.decision.token_id}
                       <div class="flex items-center gap-2">
                         {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
                         <span class="text-xs text-slate-500 tabular-nums">
                           {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
                         </span>
-                        {#if eligible}
+                        {#if isChosen}
+                          <span
+                            class="text-[9px] uppercase tracking-wider text-sky-300/90"
+                            title="The sampler picked this candidate."
+                          >← chosen</span>
+                        {/if}
+                        {#if eligible && keptIsMeaningful}
                           <span
                             class="text-[9px] uppercase tracking-wider text-emerald-400/80"
-                            title="survived the current sampler filter (sampler.kept)"
+                            title="Survived the current sampler's filter (decision.kept). For greedy that's just the argmax; for top_p / top_k / min_p / typical / mirostat it's the post-filter candidate set the sampler picked FROM (so any of these could have been chosen with the right random draw)."
                           >eligible</span>
                         {/if}
                       </div>
