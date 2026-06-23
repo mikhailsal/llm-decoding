@@ -83,6 +83,10 @@ class HFBackend(Backend):
             eos_token_ids=self._eos_ids,
             bos_token_ids=self._bos_ids,
             supports_prepend_token_ids=True,
+            # The HF backend always has the real tokenizer in-process,
+            # so the live token preview in the Decode workbench is
+            # safe and useful here.
+            supports_local_tokenize=True,
         )
 
     def _is_special(self, token_id: int) -> bool:

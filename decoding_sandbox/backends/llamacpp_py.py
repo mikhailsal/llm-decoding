@@ -118,6 +118,9 @@ class LlamaCppPyBackend(Backend):
             eos_token_ids=self._eos_ids,
             bos_token_ids=self._bos_ids,
             supports_prepend_token_ids=True,
+            # llama-cpp-py owns the tokenizer in-process; live token
+            # preview in the Decode workbench is always safe here.
+            supports_local_tokenize=True,
         )
 
     def _discover_eos_ids(self) -> tuple[int, ...]:

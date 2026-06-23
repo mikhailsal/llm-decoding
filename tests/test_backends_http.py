@@ -555,22 +555,22 @@ def test_openai_compat_score_prompt_raises_on_chat_only_provider(monkeypatch) ->
         backend.score_prompt("anything", top_k=5)
 
 
-def test_openai_compat_score_prompt_rejects_prepend_token_ids(monkeypatch) -> None:
-    """Cloud providers can't safely splice extra ids into a string prompt.
+def test_openai_compat_score_prompt_rejects_prepend_token_ids_without_tokenizer(
+    monkeypatch,
+) -> None:
+    """No local tokenizer mapping -> hard refuse on prepend_token_ids.
 
-    The pedagogical "predict position 0 from BOS" workflow only makes
-    sense for backends that tokenize locally and can append extra ids
-    at the token level (HF, llamacpp_py, remote-backed-by-either).
-    Cloud providers like Fireworks take a plain ``prompt: str`` and
-    tokenize server-side, so injecting prepend ids would require
-    either (a) detokenize-then-concat (lossy: round-trip through text
-    might re-tokenize differently and silently shift positions) or
-    (b) switching to token-array prompt mode (a separate refactor we
-    haven't shipped). Pinning the loud refusal here prevents a future
-    "silent ignore" regression: the web layer relies on the
-    ``Capabilities.supports_prepend_token_ids`` flag to gate the
-    field, and if either the flag or this raise drifted we want the
-    test suite to scream.
+    Cloud providers tokenize ``prompt: str`` server-side. To inject
+    extra ids at the FRONT of the prompt safely we'd need to switch
+    to token-array prompt mode, which requires a local replica of the
+    server tokenizer (so we can pre-tokenize the user's prompt and
+    concatenate ``[*prepend, *tokenize(prompt)]``). When no
+    ``[providers.NAME.tokenizers]`` entry maps the active model, the
+    backend has no way to build that array and refuses loudly rather
+    than silently dropping the prepended ids (which would make the
+    UI's "BOS-conditioned" promise a lie). The UI itself gates on
+    ``capabilities.supports_prepend_token_ids`` (False here), so the
+    raise is a belt-and-suspenders guard.
     """
     backend, _ = _make_oc_backend(
         monkeypatch,
@@ -578,11 +578,9 @@ def test_openai_compat_score_prompt_rejects_prepend_token_ids(monkeypatch) -> No
         has_completions=True,
         supports_prompt_logprobs=True,
     )
-    # Sanity: capability advertises False so the UI / web layer will
-    # never even SEND a non-empty list. The defensive raise inside
-    # score_prompt is a belt-and-suspenders against a stale client.
     assert backend.capabilities.supports_prepend_token_ids is False
     assert backend.capabilities.bos_token_ids == ()
+    assert backend.capabilities.supports_local_tokenize is False
     with pytest.raises(NotImplementedError, match="prepend_token_ids"):
         backend.score_prompt("hello", top_k=5, prepend_token_ids=[42])
 
@@ -654,6 +652,400 @@ def test_openai_compat_close_propagates(monkeypatch) -> None:
 
     backend.close()
     assert mock.closed is True
+
+
+# --------------------------------------------------------------------------- #
+# OpenAICompatBackend: local HF tokenizer + token-array prompt mode
+# --------------------------------------------------------------------------- #
+class _FakeAddedToken:
+    """Minimal stand-in for ``tokenizers.AddedToken``.
+
+    The backend only reads ``.content`` and ``.special`` -- the rest of
+    the real class is irrelevant for the tests, so we duck-type the
+    two attributes the loader needs.
+    """
+
+    def __init__(self, content: str, *, special: bool) -> None:
+        self.content = content
+        self.special = special
+
+
+class _FakeEncoding:
+    """Minimal stand-in for ``tokenizers.Encoding``."""
+
+    def __init__(self, ids: list[int]) -> None:
+        self.ids = ids
+
+
+class _FakeTokenizer:
+    """Tiny in-memory tokenizer that quacks like ``tokenizers.Tokenizer``.
+
+    We use this instead of bundling a real ``tokenizer.json`` fixture
+    because (a) the smallest open-source tokenizer.json is still ~2 MB,
+    (b) the rust binding is a pain to mock cleanly, and (c) every
+    surface the OpenAI-compat backend touches is small: ``encode``,
+    ``decode``, ``get_added_tokens_decoder``, ``get_vocab_size``. A
+    handful of canned mappings is enough to cover the integration.
+
+    The encoder splits on whitespace and assigns each token a stable
+    id (alphabetical-ish by insertion order). Special tokens are
+    pre-registered with explicit ids so the BOS-discovery path can
+    find them.
+    """
+
+    def __init__(
+        self,
+        *,
+        word_to_id: dict[str, int],
+        specials: dict[int, str],
+    ) -> None:
+        self._word_to_id = dict(word_to_id)
+        self._id_to_word = {tid: w for w, tid in word_to_id.items()}
+        self._specials = {
+            int(tid): _FakeAddedToken(content, special=True)
+            for tid, content in specials.items()
+        }
+        for tid, tok in self._specials.items():
+            self._id_to_word.setdefault(tid, tok.content)
+
+    def encode(self, text: str, *, add_special_tokens: bool = True) -> _FakeEncoding:
+        ids: list[int] = []
+        for word in text.split():
+            if word not in self._word_to_id:
+                self._word_to_id[word] = max(self._word_to_id.values(), default=99) + 1
+                self._id_to_word[self._word_to_id[word]] = word
+            ids.append(self._word_to_id[word])
+        return _FakeEncoding(ids)
+
+    def decode(self, ids: list[int], *, skip_special_tokens: bool = True) -> str:
+        parts: list[str] = []
+        for tid in ids:
+            if tid in self._specials and skip_special_tokens:
+                continue
+            parts.append(self._id_to_word.get(int(tid), ""))
+        return " ".join(p for p in parts if p)
+
+    def get_added_tokens_decoder(self) -> dict[int, _FakeAddedToken]:
+        return dict(self._specials)
+
+    def get_vocab_size(self) -> int:
+        return len(self._word_to_id) + len(self._specials)
+
+
+def _make_oc_backend_with_fake_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    routes: dict[tuple[str, str], object],
+    word_to_id: dict[str, int] | None = None,
+    specials: dict[int, str] | None = None,
+    has_completions: bool = True,
+    supports_prompt_logprobs: bool = True,
+    supports_combined_echo_stream: bool = False,
+    supports_new_logprobs: bool = False,
+) -> tuple[OpenAICompatBackend, MockHTTPClient]:
+    """Build a backend whose ``_do_load_tokenizer`` returns ``_FakeTokenizer``.
+
+    The provider config carries a ``tokenizers`` map entry for the
+    active model so the capability gating accepts the call; the
+    actual ``hf_hub_download`` is monkey-patched to never run because
+    we replace the whole ``_do_load_tokenizer`` method.
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes=routes,
+        has_completions=has_completions,
+        supports_prompt_logprobs=supports_prompt_logprobs,
+        supports_combined_echo_stream=supports_combined_echo_stream,
+        supports_new_logprobs=supports_new_logprobs,
+    )
+    # Inject the fake mapping into the provider AFTER construction so
+    # we don't have to re-thread it through ``_make_oc_backend``.
+    backend.provider.tokenizers = {"test/m": "fake-org/fake-model"}
+
+    fake = _FakeTokenizer(
+        word_to_id=word_to_id or {"hello": 10, "world": 11, "foo": 12, "bar": 13},
+        specials=specials or {1: "<|startoftext|>", 2: "<|endoftext|>"},
+    )
+    monkeypatch.setattr(backend, "_do_load_tokenizer", lambda: fake)
+    return backend, mock
+
+
+def test_openai_compat_loads_tokenizer_and_tokenizes_locally(monkeypatch) -> None:
+    """End-to-end: configured tokenizer -> real tokenize / detokenize / piece.
+
+    Without the local tokenizer the backend falls back to the synthetic-id
+    stub (one id per text fragment). With a tokenizer in scope the round
+    trip should preserve the user-visible text, return one id per word,
+    and ``piece`` should return the per-id surface form.
+    """
+    backend, _ = _make_oc_backend_with_fake_tokenizer(monkeypatch, routes={})
+    ids = backend.tokenize("hello world foo")
+    assert ids == [10, 11, 12]
+    assert backend.detokenize(ids) == "hello world foo"
+    assert backend.piece(10) == "hello"
+    # The capability flips on as soon as the tokenizer loads.
+    caps = backend.capabilities
+    assert caps.supports_local_tokenize is True
+    assert caps.supports_prepend_token_ids is True
+
+
+def test_openai_compat_capabilities_autodiscover_bos_from_tokenizer(
+    monkeypatch,
+) -> None:
+    """``<|startoftext|>`` in the added-special table -> bos_token_ids = (id,).
+
+    The discovery loop walks ``_BOS_TOKEN_CANDIDATES`` in priority
+    order, so even when both ``<|startoftext|>`` and ``<|endoftext|>``
+    are present we prefer the explicit start marker.
+    """
+    backend, _ = _make_oc_backend_with_fake_tokenizer(monkeypatch, routes={})
+    caps = backend.capabilities
+    assert caps.bos_token_ids == (1,)  # <|startoftext|> id from _FakeTokenizer specials
+
+    # Different specials -> falls back to <|endoftext|> as the last
+    # candidate in the priority list.
+    backend2, _ = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={},
+        specials={7: "<|endoftext|>"},
+    )
+    assert backend2.capabilities.bos_token_ids == (7,)
+
+
+def test_openai_compat_gracefully_degrades_when_tokenizer_load_fails(
+    monkeypatch,
+) -> None:
+    """Network / 401 / 404 -> capability flips False, basic calls still work.
+
+    The "Llama is gated, you didn't set HF_TOKEN" scenario: the
+    download raises, we catch + log, and the backend reports
+    ``supports_prepend_token_ids=False`` so the UI greys out the
+    chip-input. ``tokenize`` falls back to the synthetic-id stub
+    (one id per text fragment) so any caller that only needs a handle
+    keeps working; calls that specifically requested BOS-conditioning
+    raise loudly instead of silently dropping the request.
+    """
+    backend, _ = _make_oc_backend(monkeypatch, routes={})
+    backend.provider.tokenizers = {"test/m": "private/gated-model"}
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(backend, "_do_load_tokenizer", _raise)
+
+    caps = backend.capabilities
+    assert caps.supports_local_tokenize is False
+    assert caps.supports_prepend_token_ids is False
+    assert "private/gated-model" in caps.notes
+    # Stub fallback: one synthetic id for the whole text.
+    ids = backend.tokenize("anything goes")
+    assert len(ids) == 1
+    assert backend.detokenize(ids) == "anything goes"
+    # Loud refuse when caller insists on prepend.
+    backend2, _ = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        supports_prompt_logprobs=True,
+    )
+    backend2.provider.tokenizers = {"test/m": "private/gated-model"}
+    monkeypatch.setattr(backend2, "_do_load_tokenizer", _raise)
+    with pytest.raises(NotImplementedError, match="prepend_token_ids"):
+        backend2.score_prompt("hi", top_k=5, prepend_token_ids=[1])
+
+
+def test_openai_compat_score_prompt_switches_to_token_array_on_prepend(
+    monkeypatch,
+) -> None:
+    """``prepend_token_ids=[BOS]`` -> ``prompt: [BOS, ...tokenize(text)]``.
+
+    Pins the wire shape: the upstream sees a list of ints, not a
+    string, and the first element is the BOS the caller asked for.
+    Anything else would silently drop the BOS-conditioning the user
+    requested -- the whole point of this feature.
+    """
+    payload = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": ["<|startoftext|>", "hello", "world", "predict"],
+                    "token_logprobs": [None, -0.1, -0.2, None],
+                    "top_logprobs": [
+                        {},
+                        {"hello": -0.1, "foo": -3.0},
+                        {"world": -0.2, "bar": -3.5},
+                        {"next": -0.3, "other": -2.5},
+                    ],
+                }
+            }
+        ]
+    }
+    backend, mock = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={("POST", "/completions"): payload},
+    )
+    backend.score_prompt("hello world", top_k=3, prepend_token_ids=[1])
+    body = mock.calls[-1]["json"]
+    assert body["prompt"] == [1, 10, 11], (
+        f"expected [BOS=1, hello=10, world=11], got {body['prompt']!r}"
+    )
+    assert body["echo"] is True
+
+
+def test_openai_compat_score_prompt_stays_in_string_mode_without_prepend(
+    monkeypatch,
+) -> None:
+    """No prepend -> stay on ``prompt: str`` (back-compat preserved).
+
+    Switching to token-array mode for EVERY call when a local tokenizer
+    is available would change the wire shape across the board and
+    risk regressions on the existing happy path. We only flip the
+    switch when prepend asks for it.
+    """
+    payload = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": ["hello", "world", "predict"],
+                    "token_logprobs": [None, -0.2, None],
+                    "top_logprobs": [{}, {"world": -0.2}, {"next": -0.3}],
+                }
+            }
+        ]
+    }
+    backend, mock = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={("POST", "/completions"): payload},
+    )
+    backend.score_prompt("hello world", top_k=3)
+    body = mock.calls[-1]["json"]
+    assert body["prompt"] == "hello world"
+
+
+def test_openai_compat_stream_native_switches_to_token_array_on_prepend(
+    monkeypatch,
+) -> None:
+    """``stream_native`` with prepend -> token-array prompt.
+
+    Same contract as ``score_prompt``: token-array mode only when the
+    caller actually needs it; manual-mode picks (``prefix_token_ids``)
+    ride along as ints instead of being detokenized + re-concatenated
+    as text, which removes a round-trip ambiguity for edge tokens.
+    """
+    backend, mock = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={},
+        supports_new_logprobs=True,
+    )
+    chunk = {
+        "choices": [
+            {
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "X",
+                            "token_id": 99,
+                            "logprob": -0.05,
+                            "top_logprobs": [
+                                {"token": "X", "token_id": 99, "logprob": -0.05},
+                            ],
+                        }
+                    ]
+                },
+                "finish_reason": "length",
+            }
+        ]
+    }
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([chunk]))])
+    list(
+        backend.stream_native(
+            "hello world",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            prepend_token_ids=[1],
+            prefix_token_ids=[42],
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["prompt"] == [1, 10, 11, 42], (
+        f"expected [BOS=1, hello=10, world=11, pick=42], got {body['prompt']!r}"
+    )
+
+
+def test_openai_compat_stream_native_with_echo_switches_to_token_array(
+    monkeypatch,
+) -> None:
+    """Combined echo+stream path also honors token-array prompt mode.
+
+    The same wire-shape contract as the other two paths: this one
+    exists because the combined Phase 5 path bypasses both
+    ``score_prompt`` and ``stream_native``, so a regression here
+    wouldn't be caught by either of the above tests.
+    """
+    backend, mock = _make_oc_backend_with_fake_tokenizer(
+        monkeypatch,
+        routes={},
+        supports_combined_echo_stream=True,
+        supports_new_logprobs=True,
+    )
+    echo_chunk = {
+        "choices": [
+            {
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "hello",
+                            "token_id": 10,
+                            "logprob": -0.1,
+                            "top_logprobs": [],
+                        },
+                        {
+                            "token": "world",
+                            "token_id": 11,
+                            "logprob": -0.2,
+                            "top_logprobs": [],
+                        },
+                    ]
+                }
+            }
+        ]
+    }
+    emit_chunk = {
+        "choices": [
+            {
+                "logprobs": {
+                    "content": [
+                        {
+                            "token": "X",
+                            "token_id": 99,
+                            "logprob": -0.05,
+                            "top_logprobs": [
+                                {"token": "X", "token_id": 99, "logprob": -0.05},
+                            ],
+                        }
+                    ]
+                },
+                "finish_reason": "length",
+            }
+        ]
+    }
+    _attach_stream_factory(
+        mock, [_MockStreamResponse(200, _sse_lines([echo_chunk, emit_chunk]))]
+    )
+    list(
+        backend.stream_native_with_echo(
+            "hello world",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+            prepend_token_ids=[1],
+        )
+    )
+    body = mock.calls[-1]["kwargs"]["json"]
+    assert body["prompt"] == [1, 10, 11]
+    assert body["echo"] is True
 
 
 # --------------------------------------------------------------------------- #

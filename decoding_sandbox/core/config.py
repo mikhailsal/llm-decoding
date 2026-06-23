@@ -139,6 +139,31 @@ _DEFAULTS: dict[str, Any] = {
                 "accounts/fireworks/models/llama-v3p1-8b-instruct",
                 "accounts/fireworks/models/qwen2p5-7b-instruct",
             ],
+            # Maps each Fireworks model id to a public HuggingFace repo that
+            # ships the exact ``tokenizer.json`` the Fireworks deployment
+            # uses. The OpenAI-compat backend lazy-downloads that file via
+            # ``hf_hub_download`` on first use and runs all local
+            # tokenize/detokenize/piece calls through it. This is the
+            # foundation for: (a) token-array prompt mode -- splice extra
+            # ids in FRONT of the prompt so BOS-conditioning works on cloud
+            # backends, (b) live token preview as the user types in the
+            # Decode workbench, (c) auto-discovering bos_token_ids without
+            # hard-coding them per-model. Three of these four repos are
+            # public (gpt-oss-{20,120}b, Qwen2.5-7B-Instruct); the Llama
+            # repo is gated and silently degrades to "no local tokenizer"
+            # when ``HF_TOKEN`` is missing or lacks access -- the UI then
+            # disables the prepend chip-input + live preview for that
+            # model with a tooltip explaining the situation.
+            "tokenizers": {
+                "accounts/fireworks/models/gpt-oss-120b": "openai/gpt-oss-120b",
+                "accounts/fireworks/models/gpt-oss-20b": "openai/gpt-oss-20b",
+                "accounts/fireworks/models/llama-v3p1-8b-instruct": (
+                    "meta-llama/Llama-3.1-8B-Instruct"
+                ),
+                "accounts/fireworks/models/qwen2p5-7b-instruct": (
+                    "Qwen/Qwen2.5-7B-Instruct"
+                ),
+            },
         },
         "nim": {
             "base_url": "https://integrate.api.nvidia.com/v1",
@@ -225,6 +250,20 @@ class ProviderConfig:
     # a UX convenience: spelling out the most useful 3-5 names per provider
     # so the browser doesn't have to know the provider's catalogue.
     models: list[str] = field(default_factory=list)
+    # Per-model HuggingFace repo id that ships the matching
+    # ``tokenizer.json`` -- e.g.
+    # ``"accounts/fireworks/models/gpt-oss-120b": "openai/gpt-oss-120b"``.
+    # ``OpenAICompatBackend`` lazy-downloads the file via
+    # ``hf_hub_download`` on first use and runs every local
+    # tokenize/detokenize/piece call through ``tokenizers.Tokenizer``. An
+    # empty map (or a missing entry for the active model) means "no local
+    # tokenizer available, fall back to the synthetic-id stub" -- the
+    # backend still works for the basic text-completion paths, just with
+    # ``supports_prepend_token_ids=False`` / no live token preview. Gated
+    # repos (the Llama family) silently degrade to the stub when
+    # ``HF_TOKEN`` is missing or lacks access; we log a warning the first
+    # time and the UI surfaces a helpful tooltip.
+    tokenizers: dict[str, str] = field(default_factory=dict)
     # -- provider-specific /completions extension flags ---------------------
     # These map 1:1 to optional fields in the Fireworks CompletionRequest
     # schema (https://docs.fireworks.ai/api-reference/post-completions).
@@ -402,6 +441,7 @@ def load_config(
             require_parameters=bool(pdata.get("require_parameters", False)),
             has_completions=bool(pdata.get("has_completions", False)),
             models=list(pdata.get("models", [])),
+            tokenizers=dict(pdata.get("tokenizers", {}) or {}),
             supports_ignore_eos=bool(pdata.get("supports_ignore_eos", False)),
             supports_perf_metrics=bool(pdata.get("supports_perf_metrics", False)),
             supports_raw_output=bool(pdata.get("supports_raw_output", False)),

@@ -99,6 +99,11 @@ class WireCapabilities(BaseModel):
     # from a plain ``prompt: str`` cannot inject extra ids safely and
     # leave this False. The UI's prepend chip-input is gated on this.
     supports_prepend_token_ids: bool = False
+    # ``True`` when ``backend.tokenize(text)`` returns a real id list
+    # (HF / llamacpp-py natively; openai_compat once its per-model HF
+    # tokenizer.json has been fetched). Drives the live token preview
+    # under the prompt textarea in the Decode workbench.
+    supports_local_tokenize: bool = False
     # ``True`` for backends that are registered but inert. Currently set
     # only on chat-only OpenAI-compat providers (NIM / OpenRouter) until
     # proper chat-mode UI lands. The web layer rejects generate-stream
@@ -340,6 +345,9 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         ),
         supports_prepend_token_ids=bool(
             getattr(caps, "supports_prepend_token_ids", False)
+        ),
+        supports_local_tokenize=bool(
+            getattr(caps, "supports_local_tokenize", False)
         ),
         generation_disabled=bool(getattr(caps, "generation_disabled", False)),
     )

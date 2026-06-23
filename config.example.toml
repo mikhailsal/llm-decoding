@@ -135,6 +135,24 @@ supports_new_logprobs = true           # logprobs:true + top_logprobs:N (NewLogP
 supports_logit_bias = true             # per-request token-id bias map [-100..100]
 supports_combined_echo_stream = true   # echo+stream in one request (Phase 5)
 
+# Per-model HuggingFace repo that ships the matching ``tokenizer.json``.
+# Fetched on first use via ``hf_hub_download`` and cached in
+# ~/.cache/huggingface/hub. Drives three features:
+#   * token-array prompt mode (splice extra ids in front of the prompt, so
+#     the "fill BOS" workflow works on cloud backends too);
+#   * live token preview as the user types in the Decode workbench;
+#   * auto-discovery of bos_token_ids (no per-model hardcoding).
+# Most Fireworks models are open-weights; three of the defaults below are
+# public on the HuggingFace Hub. The Llama repo is gated -- if you don't
+# have ``HF_TOKEN`` configured with access to meta-llama, that one model
+# gracefully degrades to "no local tokenizer" and the UI surfaces the
+# reason in the tooltip on the prepend chip-input / preview panel.
+[providers.fireworks.tokenizers]
+"accounts/fireworks/models/gpt-oss-120b" = "openai/gpt-oss-120b"
+"accounts/fireworks/models/gpt-oss-20b" = "openai/gpt-oss-20b"
+"accounts/fireworks/models/llama-v3p1-8b-instruct" = "meta-llama/Llama-3.1-8B-Instruct"
+"accounts/fireworks/models/qwen2p5-7b-instruct" = "Qwen/Qwen2.5-7B-Instruct"
+
 # WARNING -- chat-only provider. Currently REGISTERED but INERT: the
 # decoding workbench refuses to generate / inspect / manual-decode against
 # these because the per-step "growing user message" emulation we used to

@@ -131,6 +131,14 @@ class TokenizeRequest(BaseModel):
 
 class TokenizeResponse(BaseModel):
     ids: list[int]
+    # Per-token surface form (``piece(id)`` rendered as printable text).
+    # Populated when the active backend has a real local tokenizer
+    # (HF / llamacpp-py / openai-compat-with-mapped-tokenizer); empty
+    # otherwise so the frontend can fall back to "show ids only" without
+    # an extra round trip. The browser uses this to render the live
+    # token preview as the user types: one ``TokenInline`` chip per
+    # entry, with ids as titles for the technically-curious.
+    pieces: list[str] = []
 
 
 class DetokenizeRequest(BaseModel):

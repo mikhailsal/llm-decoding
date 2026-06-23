@@ -45,14 +45,26 @@ export interface Capabilities {
    * those ids get spliced in FRONT of the tokenized prompt before
    * scoring, which unlocks the pedagogical "predict position 0 from
    * BOS" workflow (otherwise unscorable: autoregressive models have
-   * no prior to condition on at position 0). False on cloud
-   * providers that tokenize ``prompt: str`` server-side and can't
-   * accept token ids without switching to token-array prompt mode
-   * (not wired today). The Decode workbench's prepend chip-input
-   * gates on this flag and the "fill BOS" button is disabled when
-   * it's false.
+   * no prior to condition on at position 0). True for local backends
+   * (HF / llamacpp-py / dsbx-host-py) AND for cloud backends with a
+   * configured-and-fetched HF tokenizer (Fireworks gpt-oss, Qwen,
+   * etc. -- see ``supports_local_tokenize``). The Decode workbench's
+   * prepend chip-input gates on this flag and the "fill BOS" button
+   * is disabled when it's false.
    */
   supports_prepend_token_ids: boolean;
+  /**
+   * When true, the web layer's ``/api/v1/tokenize`` endpoint returns
+   * a real per-text token id list for this backend. Always true for
+   * local backends; true for cloud backends once their per-model HF
+   * tokenizer.json has been fetched (lazy, on first use, cached on
+   * disk via the standard HuggingFace cache). Drives the live token
+   * preview under the prompt textarea in the Decode workbench: when
+   * false the preview is hidden (would otherwise show one synthetic
+   * id for the whole prompt, which teaches nothing); when true the
+   * UI debounces the user's typing and renders one chip per token.
+   */
+  supports_local_tokenize: boolean;
   /**
    * When true, ``include_prompt`` runs as a single ``echo=true`` +
    * ``stream=true`` request instead of two separate calls

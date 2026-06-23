@@ -230,8 +230,20 @@ def make_web_app(
     )
     def tokenize(req: S.TokenizeRequest) -> S.TokenizeResponse:
         with _use_backend(registry, req.backend, model=req.model) as backend:
-            ids = backend.tokenize(req.text)
-        return S.TokenizeResponse(ids=[int(i) for i in ids])
+            ids = [int(i) for i in backend.tokenize(req.text)]
+            # Only emit per-token pieces when the backend has a real
+            # local tokenizer (otherwise ``piece`` returns the whole
+            # text fragment as a single synthetic interned string,
+            # which would lie to the user about the tokenization). We
+            # check the capability rather than just calling piece()
+            # because the synthetic-id fallback also "works" and would
+            # silently return a single chip for the whole prompt.
+            caps = getattr(backend, "capabilities", None)
+            has_local = bool(getattr(caps, "supports_local_tokenize", False))
+            pieces: list[str] = []
+            if has_local:
+                pieces = [backend.piece(int(i)) for i in ids]
+        return S.TokenizeResponse(ids=ids, pieces=pieces)
 
     @app.post(
         "/api/v1/detokenize",

@@ -7,6 +7,7 @@
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
   import TokenInline from '$lib/components/TokenInline.svelte';
+  import PromptTokenPreview from '$lib/components/PromptTokenPreview.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
@@ -279,6 +280,18 @@
   // a path where it would silently no-op.
   let prependSupported = $derived<boolean>(
     !!backendInfo?.capabilities?.supports_prepend_token_ids
+  );
+  // Whether the backend exposes a real local tokenizer through
+  // ``/api/v1/tokenize`` (real ids per word piece, not the synthetic
+  // single-id stub). Used to gate the live token preview under the
+  // prompt textarea: without a real tokenizer the preview would
+  // teach the wrong thing (one chip for the whole prompt), so we
+  // simply hide the component instead. Cloud backends flip this on
+  // once their per-model HF tokenizer has been fetched + cached
+  // (Fireworks gpt-oss / Qwen out of the box; Llama once HF_TOKEN
+  // grants access to the gated repo).
+  let localTokenizeSupported = $derived<boolean>(
+    !!backendInfo?.capabilities?.supports_local_tokenize
   );
   // The model's canonical BOS token id(s), as reported by the backend.
   // For HF / llamacpp_py / remote-backed-by-either we read
@@ -888,6 +901,18 @@
     <div>
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" rows="3" class="input font-mono" bind:value={prompt}></textarea>
+      <!--
+        Live token preview: shows how the user's prompt is being tokenized
+        in real time, as a row of chips beneath the textarea. The component
+        hides itself when the active backend lacks a real local tokenizer
+        (so we never surface the synthetic-id stub as "your tokens").
+      -->
+      <PromptTokenPreview
+        text={prompt}
+        backend={backend}
+        model={model}
+        enabled={localTokenizeSupported}
+      />
     </div>
     <div class="grid grid-cols-2 gap-2">
       <div>

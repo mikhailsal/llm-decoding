@@ -137,11 +137,24 @@ class Capabilities:
     # ``prepend_token_ids + tokenize(prompt)`` as one continuous
     # sequence. Used by the "predict position 0 from BOS" workflow.
     # False for cloud providers that take a plain ``prompt: str`` and
-    # tokenize server-side (we can't safely inject prepended token ids
-    # without going through token-array prompt mode, which Fireworks
-    # supports but openai_compat doesn't wire today). The frontend
+    # tokenize server-side AND we don't have a local replica of the
+    # model's tokenizer. With a real local HF tokenizer (see
+    # ``supports_local_tokenize``) cloud backends flip this to True
+    # too -- we switch to token-array prompt mode (``"prompt": [int,
+    # ...]``) when the call carries a non-empty ``prepend_token_ids``,
+    # which Fireworks et al. support out of the box. The frontend
     # gates the prepend chip-input on this flag.
     supports_prepend_token_ids: bool = False
+    # When true, the backend can return a real per-text token id list
+    # (``backend.tokenize(text) -> list[int]`` is NOT a single-intern
+    # stub). Local backends (HF / llamacpp-py / dsbx-host-py) are always
+    # true; cloud backends flip true once their per-model HF tokenizer
+    # has been fetched via ``hf_hub_download``. The Decode workbench
+    # uses this flag to decide whether to render the live token
+    # preview under the prompt textarea: a real token list makes it
+    # educational ("see how your text becomes tokens"), the synthetic
+    # stub does not.
+    supports_local_tokenize: bool = False
     # Provider-specific completion extensions (Fireworks today). Stay
     # False for HF / llamacpp / chat-only cloud providers; surfaced over
     # the wire so the browser doesn't need to know which provider it is

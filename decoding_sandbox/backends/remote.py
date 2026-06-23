@@ -395,6 +395,7 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         ),
         bos_token_ids=tuple(int(i) for i in d.get("bos_token_ids", [])),
         supports_prepend_token_ids=bool(d.get("supports_prepend_token_ids", False)),
+        supports_local_tokenize=bool(d.get("supports_local_tokenize", False)),
     )
 
 

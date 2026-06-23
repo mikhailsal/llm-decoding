@@ -28,9 +28,10 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -40,6 +41,10 @@ from decoding_sandbox.core.config import ProviderConfig
 from decoding_sandbox.core.engine import GenStep
 from decoding_sandbox.core.samplers import SamplerDecision
 from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
+
+if TYPE_CHECKING:  # avoid the import-time cost of the rust binding for callers
+    # that only ever construct a chat-only backend.
+    from tokenizers import Tokenizer
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +134,23 @@ class OpenAICompatBackend(Backend):
         self._max_retries = max(0, int(max_retries))
         self._base_backoff_s = max(0.0, float(base_backoff_s))
         self._sleep = sleep
+        # Local HF tokenizer for this specific model. Loaded lazily on the
+        # first call to ``tokenize`` / ``detokenize`` / ``piece`` / the
+        # capabilities accessor (whichever fires first) via
+        # ``hf_hub_download`` against the repo configured in
+        # ``provider.tokenizers``. ``_tokenizer_load_attempted`` flips to
+        # True after the first attempt (success or graceful failure) so
+        # we don't spam the HF Hub or the log on every request when the
+        # repo is gated / network is offline. The lock serializes
+        # concurrent first-callers within one process. After load:
+        # ``_tokenizer`` is the ``tokenizers.Tokenizer`` instance (or
+        # None if degraded) and ``_bos_ids`` is populated from its
+        # special-token table; both inform the capabilities object.
+        self._tokenizer: Tokenizer | None = None
+        self._tokenizer_load_attempted: bool = False
+        self._tokenizer_load_error: str = ""
+        self._tokenizer_load_lock = threading.Lock()
+        self._bos_ids: tuple[int, ...] = ()
         # The web layer sets this immediately before invoking a method
         # and clears it after, while holding the per-backend lock from
         # :mod:`decoding_sandbox.web.backends`. While it's set, every
@@ -166,15 +188,202 @@ class OpenAICompatBackend(Backend):
             self._id_to_text[tid] = text
         return self._text_to_id[text]
 
+    # -- HF tokenizer ----------------------------------------------------- #
+    # Common heuristics for picking the "BOS-ish" id out of a tokenizer
+    # that doesn't expose a dedicated ``bos_token`` field. Listed in
+    # priority order: we walk this list and take the first matching
+    # added/special token. Order matters -- some models reuse
+    # ``<|endoftext|>`` as their BOS (Qwen Base), so we have to prefer
+    # an explicit start-of-text marker when both are present.
+    _BOS_TOKEN_CANDIDATES: tuple[str, ...] = (
+        "<|startoftext|>",       # gpt-oss family
+        "<|begin_of_text|>",     # Llama 3.x
+        "<s>",                   # Llama 2, Mistral
+        "<|im_start|>",          # Qwen / ChatML chat marker (best-effort)
+        "<|endoftext|>",         # GPT-2, Qwen Base (fallback only)
+    )
+
+    def _ensure_tokenizer(self) -> "Tokenizer | None":
+        """Lazy-load the HF tokenizer for ``self.model``; cache the result.
+
+        Returns the loaded ``tokenizers.Tokenizer`` instance, or ``None``
+        when no tokenizer mapping is configured for this model OR the
+        download fails (gated repo without ``HF_TOKEN``, network down,
+        404, ...). After the first call the result is cached -- success
+        OR failure -- so we never re-attempt the download within the
+        lifetime of this backend instance.
+
+        The graceful-failure path is intentional: ``Capabilities`` and
+        the basic text-completion calls still work; we just lose the
+        token-array prompt mode and the live token preview for this
+        particular model. The first-time warning explains why so the
+        operator can grant HF access if they want the full UX.
+        """
+        if self._tokenizer_load_attempted:
+            return self._tokenizer
+        with self._tokenizer_load_lock:
+            if self._tokenizer_load_attempted:
+                return self._tokenizer
+            try:
+                self._tokenizer = self._do_load_tokenizer()
+                if self._tokenizer is not None:
+                    self._bos_ids = self._discover_bos_ids(self._tokenizer)
+            except Exception as exc:  # noqa: BLE001 (we re-raise as warning text)
+                self._tokenizer_load_error = f"{type(exc).__name__}: {exc}"
+                log.warning(
+                    "tokenizer load failed for %s/%s: %s; "
+                    "prepend_token_ids and live token preview will be "
+                    "disabled for this model. To enable, "
+                    "(a) ensure the mapped repo is correct in "
+                    "[providers.%s.tokenizers] and (b) set HF_TOKEN "
+                    "in your environment with access to the repo.",
+                    self.provider.name,
+                    self.model,
+                    self._tokenizer_load_error,
+                    self.provider.name,
+                )
+                self._tokenizer = None
+            self._tokenizer_load_attempted = True
+            return self._tokenizer
+
+    def _do_load_tokenizer(self) -> "Tokenizer | None":
+        """Resolve the HF repo for ``self.model`` and load tokenizer.json.
+
+        Returns ``None`` (rather than raising) when no repo is configured
+        for this model -- that's a regular "no local tokenizer here"
+        outcome, not an error. Real network/gating failures raise and
+        get caught + logged in ``_ensure_tokenizer``.
+        """
+        repo = (self.provider.tokenizers or {}).get(self.model)
+        if not repo:
+            return None
+        # Imports kept local so chat-only / lmstudio paths that never
+        # need a tokenizer don't pay the rust-binding import cost.
+        from huggingface_hub import hf_hub_download
+        from tokenizers import Tokenizer
+
+        path = hf_hub_download(repo_id=repo, filename="tokenizer.json")
+        tok = Tokenizer.from_file(path)
+        log.info(
+            "loaded HF tokenizer for %s/%s from repo %s (vocab=%d)",
+            self.provider.name,
+            self.model,
+            repo,
+            tok.get_vocab_size(),
+        )
+        return tok
+
+    def _discover_bos_ids(self, tok: "Tokenizer") -> tuple[int, ...]:
+        """Best-effort BOS discovery from the tokenizer's special tokens.
+
+        We don't have access to a ``tokenizer_config.json``-style
+        explicit ``bos_token`` field via the rust ``tokenizers`` API,
+        so we walk the added/special-token decoder and match against a
+        small known-suffix list (``_BOS_TOKEN_CANDIDATES``). Returns
+        empty when nothing matches -- the UI's "fill BOS" helper will
+        grey out and the user can still type any id manually.
+        """
+        try:
+            added = tok.get_added_tokens_decoder()
+        except Exception:  # noqa: BLE001
+            return ()
+        # Build a {content -> id} index over only the SPECIAL added
+        # tokens (regular added tokens like merged-word entries don't
+        # belong on the "fill BOS" button).
+        specials: dict[str, int] = {}
+        for tid, tok_obj in added.items():
+            if getattr(tok_obj, "special", False):
+                specials[tok_obj.content] = int(tid)
+        for cand in self._BOS_TOKEN_CANDIDATES:
+            if cand in specials:
+                return (specials[cand],)
+        return ()
+
     def tokenize(self, text: str) -> list[int]:
-        # We can't replicate the server tokenizer; treat the text as one unit.
-        return [self._intern(text)]
+        """Tokenize ``text`` locally when a HF tokenizer is configured.
+
+        Falls back to the single-intern-id stub (the historical behaviour
+        before per-model tokenizer mapping landed) when no tokenizer is
+        available -- e.g. lmstudio (model id is just ``"local-model"``,
+        no public HF repo) or a Fireworks model whose ``tokenizer.json``
+        we couldn't fetch. The stub still satisfies the callers that
+        only need a *handle* per text fragment (e.g. the watch-ids
+        text-to-id mapping); only the token-array prompt mode and live
+        preview features require the real tokenizer.
+        """
+        tok = self._ensure_tokenizer()
+        if tok is None:
+            return [self._intern(text)]
+        return list(tok.encode(text, add_special_tokens=False).ids)
 
     def detokenize(self, token_ids: list[int]) -> str:
-        return "".join(self._id_to_text.get(t, "") for t in token_ids)
+        tok = self._ensure_tokenizer()
+        if tok is None:
+            return "".join(self._id_to_text.get(t, "") for t in token_ids)
+        # ``skip_special_tokens=False`` so the BOS / EOS the user
+        # explicitly typed in the prepend chip-input round-trip back
+        # through the preview as their literal text instead of being
+        # silently dropped.
+        return tok.decode([int(t) for t in token_ids], skip_special_tokens=False)
 
     def piece(self, token_id: int) -> str:
-        return self._id_to_text.get(token_id, "")
+        tok = self._ensure_tokenizer()
+        if tok is None:
+            return self._id_to_text.get(token_id, "")
+        # ``id_to_token`` returns the raw vocab string (BPE pieces still
+        # carry the GPT-2 ``Ġ`` for word-initial space etc.). Decode of
+        # a single id gives the printable surface form, which is what
+        # the UI's "piece" RPC consumers expect.
+        try:
+            return tok.decode([int(token_id)], skip_special_tokens=False)
+        except Exception:  # noqa: BLE001
+            return self._id_to_text.get(token_id, "")
+
+    def _build_prompt(
+        self, prompt: str, prepend_token_ids: Sequence[int] = ()
+    ) -> str | list[int]:
+        """Return the right ``prompt`` payload for the upstream request.
+
+        When ``prepend_token_ids`` is empty we stay with the historical
+        ``prompt: str`` form -- smallest possible request, no extra
+        local tokenization step, full backwards-compatibility with the
+        path that does not need BOS-conditioning. When it is non-empty
+        we switch to TOKEN-ARRAY prompt mode: we tokenize the prompt
+        locally with the per-model HF tokenizer (``_ensure_tokenizer``
+        is expected to have already succeeded -- the caller validates
+        this) and concatenate ``[*prepend_token_ids, *tokenize(prompt)]``
+        into a single list of ints. Fireworks (and every other
+        OpenAI-compat ``/v1/completions`` we target) accepts this form;
+        it's the only way to splice extra ids in FRONT of the prompt
+        without going through the user-visible text layer (where
+        ``detokenize(BOS) + prompt`` would re-tokenize ambiguously --
+        e.g. ``<|begin_of_text|>`` might not round-trip to a single id).
+
+        The contract: ALL three HTTP paths (``score_prompt``,
+        ``stream_native``, ``stream_native_with_echo``) route their
+        ``"prompt"`` field through this helper, so token-array mode is
+        a single-codepoint switch.
+        """
+        if not prepend_token_ids:
+            return prompt
+        tok = self._ensure_tokenizer()
+        if tok is None:
+            # Defensive: the caller is supposed to have validated. We
+            # silently fall back to text rather than crash, on the
+            # principle that a near-correct request is better than no
+            # request -- but we log loudly so this gets fixed.
+            log.warning(
+                "_build_prompt got prepend_token_ids=%r but no local "
+                "tokenizer; dropping the prepended ids and sending "
+                "prompt as text. This is a caller bug -- "
+                "capabilities.supports_prepend_token_ids was probably "
+                "not checked.",
+                list(prepend_token_ids),
+            )
+            return prompt
+        body_ids = [int(t) for t in prepend_token_ids]
+        body_ids.extend(tok.encode(prompt, add_special_tokens=False).ids)
+        return body_ids
 
     @property
     def capabilities(self) -> Capabilities:
@@ -193,6 +402,17 @@ class OpenAICompatBackend(Backend):
         # per-step inspection inside an assistant turn) is out of
         # scope here; tracked as a separate PR.
         is_chat_only = not self.provider.has_completions
+        # Probe for a local HF tokenizer. Done lazily but eagerly enough
+        # that the FIRST capabilities read after construction triggers
+        # the load -- the web layer caches the result so the cost is
+        # paid once per backend instance. When ``has_local_tokenizer``
+        # is true we can (a) splice extra ids in front of the prompt via
+        # token-array prompt mode for BOS-conditioning, (b) report a
+        # real bos_token_ids so the "fill BOS" helper auto-populates,
+        # (c) advertise supports_local_tokenize so the UI shows the live
+        # token preview as the user types.
+        local_tokenizer = self._ensure_tokenizer() if not is_chat_only else None
+        has_local_tokenizer = local_tokenizer is not None
         if is_chat_only:
             notes = (
                 "chat-only provider; generation disabled until proper "
@@ -202,6 +422,22 @@ class OpenAICompatBackend(Backend):
             notes = "whole-context via echo"
         else:
             notes = "raw /completions"
+        if not is_chat_only and not has_local_tokenizer:
+            mapped = (self.provider.tokenizers or {}).get(self.model)
+            if not mapped:
+                notes += (
+                    f" · no local tokenizer (no [providers."
+                    f"{self.provider.name}.tokenizers] entry for "
+                    f"{self.model!r}); BOS-conditioning and live token "
+                    f"preview disabled"
+                )
+            elif self._tokenizer_load_error:
+                notes += (
+                    f" · local tokenizer unavailable "
+                    f"({self._tokenizer_load_error}); set HF_TOKEN with "
+                    f"access to {mapped!r} to enable BOS-conditioning + "
+                    f"live token preview"
+                )
         return Capabilities(
             name=f"{self.provider.name}:{self.model}",
             full_vocab=False,
@@ -221,17 +457,30 @@ class OpenAICompatBackend(Backend):
                 self.provider.supports_combined_echo_stream
             ),
             generation_disabled=is_chat_only,
-            # Cloud providers take a plain ``prompt: str`` and tokenize
-            # server-side. We don't have a safe way to inject extra
-            # token ids without going through token-array prompt mode
-            # (Fireworks supports it, openai_compat doesn't wire it
-            # today), so we leave the BOS info empty and the prepend
-            # toggle off. The UI then greys out the "fill BOS" helper
-            # for this backend and shows the explanatory tooltip
-            # instead of inviting the user to click a button that
-            # would silently no-op.
-            bos_token_ids=(),
-            supports_prepend_token_ids=False,
+            # Populated from the local HF tokenizer's special-tokens
+            # table when available; empty otherwise. Empty means the
+            # UI's "fill BOS" helper greys out (and we'd fall back to
+            # the user typing the id manually). Token-array prompt mode
+            # gates on ``supports_prepend_token_ids``, not on a non-
+            # empty BOS list, so the user CAN still type a custom id to
+            # condition on even when we don't know the canonical one.
+            bos_token_ids=self._bos_ids,
+            # Becomes True as soon as we have a working local tokenizer
+            # AND the provider has a real /completions endpoint (chat-
+            # only paths can't accept token-array prompts because they
+            # don't accept ``prompt`` at all). When false the web layer
+            # silently drops any incoming ``prepend_token_ids`` and the
+            # frontend disables the chip-input.
+            supports_prepend_token_ids=(
+                has_local_tokenizer and bool(self.provider.has_completions)
+            ),
+            # Drives the live token preview in the Decode workbench.
+            # Independent of ``supports_prepend_token_ids`` so we can
+            # potentially light it up for chat-only providers in the
+            # future (a chat-mode UI where you see your turn tokenize
+            # in real time would be useful even when generation runs
+            # through /chat/completions and can't accept token ids).
+            supports_local_tokenize=has_local_tokenizer,
         )
 
     # -- requests ---------------------------------------------------------- #
@@ -575,30 +824,29 @@ class OpenAICompatBackend(Backend):
                 "capabilities.prompt_logprobs and fall back to "
                 "next_distribution() on the prompt instead."
             )
-        if prepend_token_ids:
-            # Cloud providers tokenize ``prompt: str`` server-side, so
-            # there is no safe way for us to splice extra token ids in
-            # front of the prompt without going through token-array
-            # prompt mode (Fireworks supports it for /completions, but
-            # we don't wire token-array prompts through this path
-            # today). Refusing loudly is friendlier than silently
-            # detokenize+concat -- the latter would round-trip through
-            # the user-visible prompt and break tokenization parity.
-            # The web layer checks ``capabilities.supports_prepend_token_ids``
-            # before passing this argument and falls back to ignoring
-            # the field for cloud backends.
+        if prepend_token_ids and not self._ensure_tokenizer():
+            # Caller asked for token-array prompt mode but we have no
+            # local tokenizer to build the array with. Hard fail: we
+            # CANNOT degrade to ``prompt: str`` here because that would
+            # silently drop the prepended ids and the BOS-conditioning
+            # the user asked for would never happen. The web layer
+            # checks ``capabilities.supports_prepend_token_ids`` first
+            # and would normally not reach this branch.
             raise NotImplementedError(
-                f"{self.provider.name!r} does not support prepend_token_ids "
-                "(cloud providers tokenize the prompt server-side; we'd need "
-                "to switch to token-array prompt mode to inject extra ids "
-                "safely). Check capabilities.supports_prepend_token_ids first."
+                f"{self.provider.name!r} has no local tokenizer for "
+                f"{self.model!r}; prepend_token_ids requires token-array "
+                "prompt mode which in turn needs a local replica of the "
+                "server tokenizer. Configure [providers."
+                f"{self.provider.name}.tokenizers] with the matching HF "
+                "repo (and set HF_TOKEN for gated repos), or check "
+                "capabilities.supports_prepend_token_ids before calling."
             )
 
         watch_ids = watch_ids or []
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
-            "prompt": prompt,
+            "prompt": self._build_prompt(prompt, prepend_token_ids),
             "max_tokens": 1,
             "temperature": 0,
             "echo": True,
@@ -720,6 +968,7 @@ class OpenAICompatBackend(Backend):
         logit_bias: dict[int, float] | None = None,
         watch_ids: Sequence[int] = (),
         prefix_token_ids: Sequence[int] = (),
+        prepend_token_ids: Sequence[int] = (),
     ) -> Iterator[GenStep]:
         """Stream tokens via a single ``/completions`` SSE call.
 
@@ -799,17 +1048,45 @@ class OpenAICompatBackend(Backend):
                 "streaming requires the raw text-completion path. Fall back "
                 "to the per-step decode loop via core.engine.generate."
             )
-        # Manual-mode picks live in the browser; the web layer forwards
-        # them here as ``prefix_token_ids``. Fireworks /completions takes
-        # the prompt as TEXT (not ids), so we detokenize and concatenate.
-        # The model sees ``prompt + detokenize(prefix_token_ids)`` as one
-        # continuous string. Empty list -> no-op.
-        if prefix_token_ids:
-            prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
+        if prepend_token_ids and not self._ensure_tokenizer():
+            # Same contract as ``score_prompt``: a non-empty
+            # ``prepend_token_ids`` requires the local tokenizer so we
+            # can build a token-array prompt. Hard fail rather than
+            # silently lose the BOS the user asked for.
+            raise NotImplementedError(
+                f"{self.provider.name!r} has no local tokenizer for "
+                f"{self.model!r}; prepend_token_ids requires token-array "
+                "prompt mode. Configure [providers."
+                f"{self.provider.name}.tokenizers] or check "
+                "capabilities.supports_prepend_token_ids first."
+            )
+        # Build the prompt payload. Two routes:
+        # (1) No prepend -> stay in text-prompt mode (smallest body,
+        #     full back-compat). ``prefix_token_ids`` (manual-mode user
+        #     picks) get detokenized + concatenated as text, same as
+        #     before this change landed.
+        # (2) With prepend -> switch to TOKEN-ARRAY prompt mode and
+        #     concatenate ``[*prepend, *tokenize(prompt),
+        #     *prefix_token_ids]``. Doing the manual picks in the same
+        #     mode avoids a confusing mixed-representation issue (some
+        #     ids as text, some as ints) and is more accurate too --
+        #     the upstream parses the exact ids we picked, no
+        #     detokenize round-trip ambiguity for edge tokens.
+        if prepend_token_ids:
+            tok = self._ensure_tokenizer()
+            assert tok is not None  # guarded above
+            prompt_payload: str | list[int] = [int(t) for t in prepend_token_ids]
+            prompt_payload.extend(tok.encode(prompt, add_special_tokens=False).ids)
+            if prefix_token_ids:
+                prompt_payload.extend(int(t) for t in prefix_token_ids)
+        else:
+            if prefix_token_ids:
+                prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
+            prompt_payload = prompt
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
-            "prompt": prompt,
+            "prompt": prompt_payload,
             "max_tokens": int(max_tokens),
             "stream": True,
             # ``include_usage`` is a recent OpenAI addition supported by
@@ -1073,6 +1350,7 @@ class OpenAICompatBackend(Backend):
         echo_last: int | None = None,
         watch_ids: Sequence[int] = (),
         prefix_token_ids: Sequence[int] = (),
+        prepend_token_ids: Sequence[int] = (),
     ) -> Iterator[StepResult | GenStep]:
         """Combined ``echo=true`` + ``stream=true`` path -- ONE round trip.
 
@@ -1120,17 +1398,36 @@ class OpenAICompatBackend(Backend):
                 "supports_combined_echo_stream; use score_prompt + "
                 "stream_native as two separate calls."
             )
-        # Manual-mode picks join the prompt as text -- same trick as the
-        # plain ``stream_native`` path. The echoed positions then cover
-        # ``prompt + picks`` as a single continuous block, which is what
-        # the unified workbench wants ("show me the distribution at every
-        # prefix of my evolving picks plus the next predicted token").
-        if prefix_token_ids:
-            prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
+        if prepend_token_ids and not self._ensure_tokenizer():
+            raise NotImplementedError(
+                f"{self.provider.name!r} has no local tokenizer for "
+                f"{self.model!r}; prepend_token_ids requires token-array "
+                "prompt mode. Configure [providers."
+                f"{self.provider.name}.tokenizers] or check "
+                "capabilities.supports_prepend_token_ids first."
+            )
+        # Same two-branch logic as ``stream_native``: token-array mode
+        # ONLY when prepend is requested (smallest change, full back-
+        # compat); manual picks ride along as either text (default) or
+        # token ids (token-array mode). The echoed positions then cover
+        # the full ``[prepend, prompt, picks]`` block in one continuous
+        # stream of per-position logprobs, which is the whole point of
+        # the combined path.
+        if prepend_token_ids:
+            tok = self._ensure_tokenizer()
+            assert tok is not None  # guarded above
+            prompt_payload: str | list[int] = [int(t) for t in prepend_token_ids]
+            prompt_payload.extend(tok.encode(prompt, add_special_tokens=False).ids)
+            if prefix_token_ids:
+                prompt_payload.extend(int(t) for t in prefix_token_ids)
+        else:
+            if prefix_token_ids:
+                prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
+            prompt_payload = prompt
         top = max(1, min(top_k, self.provider.max_top_logprobs))
         body: dict[str, Any] = {
             "model": self.model,
-            "prompt": prompt,
+            "prompt": prompt_payload,
             "max_tokens": int(max_tokens),
             "stream": True,
             "stream_options": {"include_usage": True},

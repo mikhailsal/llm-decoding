@@ -20,6 +20,17 @@ dependencies = [
     "httpx>=0.27",
     "openai>=1.40",
     "huggingface_hub>=0.24",
+    # Rust-binding HuggingFace tokenizer. Small wheel (~3-5 MB) so it's fine
+    # to keep in the core deps even though only ``openai_compat`` uses it
+    # directly. We need it to give cloud backends (Fireworks et al.) a real
+    # local tokenizer: the API takes ``prompt: str`` and tokenizes server-
+    # side, so without a local replica we can't (a) splice extra ids in
+    # front via token-array prompt mode, (b) show a live token preview as
+    # the user types in the Decode workbench, (c) discover the model's BOS
+    # automatically. ``Tokenizer.from_file`` consumes a single
+    # ``tokenizer.json`` we fetch on demand via ``hf_hub_download`` and
+    # cache in the standard HF cache dir.
+    "tokenizers>=0.20",
     "tomli>=2.0; python_version < '3.11'",
 ]
 

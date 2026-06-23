@@ -159,6 +159,7 @@ def stream_generate(
                 echo_last=echo_last,
                 watch_ids=watch_id_list,
                 prefix_token_ids=prefix_id_list,
+                prepend_token_ids=prepend_id_list,
             ):
                 yield frame
                 completion_steps += step_delta
@@ -217,6 +218,7 @@ def stream_generate(
                     logit_bias=logit_bias,
                     watch_ids=watch_id_list,
                     prefix_token_ids=prefix_id_list,
+                    prepend_token_ids=prepend_id_list,
                 ):
                     yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
                     completion_steps += 1
@@ -347,6 +349,7 @@ def _iter_combined_echo_stream(
     echo_last: int | None,
     watch_ids: list[int],
     prefix_token_ids: list[int],
+    prepend_token_ids: list[int],
 ) -> Iterator[tuple[bytes, int, str | None]]:
     """Drive ``stream_native_with_echo`` into SSE frames + bookkeeping.
 
@@ -386,6 +389,7 @@ def _iter_combined_echo_stream(
         echo_last=echo_last,
         watch_ids=watch_ids,
         prefix_token_ids=prefix_token_ids,
+        prepend_token_ids=prepend_token_ids,
     )
     for item in iterator:
         # ``StepResult`` -> goes into the prompt_score frame buffer.

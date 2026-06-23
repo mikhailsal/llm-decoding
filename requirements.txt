@@ -7,4 +7,8 @@ prompt_toolkit>=3.0
 httpx>=0.27
 openai>=1.40
 huggingface_hub>=0.24
+# Real local tokenizer for cloud backends (Fireworks et al.). See pyproject
+# for the full rationale; gist: lets us inject extra ids in front of the
+# prompt (BOS-conditioning) and render a live token preview in the UI.
+tokenizers>=0.20
 tomli>=2.0; python_version < "3.11"

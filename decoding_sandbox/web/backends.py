@@ -233,9 +233,26 @@ class BackendRegistry:
         out: list[BackendInfo] = []
         for entry in self._entries.values():
             caps = None
-            if entry.instance is not None:
+            # Cloud providers cache per-model backend instances under
+            # ``cloud_variants`` rather than ``instance``. Pick the
+            # variant that matches the provider's default model when
+            # available -- that's the one the UI is most likely
+            # showing -- so the loaded-backend caps (with real
+            # ``bos_token_ids`` and the post-load ``supports_*``
+            # flags) propagate to /info as soon as ANY request has
+            # actually wired the tokenizer up.
+            inst = entry.instance
+            if inst is None and entry.family == "cloud" and entry.cloud_variants:
+                prov = self._cfg.providers.get(entry.name)
+                if prov is not None:
+                    inst = entry.cloud_variants.get(prov.default_model)
+                if inst is None:
+                    # Fallback: any loaded variant is more accurate
+                    # than the static config envelope.
+                    inst = next(iter(entry.cloud_variants.values()), None)
+            if inst is not None:
                 try:
-                    caps = capabilities_to_wire(entry.instance.capabilities)
+                    caps = capabilities_to_wire(inst.capabilities)
                 except Exception:  # noqa: BLE001
                     caps = None
             # For cloud providers we can synthesize the capability envelope
@@ -280,6 +297,25 @@ class BackendRegistry:
                         notes = (
                             "static caps from provider config (backend not yet loaded)"
                         )
+                    # Optimistic prediction of the "local tokenizer
+                    # available" flag: if the provider config maps the
+                    # default model (or ANY model) to an HF repo, we
+                    # advertise local-tokenize + prepend support
+                    # upfront. The actual load happens lazily on first
+                    # use; if it fails the loaded backend will downgrade
+                    # the capability and the UI will reflect that on the
+                    # next /info fetch. We prefer the optimistic stance
+                    # because the alternative (start False, flip True
+                    # after first request) makes the "fill BOS" button
+                    # appear disabled until the user happens to click
+                    # generate -- a confusing UX regression for cloud
+                    # backends where the mapping is configured and
+                    # ready to go.
+                    has_tokenizer_mapping = bool(
+                        prov.tokenizers and prov.tokenizers.get(
+                            prov.default_model
+                        )
+                    )
                     caps = WireCapabilities(
                         name=f"openai_compat:{entry.name}",
                         full_vocab=False,
@@ -288,10 +324,13 @@ class BackendRegistry:
                         can_force_token=bool(prov.has_completions),
                         notes=notes,
                         eos_token_ids=[],
-                        # Cloud providers tokenize ``prompt: str``
-                        # server-side; we can't safely splice extra
-                        # token ids in front, so we report no BOS and
-                        # gate the UI's prepend chip-input off.
+                        # BOS ids stay empty here because we discover
+                        # them from the actual tokenizer.json at load
+                        # time. Surfacing a pre-load best-guess would
+                        # require parsing tokenizer_config.json per
+                        # model, which is not worth the complexity --
+                        # the loaded-backend path fills the real value
+                        # in within seconds of the first request.
                         bos_token_ids=[],
                         supports_ignore_eos=bool(prov.supports_ignore_eos),
                         supports_perf_metrics=bool(prov.supports_perf_metrics),
@@ -302,7 +341,11 @@ class BackendRegistry:
                         supports_combined_echo_stream=bool(
                             prov.supports_combined_echo_stream
                         ),
-                        supports_prepend_token_ids=False,
+                        supports_prepend_token_ids=(
+                            has_tokenizer_mapping
+                            and not is_chat_only
+                        ),
+                        supports_local_tokenize=has_tokenizer_mapping,
                         generation_disabled=is_chat_only,
                     )
             label = self._public_label(entry)

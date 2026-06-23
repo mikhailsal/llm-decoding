@@ -368,6 +368,7 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
             logit_bias=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             self.native_calls.append(
                 {
@@ -566,6 +567,7 @@ def test_generate_stream_usage_event_records_native_backend_requests() -> None:
             logit_bias=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             # Simulate two HTTP attempts (e.g. 429 -> 200) and a server-
             # reported usage block. Both must land in the bound sink.
@@ -660,6 +662,7 @@ def test_generate_stream_emits_perf_event_before_usage() -> None:
             logit_bias=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             if self._sink is not None:
                 self._sink["perf_metrics"] = {
@@ -779,6 +782,7 @@ def test_generate_stream_uses_combined_echo_path_when_supported() -> None:
             echo_last=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             self.echo_stream_called += 1
             # 3 prompt-echo StepResults then 1 emitted GenStep.
@@ -901,6 +905,7 @@ def test_generate_stream_combined_echo_path_forwards_prefix_and_watch() -> None:
             echo_last=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             seen["prompt"] = prompt
             seen["prefix_token_ids"] = list(prefix_token_ids)
@@ -997,6 +1002,7 @@ def test_generate_stream_emits_raw_output_event_and_forwards_logit_bias() -> Non
             logit_bias=None,
             watch_ids=(),
             prefix_token_ids=(),
+            prepend_token_ids=(),
         ):
             self.seen_logit_bias = logit_bias
             if self._sink is not None:
