@@ -149,6 +149,19 @@ _DEFAULTS: dict[str, Any] = {
                 "accounts/fireworks/models/glm-5p1",
                 "accounts/fireworks/models/glm-5p2",
                 "accounts/fireworks/models/deepseek-v4-flash",
+                "accounts/fireworks/models/deepseek-v4-pro",
+                "accounts/fireworks/models/minimax-m2p7",
+                "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+                # Vision-capable LLMs (supportsImageInput=True) that STILL
+                # answer the text ``/v1/completions`` + logprobs path we
+                # rely on -- verified by probe. The old image filter wrongly
+                # dropped these; see _fetch_fireworks_models.
+                "accounts/fireworks/models/kimi-k2p5",
+                "accounts/fireworks/models/kimi-k2p6",
+                "accounts/fireworks/models/kimi-k2p7-code",
+                # CUSTOM_MODEL kind; text completions + logprobs verified.
+                "accounts/fireworks/models/qwen3p6-plus",
+                "accounts/fireworks/models/qwen3p7-plus",
             ],
             # Maps each Fireworks model id to a public HuggingFace repo that
             # ships the exact ``tokenizer.json`` the Fireworks deployment
@@ -169,15 +182,55 @@ _DEFAULTS: dict[str, Any] = {
             # works for text-completion, just without live preview /
             # BOS-prepend support, which the UI surfaces via greyed-out
             # chip-inputs.
+            # Authoritative repos taken from each model's ``huggingFaceUrl``
+            # in the Fireworks catalogue. Only models whose repo ships a
+            # ``tokenizer.json`` (the format ``tokenizers.Tokenizer`` can
+            # load) get an entry; the rest still work for plain text
+            # completion, just without the live preview / BOS-prepend.
+            # Notably ABSENT and why:
+            #   * kimi-k2p5/k2p6/k2p7-code -> moonshotai/Kimi-* repos ship a
+            #     tiktoken-style tokenizer (NO tokenizer.json), so we can't
+            #     load them with the rust ``tokenizers`` lib.
+            #   * qwen3p6-plus / qwen3p7-plus -> CUSTOM_MODEL with no
+            #     concrete public repo (huggingFaceUrl is just "Qwen/").
             "tokenizers": {
                 "accounts/fireworks/models/gpt-oss-120b": "openai/gpt-oss-120b",
                 "accounts/fireworks/models/gpt-oss-20b": "openai/gpt-oss-20b",
-                "accounts/fireworks/models/glm-5p1": "zai-org/GLM-5",
-                "accounts/fireworks/models/glm-5p2": "zai-org/GLM-5",
+                # Point at the EXACT per-release GLM repos the deployment
+                # uses (tokenizer.json is quant-independent so GLM-5.1-FP8
+                # is fine for the FP8 serverless endpoint).
+                "accounts/fireworks/models/glm-5p1": "zai-org/GLM-5.1-FP8",
+                "accounts/fireworks/models/glm-5p2": "zai-org/GLM-5.2",
                 "accounts/fireworks/models/deepseek-v4-flash": (
                     "deepseek-ai/DeepSeek-V4-Flash"
                 ),
+                # ``deepseek-v4-pro`` shares DeepSeek's full-width
+                # ``<\uff5cbegin\u2581of\u2581sentence\uff5c>`` BOS (id 0)
+                # with the flash variant; the weights differ, the vocab
+                # does not.
+                "accounts/fireworks/models/deepseek-v4-pro": (
+                    "deepseek-ai/DeepSeek-V4-Pro"
+                ),
+                # MiniMax M2.7's public tokenizer (NOT the older MiniMax-M2).
+                # Its declared BOS is the unusual literal ``]~!b[`` (see
+                # ``_BOS_TOKEN_CANDIDATES`` in openai_compat -- we teach the
+                # discovery to recognize it so "fill BOS" works here too).
+                "accounts/fireworks/models/minimax-m2p7": "MiniMaxAI/MiniMax-M2.7",
+                # NVIDIA's Nemotron-3 Ultra. The Fireworks deployment is the
+                # NVFP4 quant, but tokenizer.json is quantization-independent
+                # so we point at the matching public NVFP4 repo (BF16 ships
+                # the identical vocab). BOS is the classic ``<s>``.
+                "accounts/fireworks/models/nemotron-3-ultra-nvfp4": (
+                    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+                ),
             },
+            # Serverless models to DROP from the catalogue union: ``minimax-m3``
+            # answers /v1/chat/completions but HANGS on /v1/completions (the
+            # endpoint our token-level workbench needs), so it would dead-end
+            # the picker. See ProviderConfig.exclude_models.
+            "exclude_models": [
+                "accounts/fireworks/models/minimax-m3",
+            ],
             # Per-model overrides of provider-level ``supports_*`` flags.
             # Fireworks's serverless contract is NOT uniform: the gpt-oss
             # family was the first to add the ``sampling_mask: "count"``
@@ -305,6 +358,15 @@ class ProviderConfig:
     # divergence is documented in config (greppable) instead of inside a
     # request-builder branch in the backend.
     model_overrides: dict[str, dict[str, bool]] = field(default_factory=dict)
+    # Models to DROP from the live catalogue union even though the provider
+    # advertises them as serverless. Use case: a serverless model that does
+    # not implement the ``/v1/completions`` endpoint our token-level
+    # workbench relies on (it only answers ``/v1/chat/completions``).
+    # Fireworks's ``minimax-m3`` is the canonical example -- it 200s on
+    # chat but HANGS forever on ``/v1/completions``, so surfacing it in the
+    # picker would dead-end the user. Listed by FULL model id; matched
+    # against both the curated ``models`` list and the live fetch.
+    exclude_models: list[str] = field(default_factory=list)
     # -- provider-specific /completions extension flags ---------------------
     # These map 1:1 to optional fields in the Fireworks CompletionRequest
     # schema (https://docs.fireworks.ai/api-reference/post-completions).
@@ -513,6 +575,7 @@ def load_config(
                 for k, v in (pdata.get("model_overrides") or {}).items()
                 if isinstance(v, dict)
             },
+            exclude_models=list(pdata.get("exclude_models", []) or []),
             supports_ignore_eos=bool(pdata.get("supports_ignore_eos", False)),
             supports_perf_metrics=bool(pdata.get("supports_perf_metrics", False)),
             supports_raw_output=bool(pdata.get("supports_raw_output", False)),

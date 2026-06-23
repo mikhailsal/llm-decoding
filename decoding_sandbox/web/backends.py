@@ -547,15 +547,20 @@ class BackendRegistry:
             )
 
         # Union live ∪ curated, preserving curated order at the front so
-        # the user's favourites stay near the top.
+        # the user's favourites stay near the top. ``exclude_models`` is
+        # applied to BOTH sources so a denylisted id (e.g. a chat-only
+        # model that hangs on /completions) can never reach the picker,
+        # regardless of whether it slipped into the curated list or the
+        # live catalogue.
+        excluded = set(prov.exclude_models or ())
         seen: set[str] = set()
         merged: list[str] = []
         for m in curated:
-            if m and m not in seen:
+            if m and m not in seen and m not in excluded:
                 seen.add(m)
                 merged.append(m)
         for m in live:
-            if m and m not in seen:
+            if m and m not in seen and m not in excluded:
                 seen.add(m)
                 merged.append(m)
         result = ModelListEntry(

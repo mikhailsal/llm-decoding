@@ -223,6 +223,7 @@ class OpenAICompatBackend(Backend):
         "<\uff5cbegin\u2581of\u2581sentence\uff5c>",
         "<\uff5cbegin_of_sentence\uff5c>",
         "<|im_start|>",          # Qwen / ChatML chat marker (best-effort)
+        "]~!b[",                 # MiniMax M2.x declared bos_token (literal)
         "<|endoftext|>",         # GPT-2, Qwen Base (fallback only)
     )
 
@@ -358,6 +359,26 @@ class OpenAICompatBackend(Backend):
         # through the preview as their literal text instead of being
         # silently dropped.
         return tok.decode([int(t) for t in token_ids], skip_special_tokens=False)
+
+    def _surface_text(self, token_id: int | None, provider_text: str) -> str:
+        """Resolve the renderable surface form of an echoed token.
+
+        Providers detokenize SPECIAL tokens (BOS / EOS / chat markers) to
+        an EMPTY string -- Fireworks echoes a prepended ``<\uff5cbegin\u2581of\u2581sentence\uff5c>``
+        back as ``""``, which the UI then renders as the dim ``<empty>``
+        placeholder. That's inconsistent with the live token preview,
+        which routes the same id through :meth:`piece` and shows the real
+        token name. When the provider's text is empty but we hold a REAL
+        model token id (below the synthetic ``_INTERN_ID_BASE``), fall
+        back to the local tokenizer's piece so both views agree. No-ops
+        gracefully when there's no local tokenizer (``piece`` returns the
+        empty ``_id_to_text`` lookup) or the id is a synthetic intern id.
+        """
+        if provider_text:
+            return provider_text
+        if token_id is None or int(token_id) >= self._INTERN_ID_BASE:
+            return provider_text
+        return self.piece(int(token_id))
 
     def piece(self, token_id: int) -> str:
         tok = self._ensure_tokenizer()
@@ -696,6 +717,10 @@ class OpenAICompatBackend(Backend):
                 text = str(item.get("token", ""))
                 if text:
                     self._id_to_text.setdefault(tid, text)
+                else:
+                    # Special tokens echo back blank; show the local
+                    # tokenizer's piece so a BOS/EOS alt isn't a void cell.
+                    text = self._surface_text(tid, text)
             lp = item.get("logprob")
             logprob = float(lp) if lp is not None else float("nan")
             out.append(
@@ -960,6 +985,10 @@ class OpenAICompatBackend(Backend):
                 )
                 if actual_text and actual_id not in self._id_to_text:
                     self._id_to_text[actual_id] = actual_text
+                # BOS/EOS and other specials come back as "" -> render the
+                # piece so the SEED row shows e.g. ``<|begin_of_sentence|>``
+                # instead of the dim ``<empty>``, matching the live preview.
+                actual_text = self._surface_text(actual_id, actual_text)
                 actual_lp = entry.get("logprob")
                 actual_lp_f = float(actual_lp) if actual_lp is not None else float("nan")
                 chosen = StepResult(0, cands, False).find(actual_id)
@@ -971,7 +1000,14 @@ class OpenAICompatBackend(Backend):
             else:
                 chosen = None
             prev_entry = content[i - 1] if 0 <= (i - 1) < len(content) else {}
-            prev_text = str(prev_entry.get("token", "")) if isinstance(prev_entry, dict) else None
+            if isinstance(prev_entry, dict):
+                prev_tid_raw = prev_entry.get("token_id")
+                prev_tid = int(prev_tid_raw) if prev_tid_raw is not None else None
+                prev_text = self._surface_text(
+                    prev_tid, str(prev_entry.get("token", ""))
+                )
+            else:
+                prev_text = None
             step = StepResult(
                 position=i,
                 candidates=cands,
@@ -1317,6 +1353,12 @@ class OpenAICompatBackend(Backend):
                     self._id_to_text[tok_id] = tok_text
             else:
                 tok_id = self._intern(tok_text)
+            # Specials (a prepended BOS in the echo prefix, or a generated
+            # EOS / chat marker) echo back blank -> render the piece so the
+            # running-completion prefix and the SEED row show the real token
+            # name instead of the dim ``<empty>``, matching the live token
+            # preview. No-op for non-empty text and for synthetic intern ids.
+            tok_text = self._surface_text(tok_id, tok_text)
             if smc is not None:
                 for c in cands:
                     c.sampling_mask_count = smc
@@ -1686,6 +1728,12 @@ class OpenAICompatBackend(Backend):
                     self._id_to_text[tok_id] = tok_text
             else:
                 tok_id = self._intern(tok_text)
+            # Specials (a prepended BOS in the echo prefix, or a generated
+            # EOS / chat marker) echo back blank -> render the piece so the
+            # running-completion prefix and the SEED row show the real token
+            # name instead of the dim ``<empty>``, matching the live token
+            # preview. No-op for non-empty text and for synthetic intern ids.
+            tok_text = self._surface_text(tok_id, tok_text)
             if smc is not None:
                 for c in cands:
                     c.sampling_mask_count = smc
@@ -1751,6 +1799,12 @@ class OpenAICompatBackend(Backend):
                     self._id_to_text[tok_id] = tok_text
             else:
                 tok_id = self._intern(tok_text)
+            # Specials (a prepended BOS in the echo prefix, or a generated
+            # EOS / chat marker) echo back blank -> render the piece so the
+            # running-completion prefix and the SEED row show the real token
+            # name instead of the dim ``<empty>``, matching the live token
+            # preview. No-op for non-empty text and for synthetic intern ids.
+            tok_text = self._surface_text(tok_id, tok_text)
             if smc is not None:
                 for c in cands:
                     c.sampling_mask_count = smc
@@ -2079,20 +2133,34 @@ class OpenAICompatBackend(Backend):
                 r = client.get(url + suffix)
                 r.raise_for_status()
                 d = r.json()
+                exclude = set(self.provider.exclude_models or ())
                 for m in d.get("models", []) or []:
                     if not isinstance(m, dict):
                         continue
                     if not m.get("supportsServerless"):
                         continue
-                    if m.get("kind") not in ("HF_BASE_MODEL",):
+                    # Generative LLMs only. ``HF_BASE_MODEL`` is the bulk;
+                    # ``CUSTOM_MODEL`` covers provider-tuned variants (e.g.
+                    # Fireworks's ``qwen3p*-plus``). We deliberately EXCLUDE
+                    # ``EMBEDDING_MODEL`` (not generative) and
+                    # ``FLUMINA_BASE_MODEL`` (image generation).
+                    if m.get("kind") not in ("HF_BASE_MODEL", "CUSTOM_MODEL"):
                         continue
-                    if m.get("supportsImageInput"):
-                        # Vision/multimodal serverless endpoints don't accept the
-                        # text-completion ``logprobs`` parameter we rely on.
-                        continue
+                    # NOTE: we used to drop ``supportsImageInput`` models on the
+                    # theory that vision endpoints reject text ``/completions``
+                    # + logprobs. That was WRONG -- the Kimi family and the
+                    # Qwen-plus models are multimodal yet answer the text
+                    # completions path fine (verified by probe), so the filter
+                    # silently hid half the catalogue. Models that genuinely
+                    # only speak /chat/completions (e.g. ``minimax-m3``, which
+                    # HANGS on /completions) are handled by the explicit
+                    # ``exclude_models`` denylist instead of a fragile flag.
                     name = m.get("name")
-                    if isinstance(name, str) and name:
-                        out.append(name)
+                    if not isinstance(name, str) or not name:
+                        continue
+                    if name in exclude:
+                        continue
+                    out.append(name)
                 next_token = d.get("nextPageToken") or ""
                 if not next_token:
                     break

@@ -72,6 +72,38 @@ def test_load_config_uses_defaults_when_no_file(tmp_path, monkeypatch) -> None:
     assert cfg.providers["fireworks"].supports_prompt_logprobs is True
 
 
+def test_fireworks_defaults_carry_corrected_tokenizers_and_denylist(
+    tmp_path, monkeypatch
+) -> None:
+    """The Fireworks defaults map each model to its authoritative HF repo
+    and denylist the chat-only model.
+
+    Pins: (a) ``minimax-m2p7`` resolves to MiniMax M2.7 (NOT the older
+    MiniMax-M2 -- a wrong mapping would tokenize against the wrong vocab),
+    (b) the per-release GLM repos are used, and (c) ``minimax-m3`` (chat
+    only, hangs on /v1/completions) is on ``exclude_models``.
+    """
+    monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
+    prov = cfg_mod.load_config(load_secrets=False).providers["fireworks"]
+    toks = prov.tokenizers
+    assert toks["accounts/fireworks/models/minimax-m2p7"] == "MiniMaxAI/MiniMax-M2.7"
+    assert toks["accounts/fireworks/models/glm-5p1"] == "zai-org/GLM-5.1-FP8"
+    assert toks["accounts/fireworks/models/glm-5p2"] == "zai-org/GLM-5.2"
+    assert (
+        toks["accounts/fireworks/models/deepseek-v4-pro"]
+        == "deepseek-ai/DeepSeek-V4-Pro"
+    )
+    # Kimi (tiktoken, no tokenizer.json) and Qwen-plus (no public repo)
+    # are intentionally absent from the tokenizer map.
+    assert "accounts/fireworks/models/kimi-k2p6" not in toks
+    assert "accounts/fireworks/models/qwen3p7-plus" not in toks
+    # But they ARE offered in the picker (they support text completion).
+    assert "accounts/fireworks/models/kimi-k2p6" in prov.models
+    assert "accounts/fireworks/models/qwen3p7-plus" in prov.models
+    # The chat-only model is denylisted.
+    assert "accounts/fireworks/models/minimax-m3" in prov.exclude_models
+
+
 def test_load_config_merges_overrides_from_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
     (tmp_path / "config.toml").write_text('[run]\nbackend = "hf"\n[storage]\nmin_free_gb = 12.5\n')

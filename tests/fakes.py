@@ -130,6 +130,16 @@ class MockHTTPClient:
         self.calls: list[dict[str, Any]] = []
         self.closed = False
         self._route_cursor: dict[tuple[str, str], int] = {}
+        # Some code paths (the Fireworks catalogue fetch) construct a fresh
+        # ``httpx.Client(...)`` as a context manager and copy ``.headers``
+        # off the existing client. Expose both so the same mock can stand in.
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self) -> "MockHTTPClient":
+        return self
+
+    def __exit__(self, *_excinfo: Any) -> None:
+        return None
 
     def _resolve(self, method: str, url: str) -> "MockResponse":
         key = (method, url)

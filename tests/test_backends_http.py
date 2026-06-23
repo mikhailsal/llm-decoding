@@ -920,6 +920,167 @@ def test_openai_compat_per_model_override_drops_sampling_mask_from_body(
     assert body.get("sampling_mask") == "count"
 
 
+def test_openai_compat_surface_text_falls_back_to_piece_for_empty_special(
+    monkeypatch,
+) -> None:
+    """Empty echoed surface text + a real id -> the local tokenizer's piece.
+
+    Providers detokenize special tokens (BOS/EOS) to "" so a prepended
+    BOS echoes back blank, which the UI renders as the dim ``<empty>``.
+    ``_surface_text`` substitutes ``piece(id)`` so the running completion
+    and prompt-logits agree with the live token preview. The fallback must
+    fire ONLY for empty text on a REAL id -- non-empty text is
+    authoritative, and synthetic intern ids / ``None`` are left alone.
+    """
+    backend, _ = _make_oc_backend(monkeypatch, routes={})
+    monkeypatch.setattr(
+        backend,
+        "piece",
+        lambda tid: "<|begin_of_sentence|>" if tid == 0 else f"id{tid}",
+    )
+    # Empty provider text + real id -> piece.
+    assert backend._surface_text(0, "") == "<|begin_of_sentence|>"
+    # Non-empty provider text wins (piece is NOT consulted).
+    assert backend._surface_text(0, " Paris") == " Paris"
+    # Synthetic intern id (>= _INTERN_ID_BASE) stays blank -- no real vocab
+    # piece exists for it, so falling back would be meaningless.
+    assert backend._surface_text(backend._INTERN_ID_BASE, "") == ""
+    # ``None`` id -> keep whatever the provider gave us.
+    assert backend._surface_text(None, "") == ""
+
+
+def test_stream_native_with_echo_renders_empty_bos_via_piece(monkeypatch) -> None:
+    """A prepended BOS that echoes back blank renders as its piece, not ``<empty>``.
+
+    Position 0 here is the user's prepended BOS: the provider returns
+    ``token: ""`` (specials detokenize to empty) but a real
+    ``token_id``. The emitted step's chosen text -- which feeds both the
+    SEED row and the running-completion prefix -- must be the local
+    tokenizer's piece so it matches the live preview instead of the dim
+    ``<empty>`` placeholder.
+    """
+    from decoding_sandbox.core.types import StepResult
+
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_combined_echo_stream=True,
+    )
+    # Stand in for the loaded HF tokenizer's surface form for the BOS id.
+    monkeypatch.setattr(
+        backend,
+        "piece",
+        lambda tid: "<|begin_of_sentence|>" if tid == 0 else f"id{tid}",
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            # Position 0: the prepended BOS, echoed blank.
+                            {"token": "", "token_id": 0, "logprob": 0.0,
+                             "top_logprobs": []},
+                            # Position 1: first real prompt token.
+                            {
+                                "token": "Once",
+                                "token_id": 100,
+                                "logprob": -0.5,
+                                "top_logprobs": [
+                                    {"token": "Once", "token_id": 100, "logprob": -0.5}
+                                ],
+                            },
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    out = list(
+        backend.stream_native_with_echo(
+            "Once",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    step_results = [x for x in out if isinstance(x, StepResult)]
+    pos0 = step_results[0]
+    assert pos0.position == 0
+    assert pos0.chosen is not None
+    assert pos0.chosen.token_id == 0
+    # The crux: the blank BOS surface text was replaced with the piece.
+    assert pos0.chosen.text == "<|begin_of_sentence|>"
+
+
+def test_fetch_fireworks_models_includes_vision_and_custom_drops_denylist(
+    monkeypatch,
+) -> None:
+    """The catalogue fetch keeps vision/custom LLMs and drops the denylist.
+
+    Regression for the bug where the ``supportsImageInput`` filter hid
+    half the serverless catalogue (Kimi / Qwen-plus are multimodal yet
+    answer the text completions path). We now keep ``HF_BASE_MODEL`` AND
+    ``CUSTOM_MODEL`` regardless of image support, drop ``EMBEDDING_MODEL``
+    / ``FLUMINA_BASE_MODEL`` (not generative), and honour the explicit
+    ``exclude_models`` denylist for chat-only models like ``minimax-m3``.
+    """
+    catalogue = {
+        "models": [
+            {"name": "accounts/fireworks/models/gpt-oss-120b",
+             "supportsServerless": True, "kind": "HF_BASE_MODEL",
+             "supportsImageInput": False},
+            # Vision LLM -- previously dropped, must now be KEPT.
+            {"name": "accounts/fireworks/models/kimi-k2p6",
+             "supportsServerless": True, "kind": "HF_BASE_MODEL",
+             "supportsImageInput": True},
+            # CUSTOM_MODEL kind -- previously dropped, must now be KEPT.
+            {"name": "accounts/fireworks/models/qwen3p7-plus",
+             "supportsServerless": True, "kind": "CUSTOM_MODEL",
+             "supportsImageInput": True},
+            # Chat-only model on the denylist -- must be DROPPED.
+            {"name": "accounts/fireworks/models/minimax-m3",
+             "supportsServerless": True, "kind": "HF_BASE_MODEL",
+             "supportsImageInput": True},
+            # Not generative -- must be DROPPED.
+            {"name": "accounts/fireworks/models/qwen3-embedding-8b",
+             "supportsServerless": True, "kind": "EMBEDDING_MODEL",
+             "supportsImageInput": False},
+            {"name": "accounts/fireworks/models/flux-1-schnell-fp8",
+             "supportsServerless": True, "kind": "FLUMINA_BASE_MODEL",
+             "supportsImageInput": False},
+            # Not serverless -- must be DROPPED.
+            {"name": "accounts/fireworks/models/some-dedicated-only",
+             "supportsServerless": False, "kind": "HF_BASE_MODEL",
+             "supportsImageInput": False},
+        ]
+    }
+    mock = MockHTTPClient(
+        {("GET", "/v1/accounts/fireworks/models?pageSize=200"): catalogue}
+    )
+    monkeypatch.setattr(oc_mod.httpx, "Client", lambda **kw: mock)
+    prov = ProviderConfig(
+        name="fireworks",
+        base_url="https://api.fireworks.ai/inference/v1",
+        api_key_env="FIREWORKS_API_KEY",
+        default_model="accounts/fireworks/models/gpt-oss-120b",
+        has_completions=True,
+        exclude_models=["accounts/fireworks/models/minimax-m3"],
+    )
+    backend = OpenAICompatBackend(prov, max_retries=0, sleep=lambda _w: None)
+    models = backend.fetch_available_models()
+    assert models == [
+        "accounts/fireworks/models/gpt-oss-120b",
+        "accounts/fireworks/models/kimi-k2p6",
+        "accounts/fireworks/models/qwen3p7-plus",
+    ]
+
+
 def test_openai_compat_score_prompt_switches_to_token_array_on_prepend(
     monkeypatch,
 ) -> None:

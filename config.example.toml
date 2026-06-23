@@ -148,6 +148,26 @@ models = [
   "accounts/fireworks/models/glm-5p1",
   "accounts/fireworks/models/glm-5p2",
   "accounts/fireworks/models/deepseek-v4-flash",
+  "accounts/fireworks/models/deepseek-v4-pro",
+  "accounts/fireworks/models/minimax-m2p7",
+  "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+  # Vision-capable LLMs that still answer the text /completions+logprobs
+  # path (verified) -- the old supportsImageInput filter wrongly hid these.
+  "accounts/fireworks/models/kimi-k2p5",
+  "accounts/fireworks/models/kimi-k2p6",
+  "accounts/fireworks/models/kimi-k2p7-code",
+  # CUSTOM_MODEL kind (Fireworks-tuned Qwen); completions verified.
+  "accounts/fireworks/models/qwen3p6-plus",
+  "accounts/fireworks/models/qwen3p7-plus",
+]
+
+# Serverless models to DROP from the catalogue union (live ∪ curated).
+# minimax-m3 answers /v1/chat/completions but HANGS on /v1/completions
+# (which our token-level workbench needs), so surfacing it would dead-end
+# the picker. Must stay ABOVE the [...tokenizers] subtable so TOML parses
+# it as a key of [providers.fireworks], not of the subtable.
+exclude_models = [
+  "accounts/fireworks/models/minimax-m3",
 ]
 
 # Per-model HuggingFace repo that ships the matching ``tokenizer.json``.
@@ -162,12 +182,25 @@ models = [
 # drop the token into a project-local ``.env`` and ``load_config`` picks
 # it up. Missing entries gracefully degrade to "no local tokenizer for
 # this model" and the UI dims the prepend chip-input + live preview.
+# Only models whose HF repo ships a tokenizer.json get an entry. Kimi
+# (tiktoken-style tokenizer, no tokenizer.json) and the Qwen-plus CUSTOM
+# models (no concrete public repo) are intentionally absent -- they still
+# list and run for plain text completion, just without live preview / BOS.
 [providers.fireworks.tokenizers]
 "accounts/fireworks/models/gpt-oss-120b" = "openai/gpt-oss-120b"
 "accounts/fireworks/models/gpt-oss-20b" = "openai/gpt-oss-20b"
-"accounts/fireworks/models/glm-5p1" = "zai-org/GLM-5"
-"accounts/fireworks/models/glm-5p2" = "zai-org/GLM-5"
+# Exact per-release GLM repos (tokenizer.json is quant-independent).
+"accounts/fireworks/models/glm-5p1" = "zai-org/GLM-5.1-FP8"
+"accounts/fireworks/models/glm-5p2" = "zai-org/GLM-5.2"
 "accounts/fireworks/models/deepseek-v4-flash" = "deepseek-ai/DeepSeek-V4-Flash"
+# deepseek-v4-pro shares the flash variant's vocab (full-width BOS, id 0).
+"accounts/fireworks/models/deepseek-v4-pro" = "deepseek-ai/DeepSeek-V4-Pro"
+# MiniMax M2.7 (NOT the older MiniMax-M2). Its BOS is the literal "]~!b[",
+# recognized by the discovery's _BOS_TOKEN_CANDIDATES so "fill BOS" works.
+"accounts/fireworks/models/minimax-m2p7" = "MiniMaxAI/MiniMax-M2.7"
+# Nemotron-3 Ultra; tokenizer.json is quant-independent so the NVFP4 repo
+# is fine for the NVFP4 serverless deployment. BOS is the classic "<s>".
+"accounts/fireworks/models/nemotron-3-ultra-nvfp4" = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
 
 # Per-model overrides of provider-level ``supports_*`` flags. Fireworks's
 # serverless contract is NOT uniform: gpt-oss-120b accepts the
