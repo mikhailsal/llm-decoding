@@ -10,7 +10,7 @@
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
-  import { probFromLogprob, tokenBackgroundClass } from '$lib/render';
+  import { probFromLogprob, tokenBackgroundClass, formatProbPct } from '$lib/render';
   import type {
     GenStep,
     StepResult,
@@ -1243,13 +1243,15 @@
               text={firstPromptTokenText}
               showMarkers={showMarkers}
               bgClass=""
-              title="first prompt token · not scored (no prior context)"
-            />{/if}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}<TokenInline
+              title="First prompt token · INPUT only, not predicted. Autoregressive models compute P(next | prior tokens); position 0 has no prior, so the model has nothing to predict from (unless you prepend a BOS marker — currently not done on this backend)."
+            />{/if}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}{@const isUnscoredFirst = (!ps.candidates || ps.candidates.length === 0) && (lp === null || !Number.isFinite(lp))}<TokenInline
               text={ps.chosen?.text ?? ''}
               isSpecial={ps.chosen?.is_special ?? false}
               showMarkers={showMarkers}
-              bgClass={tokenBackgroundClass(p)}
-              title={`prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
+              bgClass={isUnscoredFirst ? '' : tokenBackgroundClass(p)}
+              title={isUnscoredFirst
+                ? 'First prompt token · INPUT only, not predicted. The upstream returned no logprob for position 0 because autoregressive models have nothing to predict from before the first token.'
+                : `prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
             />{/each}{:else}<span class="text-slate-400">{prompt}</span>{/if}{#each pickedTexts as pt, i}{@const pp = pickedProb(i)}<TokenInline
             text={pt}
             showMarkers={showMarkers}
@@ -1546,10 +1548,32 @@
             {#each promptSteps as s}
               {@const chosenLP = s.chosen?.logprob ?? null}
               {@const chosenP = probFromLogprob(chosenLP)}
+              <!--
+                An "unscored" prompt position is one where the upstream
+                returned NO ``top_logprobs`` (Fireworks emits this for
+                position 0 of every echoed prompt: the model has no
+                prior context to predict a distribution from, so
+                ``candidates`` is empty AND ``chosen.logprob`` is a
+                placeholder we already coerced to NaN backend-side).
+                We surface this as a pedagogical row so the user
+                understands the autoregressive nature of the model
+                instead of seeing an empty alts column and an
+                ambiguous "?" prob with no explanation. Position 0 is
+                the canonical case; the same rule applies to any other
+                position that comes back empty (defensive).
+              -->
+              {@const isUnscored =
+                (!s.candidates || s.candidates.length === 0) &&
+                (chosenLP === null || !Number.isFinite(chosenLP))}
               <tr class="border-b border-slate-800/60">
                 <td class="table-cell font-mono text-slate-400">{s.position}</td>
                 <td class="table-cell font-mono text-slate-500 text-xs">
-                  {#if s.context_text !== null && s.context_text !== undefined}
+                  {#if isUnscored}
+                    <span
+                      class="text-[10px] uppercase tracking-wider text-slate-600"
+                      title="No prior context to condition on. Autoregressive models compute P(next | previous), so position 0 has nothing to predict from unless you prepend a BOS / chat-template marker."
+                    >input only</span>
+                  {:else if s.context_text !== null && s.context_text !== undefined}
                     <TokenText text={s.context_text} className="font-mono text-xs" />
                   {/if}
                 </td>
@@ -1560,23 +1584,44 @@
                     <span class="text-slate-500">?</span>
                   {/if}
                 </td>
-                <td class="table-cell w-40"><ConfidenceBar prob={chosenP} /></td>
+                <td class="table-cell w-40">
+                  {#if isUnscored}
+                    <span
+                      class="text-[10px] text-slate-600 italic"
+                      title="The model didn't score this position; nothing to plot."
+                    >—</span>
+                  {:else}
+                    <ConfidenceBar prob={chosenP} />
+                  {/if}
+                </td>
                 {#if samplingMaskSupported}
                   <td class="table-cell font-mono text-xs text-slate-400 tabular-nums">
                     {s.candidates[0]?.sampling_mask_count ?? '?'}
                   </td>
                 {/if}
                 <td class="table-cell">
-                  <div class="flex flex-col gap-0.5">
-                    {#each s.candidates.slice(0, alternatives) as c}
-                      <div class="flex items-center gap-2">
-                        {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
-                        <span class="text-xs text-slate-500 tabular-nums">
-                          {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
-                        </span>
-                      </div>
-                    {/each}
-                  </div>
+                  {#if isUnscored}
+                    <span
+                      class="text-[11px] text-slate-500 italic leading-snug"
+                      title="No model prediction is available at this position. Autoregressive language models predict P(next | prior tokens); position 0 has no prior, so there is nothing to predict (unless you give the model a BOS / begin-of-sequence marker, which would add an extra forward pass). The first prompt token is shown only as INPUT to the model — it is what the model conditions on, not what it predicts."
+                    >no model prediction · autoregressive model needs prior context (BOS)</span>
+                  {:else}
+                    <div class="flex flex-col gap-0.5">
+                      {#each s.candidates.slice(0, alternatives) as c}
+                        <div class="flex items-center gap-2">
+                          {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
+                          <span
+                            class="text-xs text-slate-500 tabular-nums"
+                            title={c.logprob !== null && Number.isFinite(c.logprob)
+                              ? `logprob=${c.logprob.toFixed(3)} · prob=${Math.exp(c.logprob).toExponential(2)}`
+                              : 'no logprob reported by upstream'}
+                          >
+                            {formatProbPct(c.logprob)}
+                          </span>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
                 </td>
                 {#each watchColumns as w, wi}
                   {@const cand = watchedAt(s, w, w.source === 'text' ? wi : 0)}
@@ -1670,7 +1715,16 @@
                         omitting it from top_logprobs), so the user
                         sees WHAT was picked alongside the visible
                         alternatives.
+
+                        Display rules (avoiding the historical "0.0%"
+                        lie that conflated three different things):
+                          * NaN / null logprob   -> "?"  (no data at all)
+                          * 0 < prob < 0.1%      -> "<0.1%" (real but tiny;
+                            "0.0%" rounded down made tokens look impossible
+                            even though the sampler clearly picked them)
+                          * prob >= 0.1%         -> "X.X%"  (normal display)
                       -->
+                      {@const chosenLp = chosenCand.logprob}
                       <div class="flex items-center gap-2 border-l-2 border-sky-500/60 pl-1.5">
                         {@render biasable(
                           chosenCand.token_id,
@@ -1678,10 +1732,13 @@
                           chosenCand.is_special,
                           'font-mono text-xs'
                         )}
-                        <span class="text-xs text-slate-500 tabular-nums">
-                          {chosenCand.logprob !== null
-                            ? (Math.exp(chosenCand.logprob) * 100).toFixed(1) + '%'
-                            : '?'}
+                        <span
+                          class="text-xs text-slate-500 tabular-nums"
+                          title={chosenLp !== null && Number.isFinite(chosenLp)
+                            ? `logprob=${chosenLp.toFixed(3)} · prob=${Math.exp(chosenLp).toExponential(2)} · the provider DOES report a real logprob for the sampled token even when it omits it from top_logprobs; the value is just very small, which is exactly why this token is outside top-K`
+                            : 'provider did not report a logprob for this token (chosen is outside top-K AND logprob is missing)'}
+                        >
+                          {formatProbPct(chosenLp)}
                         </span>
                         <span
                           class="text-[9px] uppercase tracking-wider text-sky-300/90"
@@ -1694,8 +1751,13 @@
                       {@const isChosen = c.token_id === s.decision.token_id}
                       <div class="flex items-center gap-2">
                         {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
-                        <span class="text-xs text-slate-500 tabular-nums">
-                          {c.logprob !== null ? (Math.exp(c.logprob) * 100).toFixed(1) + '%' : '?'}
+                        <span
+                          class="text-xs text-slate-500 tabular-nums"
+                          title={c.logprob !== null && Number.isFinite(c.logprob)
+                            ? `logprob=${c.logprob.toFixed(3)} · prob=${Math.exp(c.logprob).toExponential(2)}`
+                            : 'no logprob reported by upstream'}
+                        >
+                          {formatProbPct(c.logprob)}
                         </span>
                         {#if isChosen}
                           <span

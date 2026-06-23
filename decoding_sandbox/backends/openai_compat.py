@@ -1327,8 +1327,24 @@ class OpenAICompatBackend(Backend):
                     c.sampling_mask_count = smc
             chosen = next((c for c in cands if c.token_id == tok_id), None)
             if chosen is None:
+                # Fireworks (and OpenAI-compat echo in general) emits
+                # position 0 with NO ``top_logprobs`` -- the model has no
+                # prior context to score against, so the upstream returns
+                # ``logprob: 0.0`` as a placeholder rather than a real
+                # value. If we propagate that 0.0 the UI renders the
+                # token at exp(0.0)=1.0=100%, which is a lie:
+                # autoregressive models can't predict position 0 without
+                # BOS conditioning. Detect the placeholder by the absence
+                # of ``cands`` (an empty top_logprobs list is the
+                # upstream's "no data here" signal) and downgrade the
+                # logprob to NaN so the UI renders an honest "?" instead
+                # of the misleading 100%. Emit positions where the chosen
+                # is outside top-K still have a real ``tok_lp`` from the
+                # entry's ``logprob`` field and a populated ``cands``, so
+                # this guard doesn't touch them.
+                effective_lp = float("nan") if not cands else tok_lp
                 chosen = TokenCandidate(
-                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
+                    tok_id, tok_text, effective_lp, rank=-1, sampling_mask_count=smc
                 )
             prompt_step = StepResult(
                 position=pos_idx,

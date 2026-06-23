@@ -154,3 +154,34 @@ export function probWidth(p: number | null | undefined): number {
   if (p === null || p === undefined || !Number.isFinite(p)) return 0;
   return Math.max(0, Math.min(100, Math.round(p * 100)));
 }
+
+/**
+ * Format a logprob as a human-readable percent, distinguishing three
+ * very different situations the UI used to conflate as "0.0%":
+ *
+ *   - logprob is null / NaN  -> "?"      (the upstream gave us no data;
+ *                                          e.g. Fireworks position 0 of
+ *                                          an echo response carries no
+ *                                          top_logprobs because the
+ *                                          autoregressive model has
+ *                                          nothing to predict from)
+ *   - prob > 0 but < 0.1%    -> "<0.1%"  (the token IS in the
+ *                                          distribution -- the sampler
+ *                                          can and sometimes does pick
+ *                                          it -- but it rounds down to
+ *                                          0.0% at one decimal place;
+ *                                          rendering "0.0%" reads as
+ *                                          "impossible" which is
+ *                                          actively misleading in a
+ *                                          pedagogical sandbox)
+ *   - prob >= 0.1%           -> "X.X%"   (normal display, 1 decimal)
+ *
+ * Returns the formatted string only; callers decide whether to render
+ * tooltips with the raw logprob alongside.
+ */
+export function formatProbPct(lp: number | null | undefined): string {
+  if (lp === null || lp === undefined || !Number.isFinite(lp)) return '?';
+  const p = Math.exp(lp);
+  if (p < 0.001) return '<0.1%';
+  return (p * 100).toFixed(1) + '%';
+}

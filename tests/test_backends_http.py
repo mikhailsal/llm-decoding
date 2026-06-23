@@ -1944,6 +1944,110 @@ def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
     assert [g.decision.token_id for g in gen_steps] == [2]
 
 
+def test_stream_native_with_echo_marks_unscored_position_zero_as_nan(monkeypatch) -> None:
+    """Position 0 of an echo response with empty ``top_logprobs`` lands as NaN.
+
+    Fireworks (and OpenAI-compat echo in general) returns ``logprob: 0.0``
+    and ``top_logprobs: []`` for position 0 of the echoed prompt -- the
+    model has no prior context to score the first token against, so the
+    upstream emits a placeholder rather than a real value. If we propagate
+    that placeholder up the stack the UI renders ``exp(0.0) = 1.0 = 100%``,
+    making it look as though the model is perfectly confident the prompt
+    started with whichever token the user typed. This regression test pins
+    the downgrade to NaN so the UI can honestly render "no prediction
+    available" instead of the misleading 100%.
+
+    Position 1+ are unaffected: they carry real top_logprobs and a real
+    logprob the model actually computed against the prior context.
+    """
+    from decoding_sandbox.core.types import StepResult
+
+    backend, mock = _make_oc_backend(
+        monkeypatch,
+        routes={},
+        has_completions=True,
+        supports_new_logprobs=True,
+        supports_combined_echo_stream=True,
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            # Position 0: placeholder logprob=0.0, no
+                            # top_logprobs (the Fireworks "no-data" signal).
+                            {
+                                "token": "Once",
+                                "token_id": 100,
+                                "logprob": 0.0,
+                                "top_logprobs": [],
+                            },
+                            # Position 1: real BOS-conditioned prediction,
+                            # chosen IS in top_logprobs.
+                            {
+                                "token": " upon",
+                                "token_id": 200,
+                                "logprob": -0.5,
+                                "top_logprobs": [
+                                    {"token": " upon", "token_id": 200, "logprob": -0.5},
+                                ],
+                            },
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "logprobs": {
+                        "content": [
+                            {
+                                "token": " a",
+                                "token_id": 300,
+                                "logprob": -0.1,
+                                "top_logprobs": [
+                                    {"token": " a", "token_id": 300, "logprob": -0.1}
+                                ],
+                            }
+                        ]
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
+    out = list(
+        backend.stream_native_with_echo(
+            "Once upon",
+            sampler_name="greedy",
+            sampler_params={},
+            max_tokens=1,
+            top_k=1,
+        )
+    )
+    step_results = [x for x in out if isinstance(x, StepResult)]
+    assert len(step_results) == 2, [type(x).__name__ for x in out]
+    pos0, pos1 = step_results
+    # Position 0: chosen is downgraded from the 0.0 placeholder to NaN
+    # so the UI cannot render exp(0.0)=1.0=100% by accident.
+    assert pos0.position == 0
+    assert pos0.candidates == []
+    assert pos0.chosen is not None
+    assert pos0.chosen.token_id == 100
+    assert math.isnan(pos0.chosen.logprob), (
+        "position 0 with no top_logprobs must downgrade chosen.logprob to NaN "
+        "so the UI does not render the placeholder 0.0 as 100% confident"
+    )
+    # Position 1 is untouched: real candidates, real chosen.logprob.
+    assert pos1.position == 1
+    assert len(pos1.candidates) == 1
+    assert pos1.chosen is not None
+    assert pos1.chosen.logprob == pytest.approx(-0.5)
+
+
 def test_stream_native_with_echo_forwards_echo_last(monkeypatch) -> None:
     """``echo_last`` reaches the wire when the provider opts in."""
     backend, mock = _make_oc_backend(
