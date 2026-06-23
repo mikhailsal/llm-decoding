@@ -17,7 +17,8 @@ import type {
   LogDetail,
   LogListParams,
   LogListResponse,
-  LogStats
+  LogStats,
+  RemoteStatus
 } from './types';
 
 export class ApiError extends Error {
@@ -116,6 +117,27 @@ export function apiStream(
     events: eventStream,
     cancel: () => controller.abort()
   };
+}
+
+// --------------------------------------------------------------------------- //
+// Remote model control (swappable dsbx-serve model slot)
+// --------------------------------------------------------------------------- //
+/** Live model-slot state of a remote dsbx-serve host. */
+export function getRemoteStatus(name: string): Promise<RemoteStatus> {
+  return apiFetch<RemoteStatus>(
+    `/api/v1/backends/${encodeURIComponent(name)}/status`
+  );
+}
+
+/** Ask a remote host to (re)load ``model`` (null = its default). */
+export function reloadRemoteModel(
+  name: string,
+  model: string | null
+): Promise<RemoteStatus> {
+  return apiFetch<RemoteStatus>(
+    `/api/v1/backends/${encodeURIComponent(name)}/reload`,
+    { method: 'POST', body: JSON.stringify({ model }) }
+  );
 }
 
 // --------------------------------------------------------------------------- //

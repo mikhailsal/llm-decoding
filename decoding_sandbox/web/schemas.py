@@ -88,6 +88,14 @@ class BackendInfo(BaseModel):
     loaded_model: str | None = None
     suggested_models: list[str] = Field(default_factory=list)
     model_editable: bool = False
+    # ``True`` when the backend's loaded model can be swapped at runtime
+    # via ``POST /api/v1/backends/{name}/reload`` -- currently only
+    # ``remote`` dsbx-serve hosts (which own a swappable model slot).
+    # Cloud providers use per-request ``model`` (``model_editable``)
+    # instead; local in-process engines need a process restart. The
+    # frontend renders a load/reload control + live state badge for
+    # reloadable backends on the Status page.
+    model_reloadable: bool = False
 
 
 class InfoResponse(BaseModel):
@@ -97,6 +105,27 @@ class InfoResponse(BaseModel):
     server_label: str
     default_backend: str
     backends: list[BackendInfo]
+
+
+class RemoteStatusResponse(BaseModel):
+    """``GET /api/v1/backends/{name}/status`` -- live remote slot state.
+
+    Proxies the upstream dsbx-server's ``/v1/status`` (scrubbed of any
+    address/URL). ``state`` is ``empty`` / ``loading`` / ``ready`` /
+    ``error``; ``loaded_model`` and ``error`` mirror the upstream. The
+    frontend polls this while a load is in progress.
+    """
+
+    backend: str
+    state: str
+    loaded_model: str | None = None
+    error: str | None = None
+
+
+class ReloadModelRequest(BaseModel):
+    """``POST /api/v1/backends/{name}/reload`` body. ``None`` -> host default."""
+
+    model: str | None = None
 
 
 class ModelsResponse(BaseModel):
@@ -562,6 +591,8 @@ class HealthResponse(BaseModel):
 __all__ = [
     "BackendInfo",
     "InfoResponse",
+    "RemoteStatusResponse",
+    "ReloadModelRequest",
     "ModelsResponse",
     "TokenizeRequest",
     "TokenizeResponse",

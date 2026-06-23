@@ -150,6 +150,40 @@ dsbx serve --backend hf --host 0.0.0.0 --port 8001
 on a trusted LAN. A convenience launcher with the same defaults lives at
 [scripts/run_dsbx_server_wind.sh](scripts/run_dsbx_server_wind.sh).
 
+#### Swappable model slot (load / reload without a restart)
+
+Each `dsbx serve` process now owns a *swappable model slot* rather than a
+fixed model. The slot has a small state machine -- `empty` -> `loading`
+-> `ready`, with any load failure landing in `error` (carrying the
+message) -- and the loaded model can be changed at runtime:
+
+```bash
+# Start with no model loaded; pick one from the browser later:
+dsbx serve --backend llamacpp-py --no-preload --host 0.0.0.0 --port 8000
+
+# Or preload as before (default) and still allow later swaps.
+dsbx serve --backend llamacpp-py --host 0.0.0.0 --port 8000
+```
+
+The server exposes three new endpoints used by the web UI (and scriptable
+directly):
+
+- `GET /v1/status` -- live slot state (`empty`/`loading`/`ready`/`error`),
+  the loaded model, any error, and the capability envelope when ready.
+- `GET /v1/models` -- the host's catalogue of *compatible* models: every
+  `*.gguf` found under `[local.llamacpp_py].model_search_dirs` for the
+  `llamacpp-py` kind, or the configured `[local.hf].models` list (unioned
+  with `model` + `fallback_model`) for `hf`.
+- `POST /v1/reload {"model": "<id>"}` -- close the current model and load
+  `<id>` on a background thread (a 9B GGUF takes ~30 s). Returns
+  immediately with `state: loading`; poll `/v1/status` until terminal.
+
+Because the 6 GB P40 can't hold two 9B models at once, a reload closes
+the old model *before* building the new one; a failed reload therefore
+leaves the slot `empty`/`error` rather than falling back to the previous
+model. Inference requests during `loading`/`empty`/`error` return HTTP
+`409` with an explanatory `detail`.
+
 ### Connecting from the client
 
 Add one `[remote.NAME]` block per server in `config.toml`. The name you
@@ -200,8 +234,10 @@ the server has no way to ingest arbitrary client code.
 - `dsbx spec "<text>"` -- speculative decoding (HF draft+target) with
   accept/reject visualization and a tokens-per-target-pass speedup metric.
 - `dsbx serve` -- run the HTTP server on `dsbx-host` that hosts one heavy
-  backend (`--backend hf|llamacpp-py`). The client's TUI connects via
-  `[remote.NAME]` aliases. Requires `pip install -e ".[server]"`. See
+  backend (`--backend hf|llamacpp-py`) in a swappable model slot. The
+  client's TUI connects via `[remote.NAME]` aliases. Add `--no-preload`
+  to start with an empty slot and load a model on demand from the web UI.
+  Requires `pip install -e ".[server]"`. See
   [Running the server on `dsbx-host`](#running-the-server-on-dsbx-host).
 - `dsbx session` -- convenience REPL with command history and a single
   loaded backend. Meta commands: `:caps`, `:backend NAME [MODEL]`
@@ -555,6 +591,27 @@ The UI mirrors every TUI verb: `/inspect`, `/generate`, `/manual`,
 uses SSE end-to-end (`generate` and `spec`); manual-decoding state lives
 on the middleware in a UUID-keyed, TTL-evicted session registry.
 
+### Remote model control (Status page)
+
+The `/status` page hosts a **Remote model control** card for every
+`[remote.NAME]` backend. Each card shows the host's live slot state
+(`no model loaded` / `loading…` / `ready` / `error`), a picker populated
+from that host's compatible-model catalogue (the GGUFs on disk for a
+`llamacpp-py` host, or the configured HF ids for an `hf` host), and a
+Load/Reload button. Loading a 9B GGUF takes ~30 s; the card polls the
+host every ~2 s while `loading` and refreshes the rest of the UI's
+capability envelopes once the new model is `ready`. This pairs naturally
+with `dsbx serve --no-preload`: start the host empty, then pick the model
+from the browser.
+
+The middleware proxies this through two scrubbed endpoints --
+`GET /api/v1/backends/{name}/status` and
+`POST /api/v1/backends/{name}/reload` -- which forward to the host's
+`/v1/status` and `/v1/reload`. Errors are sanitized so the dsbx-host LAN
+address never reaches the browser, and both endpoints 400 for non-remote
+families (cloud providers swap models per-request; local in-process
+engines need a process restart).
+
 ### Running it
 
 ```bash
@@ -596,6 +653,9 @@ The browser only ever receives:
 - A list of opaque backend names with their ``Capabilities`` flags.
 - The token-level outputs of inspect / generate / spec / manual.
 - ``/api/v1/probe`` results (status strings only, no keys).
+- For remote hosts, the model catalogue (GGUF *filenames*/paths or HF
+  ids) and live slot state -- enough to drive the reload picker, but
+  never the host's address.
 
 The no-secrets-leak invariant is enforced by `tests/test_web_info.py`,
 which scans every ``/api/v1/info`` payload for known sentinel values.

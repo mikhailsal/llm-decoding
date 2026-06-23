@@ -122,12 +122,72 @@ class InfoResponse(BaseModel):
     the short name the server was started with (``"hf"`` /
     ``"llamacpp-py"``). Capabilities are echoed verbatim from the loaded
     backend so the client can adapt its UI without making more calls.
+
+    ``capabilities`` is ``None`` when no model is currently loaded (a
+    server started with ``--no-preload`` or whose model load failed): the
+    server can still describe itself (kind + version + state) even with an
+    empty slot. ``state`` mirrors :class:`ServerStatus.state` so a client
+    that only fetches ``/v1/info`` still knows whether the slot is live.
     """
 
-    capabilities: WireCapabilities
+    capabilities: WireCapabilities | None = None
     engine_version: str
     backend_kind: str
     loaded_model: str | None = None
+    state: str = "ready"
+
+
+# --------------------------------------------------------------------------- #
+# /v1/status, /v1/models, /v1/reload (swappable model slot)
+# --------------------------------------------------------------------------- #
+class ServerStatus(BaseModel):
+    """Live state of the server's single model slot.
+
+    ``state`` is one of ``"empty"`` (no model ever loaded / unloaded),
+    ``"loading"`` (a build is in progress on a background thread),
+    ``"ready"`` (a model is loaded and serving), or ``"error"`` (the most
+    recent load failed -- ``error`` carries the message). ``loaded_model``
+    is the id/path of the model currently in the slot (``None`` unless
+    ``state == "ready"``). ``capabilities`` is populated only when ready so
+    the client can refresh its capability envelope after a swap.
+    """
+
+    backend_kind: str
+    state: str
+    loaded_model: str | None = None
+    error: str | None = None
+    capabilities: WireCapabilities | None = None
+
+
+class ServerModelEntry(BaseModel):
+    """One selectable model on the host: an opaque ``id`` + a short label.
+
+    For ``llamacpp-py`` the ``id`` is the absolute GGUF path and ``label``
+    its filename stem; for ``hf`` both are the HuggingFace model id. The
+    ``id`` is what the client POSTs back to ``/v1/reload``.
+    """
+
+    id: str
+    label: str
+
+
+class ServerModelList(BaseModel):
+    """Catalogue of models the host can load into its current slot kind."""
+
+    backend_kind: str
+    models: list[ServerModelEntry] = Field(default_factory=list)
+    note: str = ""
+
+
+class ReloadRequest(BaseModel):
+    """Body for ``POST /v1/reload``.
+
+    ``model`` is the id/path to load (one of the ``/v1/models`` entries, or
+    any value the backend's builder accepts). ``None`` re-loads the backend
+    kind's configured default model.
+    """
+
+    model: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +451,10 @@ __all__ = [
     "WireStepResult",
     "WireCapabilities",
     "InfoResponse",
+    "ServerStatus",
+    "ServerModelEntry",
+    "ServerModelList",
+    "ReloadRequest",
     "TokenizeRequest",
     "TokenizeResponse",
     "DetokenizeRequest",

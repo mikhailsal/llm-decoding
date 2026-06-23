@@ -74,6 +74,9 @@ load_in_4bit = true
 device_map = "auto"
 # Fallback if the chosen model fails to load.
 fallback_model = "Qwen/Qwen3-1.7B-Base"
+# Extra model ids the web UI offers when reloading an `hf` dsbx-serve host
+# (Status page model control). Unioned with `model` + `fallback_model`.
+# models = ["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-0.6B-Base"]
 # `device_map="auto"` memory caps passed as `max_memory`. Tuned for the 6 GB
 # P40 on dsbx-host (4500MiB GPU + 13 GiB CPU offload). Bump GPU if you have more
 # VRAM and want to avoid CPU offload.

@@ -99,10 +99,7 @@ class RemoteBackend(Backend):
             else self.DEFAULT_STREAM_READ_TIMEOUT
         )
         info = self._get_info()
-        self._capabilities = _capabilities_from_dict(info["capabilities"])
-        self._backend_kind: str = str(info.get("backend_kind", "unknown"))
-        self._loaded_model: str | None = info.get("loaded_model")
-        self._engine_version: str = str(info.get("engine_version", "?"))
+        self._apply_info(info)
         # Tiny memoizer so the manual TUI doesn't fan out a piece request
         # per token per render. ``piece`` is called O(top_k) times for
         # every step; without caching every render becomes a noticeable
@@ -126,6 +123,75 @@ class RemoteBackend(Backend):
     @property
     def engine_version(self) -> str:
         return self._engine_version
+
+    @property
+    def state(self) -> str:
+        """Upstream slot state: ``empty`` / ``loading`` / ``ready`` / ``error``.
+
+        Snapshotted from the last ``/v1/info`` (or ``refresh_info()``).
+        Older dsbx-servers that predate the swappable slot omit the field;
+        they're always serving, so we default to ``ready``.
+        """
+        return self._state
+
+    def _apply_info(self, info: dict) -> None:
+        """Adopt a ``/v1/info`` payload, tolerating an empty/loading slot.
+
+        A server started with ``--no-preload`` (or mid-load / post-error)
+        returns ``capabilities = null``. Rather than raise -- which would
+        make the whole RemoteBackend unconstructable until a model is
+        loaded -- we install a neutral placeholder ``Capabilities`` so the
+        handle stays usable for status/reload calls. The real envelope is
+        adopted on the next ``refresh_info()`` once the slot goes ``ready``.
+        """
+        caps_raw = info.get("capabilities")
+        if caps_raw:
+            self._capabilities = _capabilities_from_dict(caps_raw)
+        else:
+            self._capabilities = _placeholder_capabilities()
+        self._backend_kind = str(info.get("backend_kind", "unknown"))
+        self._loaded_model = info.get("loaded_model")
+        self._engine_version = str(info.get("engine_version", "?"))
+        self._state = str(info.get("state", "ready"))
+
+    def refresh_info(self) -> None:
+        """Re-fetch ``/v1/info`` and update cached caps / loaded model / state.
+
+        Called by the web layer after a model swap so the next
+        ``/api/v1/info`` reflects the newly loaded model's capabilities and
+        name instead of the stale envelope captured at construction. Also
+        clears the per-token piece cache (a different model means different
+        ids -> different surface forms).
+        """
+        self._apply_info(self._get_info())
+        self._piece_cache = {}
+        self._special_tokens_cache = None
+
+    # ----------------------------------------------- model slot control
+    def server_status(self) -> dict:
+        """Return the upstream ``/v1/status`` payload as a plain dict."""
+        return self._get("/v1/status")
+
+    def list_server_models(self) -> list[dict]:
+        """Return the host's model catalogue from ``/v1/models``.
+
+        Each entry is ``{"id": ..., "label": ...}``. Degrades to an empty
+        list against an older dsbx-server that predates the endpoint (404).
+        """
+        try:
+            data = self._get("/v1/models")
+        except RemoteBackendError:
+            return []
+        return list(data.get("models", []) or [])
+
+    def reload_model(self, model: str | None) -> dict:
+        """Ask the host to (re)load ``model``; returns the new status dict.
+
+        The upstream kicks a background load and returns immediately with
+        ``state == "loading"``; the caller polls ``server_status`` until it
+        reaches ``ready`` / ``error``.
+        """
+        return self._post("/v1/reload", {"model": model})
 
     # ------------------------------------------------------------- HTTP
     def _get(self, path: str) -> dict:
@@ -393,6 +459,24 @@ def _step_from_dict(d: dict) -> StepResult:
         chosen=chosen,
         context_text=d.get("context_text"),
         watched=watched,
+    )
+
+
+def _placeholder_capabilities() -> Capabilities:
+    """A neutral envelope for a remote whose slot has no model loaded yet.
+
+    Everything is conservatively off / empty so the UI doesn't advertise a
+    feature against a backend that can't currently serve. Replaced by the
+    real envelope on the first ``refresh_info()`` after the slot goes
+    ``ready``.
+    """
+    return Capabilities(
+        name="remote:(no model loaded)",
+        full_vocab=False,
+        prompt_logprobs=False,
+        max_top_logprobs=0,
+        can_force_token=False,
+        notes="no model loaded on the remote host",
     )
 
 

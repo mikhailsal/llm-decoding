@@ -135,6 +135,56 @@ def build_backend(
     raise ValueError(f"Backend '{name}' not available. Choose from: {available}")
 
 
+def list_available_models(name: str, cfg: Config) -> list[tuple[str, str]]:
+    """Enumerate the models a *local heavy* backend kind can load on this host.
+
+    Returns ``(id, label)`` pairs the ``dsbx serve`` host advertises via
+    ``/v1/models`` so the browser can offer a reload picker:
+
+    - ``hf``: the configured ``[local.hf].models`` list (if any), unioned
+      with the default ``model`` and ``fallback_model``. Ids == labels ==
+      HuggingFace repo ids.
+    - ``llamacpp-py``: every ``*.gguf`` discovered under
+      ``[local.llamacpp_py].model_search_dirs`` (plus an explicitly
+      configured ``model_path`` if set). Id == absolute path, label ==
+      filename stem.
+
+    Any other kind (remote / cloud / plain ``llamacpp`` HTTP) returns an
+    empty list -- those aren't in-process heavy backends a ``dsbx serve``
+    process swaps.
+    """
+    norm = _normalize(name)
+    if norm == "hf":
+        hf = cfg.get("local", "hf", default={}) or {}
+        out: list[str] = []
+        for m in list(hf.get("models", []) or []):
+            if m and m not in out:
+                out.append(str(m))
+        for m in (hf.get("model"), hf.get("fallback_model")):
+            if m and m not in out:
+                out.append(str(m))
+        return [(m, m) for m in out]
+    if norm in ("llamacpp-py", "llamacpp-python", "llama-py"):
+        from decoding_sandbox.backends.llamacpp_py import discover_gguf_models
+
+        lp = cfg.get("local", "llamacpp_py", default={}) or {}
+        dirs = list(lp.get("model_search_dirs", []) or [])
+        entries = discover_gguf_models(dirs)
+        # Surface an explicitly pinned model_path even if it lives outside
+        # the search dirs (or the dirs don't exist on this host).
+        explicit = lp.get("model_path")
+        if explicit:
+            import os as _os
+            from pathlib import Path as _Path
+
+            p = _Path(_os.path.expanduser(_os.path.expandvars(str(explicit))))
+            ap = str(p.resolve()) if p.exists() else str(p)
+            if all(ap != e[0] for e in entries):
+                entries.insert(0, (ap, p.stem))
+        return entries
+    return []
+
+
 def _build_remote(rc, *, transport: "httpx.BaseTransport | None" = None) -> Backend:
     """Build a ``RemoteBackend`` from a :class:`RemoteConfig` entry.
 

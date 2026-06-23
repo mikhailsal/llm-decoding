@@ -908,7 +908,40 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
             "can reach this address can drive the loaded model."
         )
 
+    from decoding_sandbox.core.factory import build_backend, list_available_models
+    from decoding_sandbox.server import schemas as S
     from decoding_sandbox.server.app import make_app
+
+    # Builder + catalogue closures captured for the swappable model slot.
+    # The builder reuses the exact factory path so a browser-driven reload
+    # constructs the new model identically to a fresh ``dsbx serve``.
+    def builder(model: str | None) -> Backend:
+        return build_backend(args.backend, cfg, model=model)
+
+    def model_lister() -> list[S.ServerModelEntry]:
+        return [
+            S.ServerModelEntry(id=i, label=label)
+            for i, label in list_available_models(args.backend, cfg)
+        ]
+
+    if getattr(args, "no_preload", False):
+        console.print(
+            f"[dim]starting '{args.backend}' server with no model preloaded "
+            "(--no-preload); load one from the web UI.[/dim]"
+        )
+        app = make_app(
+            backend_kind=args.backend,
+            builder=builder,
+            model=args.model,
+            model_lister=model_lister,
+            preload=False,
+        )
+        console.print(
+            f"  serving on [bold]http://{args.host}:{args.port}[/bold] "
+            "[dim](empty slot)[/dim]"
+        )
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+        return 0
 
     console.print(
         f"[dim]building backend '{args.backend}' for the server...[/dim]"
@@ -918,7 +951,13 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
         f"  loaded [cyan]{backend.capabilities.name}[/cyan] -- "
         f"serving on [bold]http://{args.host}:{args.port}[/bold]"
     )
-    app = make_app(backend, backend_kind=args.backend)
+    app = make_app(
+        backend,
+        backend_kind=args.backend,
+        builder=builder,
+        model=args.model,
+        model_lister=model_lister,
+    )
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     finally:
@@ -1240,6 +1279,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Which in-process backend to host (heavy local engines only).",
     )
     p_serve.add_argument("--model", default=None, help="Override the model id / GGUF path.")
+    p_serve.add_argument(
+        "--no-preload",
+        action="store_true",
+        help=(
+            "Start with no model loaded (empty slot). Load one on demand via "
+            "POST /v1/reload or the web UI's Status page model control. "
+            "Useful when you want to pick the model from the browser."
+        ),
+    )
     p_serve.add_argument(
         "--host",
         default="127.0.0.1",

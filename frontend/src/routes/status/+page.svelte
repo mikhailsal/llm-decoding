@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import RemoteModelControl from '$lib/components/RemoteModelControl.svelte';
   import { ApiError, apiFetch } from '$lib/api';
   import { info } from '$lib/stores/info';
   import type { ProbeResponse } from '$lib/types';
@@ -8,6 +9,10 @@
   let probe = $state<ProbeResponse | null>(null);
   let probeBusy = $state(false);
   let error = $state<string | null>(null);
+
+  let remoteBackends = $derived(
+    ($info.info?.backends ?? []).filter((b) => b.model_reloadable)
+  );
 
   async function refreshProbe(force = false) {
     probeBusy = true;
@@ -29,6 +34,22 @@
 <Toast message={error} onClose={() => (error = null)} />
 
 <div class="space-y-4">
+  {#if remoteBackends.length > 0}
+    <div class="card">
+      <h2 class="text-lg font-semibold mb-1">Remote model control</h2>
+      <p class="text-xs text-slate-500 mb-3">
+        Load or swap the model on each remote <span class="font-mono">dsbx serve</span> host. The
+        model list is the set of compatible models found on the host; loading a 9B GGUF takes
+        ~30&nbsp;s, during which the state shows <span class="font-mono">loading…</span>.
+      </p>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {#each remoteBackends as b (b.name)}
+          <RemoteModelControl backend={b} />
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   <div class="card">
     <h2 class="text-lg font-semibold mb-3">Backends</h2>
     {#if $info.info}

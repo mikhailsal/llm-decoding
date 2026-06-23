@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.types import StepResult, TokenCandidate
+from decoding_sandbox.server import schemas as S
 from decoding_sandbox.server.app import make_app
 from tests.fakes import FakeBackend, cand
 
@@ -426,6 +429,143 @@ def test_generate_stream_runtime_error_lands_in_done_event() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Swappable model slot: /v1/status, /v1/models, /v1/reload
+# --------------------------------------------------------------------------- #
+def _wait_for_state(c: TestClient, target: str, timeout: float = 5.0) -> dict:
+    """Poll /v1/status until it reaches ``target`` (or the timeout fires)."""
+    deadline = time.time() + timeout
+    last: dict = {}
+    while time.time() < deadline:
+        last = c.get("/v1/status").json()
+        if last["state"] == target:
+            return last
+        time.sleep(0.02)
+    return last
+
+
+def test_no_preload_starts_empty_and_blocks_inference() -> None:
+    """``preload=False`` -> empty slot; inference 409s until a model loads."""
+    app = make_app(
+        backend_kind="hf",
+        builder=lambda _m: _make_fake(),
+        preload=False,
+    )
+    with TestClient(app) as c:
+        assert c.get("/v1/status").json()["state"] == "empty"
+        info = c.get("/v1/info").json()
+        assert info["capabilities"] is None
+        assert info["state"] == "empty"
+        # Every inference route should refuse with a clean 409.
+        assert c.post("/v1/tokenize", json={"text": "ab"}).status_code == 409
+        assert (
+            c.post("/v1/next_distribution", json={"ids": [97], "top_k": 3}).status_code
+            == 409
+        )
+
+
+def test_reload_lifecycle_loading_then_ready() -> None:
+    """A reload moves empty -> loading -> ready and unlocks inference."""
+    gate = threading.Event()
+
+    def builder(model):
+        # Block until the test lets the build finish so we can observe the
+        # intermediate ``loading`` state deterministically.
+        gate.wait(timeout=5)
+        fake = _make_fake()
+        fake.model_path = model or "default.gguf"
+        return fake
+
+    app = make_app(backend_kind="llamacpp-py", builder=builder, preload=False)
+    with TestClient(app) as c:
+        r = c.post("/v1/reload", json={"model": "m1.gguf"})
+        assert r.status_code == 200
+        assert r.json()["state"] == "loading"
+        # Still loading while the gate is closed.
+        assert c.get("/v1/status").json()["state"] == "loading"
+        # A second reload while one is in progress is rejected.
+        assert c.post("/v1/reload", json={"model": "m2.gguf"}).status_code == 409
+        # Inference during load -> 409.
+        assert c.post("/v1/tokenize", json={"text": "ab"}).status_code == 409
+        # Let the build complete.
+        gate.set()
+        st = _wait_for_state(c, "ready")
+        assert st["state"] == "ready"
+        assert st["loaded_model"] == "m1.gguf"
+        assert st["capabilities"]["name"] == "fake"
+        # Inference now works.
+        assert c.post("/v1/tokenize", json={"text": "ab"}).status_code == 200
+
+
+def test_reload_failure_sets_error_state() -> None:
+    """A builder that raises leaves the slot in ``error`` with the message."""
+
+    def builder(_model):
+        raise RuntimeError("boom while loading")
+
+    app = make_app(backend_kind="hf", builder=builder, preload=False)
+    with TestClient(app) as c:
+        c.post("/v1/reload", json={"model": "x"})
+        st = _wait_for_state(c, "error")
+        assert st["state"] == "error"
+        assert "boom while loading" in st["error"]
+        # Inference reflects the failure (still 409, not 500).
+        r = c.post("/v1/tokenize", json={"text": "ab"})
+        assert r.status_code == 409
+        assert "failed to load" in r.json()["detail"]
+
+
+def test_models_endpoint_lists_catalogue() -> None:
+    entries = [
+        S.ServerModelEntry(id="/m/a.gguf", label="a"),
+        S.ServerModelEntry(id="/m/b.gguf", label="b"),
+    ]
+    app = make_app(
+        backend_kind="llamacpp-py",
+        builder=lambda _m: _make_fake(),
+        model_lister=lambda: entries,
+        preload=False,
+    )
+    with TestClient(app) as c:
+        data = c.get("/v1/models").json()
+    assert data["backend_kind"] == "llamacpp-py"
+    assert [m["id"] for m in data["models"]] == ["/m/a.gguf", "/m/b.gguf"]
+
+
+def test_eager_backend_still_serves_and_reload_swaps() -> None:
+    """The legacy adopt path stays ready and can still swap via a builder."""
+    first = _make_fake()
+    first.model_path = "first.gguf"
+
+    def builder(model):
+        nxt = _make_fake()
+        nxt.model_path = model or "next.gguf"
+        return nxt
+
+    app = make_app(first, backend_kind="llamacpp-py", builder=builder, model="first.gguf")
+    with TestClient(app) as c:
+        assert c.get("/v1/status").json()["state"] == "ready"
+        assert c.get("/v1/info").json()["loaded_model"] == "first.gguf"
+        c.post("/v1/reload", json={"model": "second.gguf"})
+        st = _wait_for_state(c, "ready")
+        assert st["loaded_model"] == "second.gguf"
+    # The previous backend was closed during the swap.
+    assert first.closed is True
+
+
+def test_generate_stream_409_when_no_model() -> None:
+    app = make_app(backend_kind="hf", builder=lambda _m: _make_fake(), preload=False)
+    body = {
+        "prompt": "ab",
+        "sampler": {"name": "greedy", "params": {}},
+        "max_tokens": 1,
+        "top_k": 5,
+    }
+    with TestClient(app) as c:
+        r = c.post("/v1/generate/stream", json=body)
+    assert r.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
 # Root + miscellany
 # --------------------------------------------------------------------------- #
 def test_root_lists_endpoints(client) -> None:
@@ -433,4 +573,5 @@ def test_root_lists_endpoints(client) -> None:
     assert r.status_code == 200
     data = r.json()
     assert "/v1/info" in data["endpoints"]
+    assert "/v1/reload" in data["endpoints"]
     assert data["backend_kind"] == "fake-kind"

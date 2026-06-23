@@ -226,8 +226,8 @@
     </div>
     {#if backend?.family === 'remote'}
       <p class="text-xs text-slate-500 mt-1">
-        Loaded by <span class="font-mono">dsbx serve</span> on the remote host; restart it with a different
-        <span class="font-mono">--model</span> to switch.
+        Loaded by <span class="font-mono">dsbx serve</span> on the remote host. Switch it from the
+        <a href="/status" class="text-sky-400 hover:underline">Status</a> page's remote model control.
       </p>
     {/if}
   {:else}

@@ -221,6 +221,75 @@ def make_web_app(
             note=result.note,
         )
 
+    # ------------------------------------------------- remote model control
+    @app.get(
+        "/api/v1/backends/{name}/status",
+        response_model=S.RemoteStatusResponse,
+        tags=["meta"],
+        dependencies=[Depends(require_bearer)],
+    )
+    def remote_status(name: str) -> S.RemoteStatusResponse:
+        """Live model-slot state of a remote dsbx-serve host (scrubbed).
+
+        Proxies the upstream ``/v1/status``; the frontend polls this while a
+        load is in progress. 404 for an unknown backend, 400 for a
+        non-remote one. Any upstream/network failure is reported as an
+        ``error`` state rather than a 5xx so the UI can keep polling.
+        """
+        try:
+            status = registry.remote_status(name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            # Network hiccup / host down: surface as an error state, not a
+            # 502, so the poller shows "error" and keeps the page usable.
+            log.warning("dsbx-web: remote status for %r failed: %s", name, exc)
+            return S.RemoteStatusResponse(
+                backend=name,
+                state="error",
+                error=f"remote host unreachable ({exc.__class__.__name__})",
+            )
+        return S.RemoteStatusResponse(
+            backend=name,
+            state=str(status.get("state", "unknown")),
+            loaded_model=status.get("loaded_model"),
+            error=status.get("error"),
+        )
+
+    @app.post(
+        "/api/v1/backends/{name}/reload",
+        response_model=S.RemoteStatusResponse,
+        tags=["meta"],
+        dependencies=[Depends(require_bearer)],
+    )
+    def remote_reload(name: str, req: S.ReloadModelRequest) -> S.RemoteStatusResponse:
+        """Ask a remote dsbx-serve host to (re)load a model.
+
+        Returns the upstream's immediate status (typically ``loading``);
+        the frontend then polls ``/status`` until ``ready`` / ``error``.
+        Errors are scrubbed of any address/URL.
+        """
+        try:
+            status = registry.reload_remote(name, req.model)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            log.warning("dsbx-web: remote reload for %r failed: %s", name, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"could not reach the remote host to reload ({exc.__class__.__name__})",
+            ) from exc
+        return S.RemoteStatusResponse(
+            backend=name,
+            state=str(status.get("state", "unknown")),
+            loaded_model=status.get("loaded_model"),
+            error=status.get("error"),
+        )
+
     # --------------------------------------------------- tokenize / detok
     @app.post(
         "/api/v1/tokenize",

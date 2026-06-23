@@ -118,6 +118,20 @@ export interface BackendInfo {
   // cloud providers set this true today; flipping it for a remote backend
   // would require restarting ``dsbx serve`` on dsbx-host.
   model_editable: boolean;
+  // Whether the backend's loaded model can be swapped at runtime via
+  // ``POST /api/v1/backends/{name}/reload``. True for remote dsbx-serve
+  // hosts; the Status page renders a load/reload control + live state
+  // badge for these.
+  model_reloadable: boolean;
+}
+
+export type RemoteSlotState = 'empty' | 'loading' | 'ready' | 'error' | 'unknown';
+
+export interface RemoteStatus {
+  backend: string;
+  state: RemoteSlotState;
+  loaded_model: string | null;
+  error: string | null;
 }
 
 export interface InfoResponse {

@@ -324,6 +324,7 @@ class BackendRegistry:
                     loaded_model=loaded_model,
                     suggested_models=suggested,
                     model_editable=editable,
+                    model_reloadable=(entry.family == "remote"),
                 )
             )
         return out
@@ -466,6 +467,41 @@ class BackendRegistry:
                     fetched_at=cached.fetched_at,
                     note=cached.note,
                 )
+
+        if entry.family == "remote":
+            # Ask the dsbx-serve host what models it can load (GGUFs on
+            # disk / configured HF ids). Falls back to the single known
+            # loaded model if the host is unreachable or predates the
+            # /v1/models endpoint. The catalogue is just filenames/ids --
+            # no URL or secret -- so it's safe to surface verbatim.
+            try:
+                backend = self.ensure_loaded(name)
+                raw = backend.list_server_models()  # type: ignore[attr-defined]
+                models = [str(m["id"]) for m in raw if m.get("id")]
+                result = ModelListEntry(
+                    models=models,
+                    source="live",
+                    fetched_at=now,
+                    note=f"{len(models)} available on the remote host",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _loaded, suggested, _ = self._public_model_info(entry)
+                result = ModelListEntry(
+                    models=list(suggested),
+                    source="fallback",
+                    fetched_at=now,
+                    note=(
+                        f"remote catalogue unavailable ({exc.__class__.__name__})"
+                    ),
+                )
+            with self._models_lock:
+                self._models_cache[name] = result
+            return ModelListEntry(
+                models=list(result.models),
+                source=result.source,
+                fetched_at=result.fetched_at,
+                note=result.note,
+            )
 
         if entry.family != "cloud":
             loaded_model, suggested, _ = self._public_model_info(entry)
@@ -665,6 +701,44 @@ class BackendRegistry:
         entry = self.get(name)
         backend = self.ensure_loaded(name, model)
         return _LockedBackend(backend, entry.lock)
+
+    # ----------------------------------------------- remote model control
+    def remote_status(self, name: str) -> dict:
+        """Proxy the remote host's live slot status.
+
+        Refreshes the cached ``RemoteBackend``'s capability envelope when
+        the upstream reports ``ready`` so a subsequent ``/api/v1/info``
+        reflects the freshly-loaded model. Raises ``LookupError`` for a
+        non-remote backend (the caller maps it to a 400).
+        """
+        entry = self.get(name)
+        if entry.family != "remote":
+            raise LookupError(f"backend {name!r} is not a remote dsbx server")
+        backend = self.ensure_loaded(name)
+        status = backend.server_status()  # type: ignore[attr-defined]
+        if status.get("state") == "ready":
+            try:
+                backend.refresh_info()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                log.warning("dsbx-web: refresh_info after ready failed: %s", exc)
+        return status
+
+    def reload_remote(self, name: str, model: str | None) -> dict:
+        """Ask the remote host to (re)load ``model``; returns the new status.
+
+        The upstream starts a background load and returns immediately
+        (typically ``state == "loading"``); callers poll
+        :meth:`remote_status`. We also drop the cached model catalogue so a
+        freshly-dropped GGUF shows up on the next listing. Raises
+        ``LookupError`` for non-remote backends.
+        """
+        entry = self.get(name)
+        if entry.family != "remote":
+            raise LookupError(f"backend {name!r} is not a remote dsbx server")
+        backend = self.ensure_loaded(name)
+        status = backend.reload_model(model)  # type: ignore[attr-defined]
+        self.invalidate_models_cache(name)
+        return status
 
     # ---------------------------------------------------------- lifecycle
     def close_all(self) -> None:

@@ -66,18 +66,23 @@ def test_cloud_no_key_falls_back_to_curated_list(app_no_keys) -> None:
     assert "https://" not in data["note"]
 
 
-def test_remote_backend_returns_static_single_model(app_no_keys) -> None:
-    """``remote`` and ``local`` backends short-circuit -- no network call."""
+def test_remote_backend_lists_host_catalogue_or_falls_back(app_no_keys) -> None:
+    """``remote`` backends now proxy the host's ``/v1/models`` catalogue.
+
+    The injected ``FakeBackend`` doesn't implement ``list_server_models``,
+    so the registry gracefully falls back rather than crashing -- a real
+    ``RemoteBackend`` would return the host's GGUF/HF list with
+    ``source == "live"`` (exercised in ``test_web_remote_reload``).
+    """
     with make_authed_client(app_no_keys) as c:
         r = c.get("/api/v1/models/dsbx-host-py")
     assert r.status_code == 200
     data = r.json()
-    assert data["source"] == "static"
-    # The fake backend isn't ``RemoteBackend`` so loaded_model is None;
-    # the static list is empty in that case but the call still succeeds
-    # rather than hitting the wire. (A real dsbx-host-py would surface its
-    # configured GGUF here.)
+    assert data["source"] in ("live", "fallback")
     assert isinstance(data["models"], list)
+    # The fallback note must never leak the dsbx-host LAN address.
+    assert "192.168" not in data["note"]
+    assert "http" not in data["note"]
 
 
 def test_unknown_backend_returns_404(app_no_keys) -> None:

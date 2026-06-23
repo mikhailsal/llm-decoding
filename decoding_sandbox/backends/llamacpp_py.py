@@ -57,6 +57,37 @@ def _discover_model_path(
     )
 
 
+def discover_gguf_models(
+    search_dirs: list[str],
+    glob: str = "**/*.gguf",
+) -> list[tuple[str, str]]:
+    """Enumerate every GGUF under ``search_dirs`` as ``(abs_path, label)``.
+
+    Powers the host-side model catalogue the web UI offers when reloading
+    a ``llamacpp-py`` server: we walk each configured search directory for
+    ``*.gguf`` files (sorted, de-duplicated by absolute path) and pair each
+    with its filename stem as a human-friendly label. Unlike
+    :func:`_discover_model_path` this returns *all* matches rather than the
+    first, and never raises -- a missing/empty directory just contributes
+    nothing.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in search_dirs:
+        d = Path(os.path.expanduser(os.path.expandvars(raw)))
+        if not d.is_dir():
+            continue
+        for match in sorted(d.glob(glob)):
+            if not match.is_file():
+                continue
+            p = str(match.resolve())
+            if p in seen:
+                continue
+            seen.add(p)
+            out.append((p, match.stem))
+    return out
+
+
 class LlamaCppPyBackend(Backend):
     """Embedded llama.cpp with full-vocab logit access."""
 

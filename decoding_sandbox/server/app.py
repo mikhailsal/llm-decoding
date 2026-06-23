@@ -2,16 +2,22 @@
 
 Design notes worth keeping in mind:
 
-- One ``Backend`` instance per process. The factory ``make_app(backend)``
-  owns it for the app's lifetime; the optional ``backend_kind`` tag is
-  surfaced in ``/v1/info`` so the client can show ``"hf"`` /
+- One model slot per process. The factory ``make_app(...)`` owns a
+  :class:`BackendSlot` for the app's lifetime. The slot holds the live
+  ``Backend`` (or ``None``), a load-state machine
+  (``empty`` -> ``loading`` -> ``ready`` / ``error``), and a ``builder``
+  callable so the browser can swap the loaded model without restarting
+  the process. The optional ``backend_kind`` tag is surfaced in
+  ``/v1/info`` / ``/v1/status`` so the client can show ``"hf"`` /
   ``"llamacpp-py"`` next to the capability name.
 - A single ``threading.Lock`` serializes every backend call. Several
   backends (notably ``LlamaCppPyBackend``) keep a KV-cache keyed by the
   longest common prefix of consecutive requests; interleaving requests
   from two clients would corrupt that cache and produce silently wrong
   logits. Per-request locking is enough for single-user research use --
-  the request rate is human-scale, not RPS-scale.
+  the request rate is human-scale, not RPS-scale. A model reload also
+  acquires that lock before swapping the backend, so an in-flight call
+  always finishes against a consistent instance.
 - Sync handlers (``def`` not ``async def``). FastAPI runs them in
   Starlette's threadpool, which is the correct shape for blocking GPU
   work: we don't want to occupy the event loop while a forward pass runs.
@@ -24,9 +30,11 @@ Design notes worth keeping in mind:
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
-from typing import Any, Iterator
+from contextlib import asynccontextmanager
+from typing import Any, Callable, Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -37,14 +45,196 @@ from decoding_sandbox.core.engine import generate
 from decoding_sandbox.core.samplers import make_sampler
 from decoding_sandbox.server import schemas as S
 
+log = logging.getLogger("decoding_sandbox.server.app")
 
-def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
-    """Build a FastAPI app that owns ``backend`` for its lifetime.
+# Builder signature: takes the model id/path to load (or ``None`` for the
+# kind's default) and returns a fresh, ready-to-serve Backend.
+BackendBuilder = Callable[[str | None], Backend]
+# Model-lister signature: returns the host catalogue of selectable models.
+ModelLister = Callable[[], list[S.ServerModelEntry]]
+
+
+def _no_builder(_model: str | None) -> Backend:
+    raise RuntimeError(
+        "this dsbx server was started without a rebuildable backend; "
+        "restart `dsbx serve` to change the loaded model."
+    )
+
+
+class BackendSlot:
+    """A swappable, state-tracked holder for the server's one heavy backend.
+
+    States:
+
+    - ``empty``   : nothing loaded (a ``--no-preload`` start, or after a
+      failed reload that left no working instance).
+    - ``loading`` : a background thread is building a backend.
+    - ``ready``   : ``backend`` is a live instance serving requests.
+    - ``error``   : the most recent load failed; ``error`` carries why.
+
+    Concurrency model: ``lock`` serializes inference (and the backend swap
+    at the end of a load). ``_state_lock`` guards the small state fields and
+    ensures only one load runs at a time. A reload sets ``loading`` first
+    (so new inference calls 409 immediately) and runs the actual build on a
+    daemon thread; the heavy GGUF/HF load therefore never blocks the event
+    loop or a status poll.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend_kind: str,
+        builder: BackendBuilder,
+        model_lister: ModelLister | None = None,
+    ) -> None:
+        self.backend_kind = backend_kind
+        self._builder = builder
+        self._model_lister = model_lister
+        self.lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self.state: str = "empty"
+        self.backend: Backend | None = None
+        self.loaded_model: str | None = None
+        self.error: str | None = None
+
+    # -- lifecycle ------------------------------------------------------- #
+    def adopt(self, backend: Backend, model: str | None) -> None:
+        """Install an already-built backend (the eager-preload path)."""
+        self.backend = backend
+        self.loaded_model = model or _detect_loaded_model(backend)
+        self.state = "ready"
+        self.error = None
+
+    def start_load(self, model: str | None) -> None:
+        """Kick a background (re)load of ``model``. Raises if already loading."""
+        with self._state_lock:
+            if self.state == "loading":
+                raise _AlreadyLoading()
+            self.state = "loading"
+            self.error = None
+        t = threading.Thread(
+            target=self._load, args=(model,), name="dsbx-model-load", daemon=True
+        )
+        t.start()
+
+    def _load(self, model: str | None) -> None:
+        # Close the old backend BEFORE building the new one: the 6 GB P40
+        # can't hold two 9B models at once, so a "build then swap" would
+        # OOM. The trade-off is that a failed reload leaves the slot empty
+        # (state=error) rather than falling back to the previous model.
+        with self.lock:
+            old = self.backend
+            self.backend = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("dsbx server: error closing previous backend: %s", exc)
+        try:
+            new_backend = self._builder(model)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("dsbx server: model load failed")
+            with self._state_lock:
+                self.state = "error"
+                self.error = str(exc)
+                self.loaded_model = None
+            return
+        with self.lock:
+            self.backend = new_backend
+        with self._state_lock:
+            self.state = "ready"
+            self.loaded_model = model or _detect_loaded_model(new_backend)
+            self.error = None
+
+    def close(self) -> None:
+        with self.lock:
+            old = self.backend
+            self.backend = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # -- introspection --------------------------------------------------- #
+    def status(self) -> S.ServerStatus:
+        with self._state_lock:
+            state = self.state
+            loaded = self.loaded_model
+            error = self.error
+            backend = self.backend
+        caps = None
+        if state == "ready" and backend is not None:
+            # A ready backend whose ``capabilities`` raises is a genuine
+            # server error -- let it propagate to a 500 rather than masking
+            # a broken backend as "loaded but featureless".
+            caps = S.capabilities_to_wire(backend.capabilities)
+        return S.ServerStatus(
+            backend_kind=self.backend_kind,
+            state=state,
+            loaded_model=loaded,
+            error=error,
+            capabilities=caps,
+        )
+
+    def models(self) -> S.ServerModelList:
+        entries: list[S.ServerModelEntry] = []
+        note = ""
+        if self._model_lister is not None:
+            try:
+                entries = list(self._model_lister())
+            except Exception as exc:  # noqa: BLE001
+                note = f"model discovery failed: {exc.__class__.__name__}"
+        else:
+            note = "this server does not advertise a model catalogue"
+        return S.ServerModelList(
+            backend_kind=self.backend_kind, models=entries, note=note
+        )
+
+
+class _AlreadyLoading(RuntimeError):
+    """Internal: raised by ``start_load`` when a load is already in progress."""
+
+
+def make_app(
+    backend: Backend | None = None,
+    *,
+    backend_kind: str = "unknown",
+    builder: BackendBuilder | None = None,
+    model: str | None = None,
+    model_lister: ModelLister | None = None,
+    preload: bool = True,
+) -> FastAPI:
+    """Build a FastAPI app that owns a swappable model slot.
+
+    Two construction modes:
+
+    - ``make_app(backend, backend_kind=...)`` (legacy / eager): adopt an
+      already-built backend into a ``ready`` slot. Pass ``builder=`` too if
+      you want ``/v1/reload`` to be able to swap the model.
+    - ``make_app(builder=..., model=..., preload=True/False)``: start with
+      an empty slot and (optionally) kick a background load of ``model``.
+      This is the ``--no-preload`` / lazy path.
 
     ``backend_kind`` is the short tag the CLI used (``hf`` /
-    ``llamacpp-py``) -- echoed in ``/v1/info`` so the client can render
-    it without parsing the capability name string.
+    ``llamacpp-py``) -- echoed in ``/v1/info`` / ``/v1/status`` so the
+    client can render it without parsing the capability name string.
+    ``model_lister`` returns the host's model catalogue for ``/v1/models``.
     """
+    slot = BackendSlot(
+        backend_kind=backend_kind,
+        builder=builder or _no_builder,
+        model_lister=model_lister,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            # Release the GPU/VRAM held by the loaded backend on shutdown.
+            slot.close()
+
     app = FastAPI(
         title="dsbx server",
         version=__version__,
@@ -52,46 +242,74 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
             "HTTP + SSE wrapper over a single in-process decoding backend. "
             "See decoding_sandbox/server/schemas.py for wire types."
         ),
+        lifespan=lifespan,
     )
-    lock = threading.Lock()
+    if backend is not None:
+        slot.adopt(backend, model)
+    elif builder is not None and preload:
+        slot.start_load(model)
+    # Back-compat alias: a few call sites / tests reach for ``app`` then
+    # the lock; expose the slot's inference lock under the historical name.
+    lock = slot.lock
 
     # ---------------------------------------------------------------- info
     @app.get("/v1/info", response_model=S.InfoResponse)
     def info() -> S.InfoResponse:
-        # No backend call -- capabilities is a property -- but we still take
-        # the lock briefly to avoid racing a backend swap (a future feature).
-        with lock:
-            caps = backend.capabilities
-            loaded = _detect_loaded_model(backend)
+        st = slot.status()
         return S.InfoResponse(
-            capabilities=S.capabilities_to_wire(caps),
+            capabilities=st.capabilities,
             engine_version=__version__,
             backend_kind=backend_kind,
-            loaded_model=loaded,
+            loaded_model=st.loaded_model,
+            state=st.state,
         )
+
+    # -------------------------------------------------------- status/models
+    @app.get("/v1/status", response_model=S.ServerStatus)
+    def status() -> S.ServerStatus:
+        return slot.status()
+
+    @app.get("/v1/models", response_model=S.ServerModelList)
+    def models() -> S.ServerModelList:
+        return slot.models()
+
+    @app.post("/v1/reload", response_model=S.ServerStatus)
+    def reload(req: S.ReloadRequest) -> S.ServerStatus:
+        try:
+            slot.start_load(req.model)
+        except _AlreadyLoading as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="a model load is already in progress; poll /v1/status",
+            ) from exc
+        return slot.status()
 
     # ------------------------------------------------------- tokenization
     @app.post("/v1/tokenize", response_model=S.TokenizeResponse)
     def tokenize(req: S.TokenizeRequest) -> S.TokenizeResponse:
         with lock:
+            backend = _require_ready(slot)
             ids = backend.tokenize(req.text)
         return S.TokenizeResponse(ids=[int(i) for i in ids])
 
     @app.post("/v1/detokenize", response_model=S.DetokenizeResponse)
     def detokenize(req: S.DetokenizeRequest) -> S.DetokenizeResponse:
         with lock:
+            backend = _require_ready(slot)
             text = backend.detokenize(list(req.ids))
         return S.DetokenizeResponse(text=text)
 
     @app.post("/v1/piece", response_model=S.PieceResponse)
     def piece(req: S.PieceRequest) -> S.PieceResponse:
         with lock:
+            backend = _require_ready(slot)
             text = backend.piece(int(req.id))
         return S.PieceResponse(text=text)
 
     @app.post("/v1/special_tokens", response_model=S.SpecialTokensResponse)
     def special_tokens() -> S.SpecialTokensResponse:
         with lock:
+            backend = _require_ready(slot)
             pairs = backend.special_tokens()
         return S.SpecialTokensResponse(
             tokens=[S.SpecialToken(id=int(i), text=str(t)) for i, t in pairs]
@@ -101,12 +319,14 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
     @app.post("/v1/next_distribution", response_model=S.WireStepResult)
     def next_distribution(req: S.NextDistributionRequest) -> S.WireStepResult:
         with lock:
+            backend = _require_ready(slot)
             step = backend.next_distribution(list(req.ids), int(req.top_k))
         return S.step_to_wire(step)
 
     @app.post("/v1/score_prompt", response_model=S.ScorePromptResponse)
     def score_prompt(req: S.ScorePromptRequest) -> S.ScorePromptResponse:
         with lock:
+            backend = _require_ready(slot)
             try:
                 steps = backend.score_prompt(
                     req.prompt,
@@ -126,16 +346,17 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
 
     @app.post("/v1/verify_greedy", response_model=S.VerifyGreedyResponse)
     def verify_greedy(req: S.VerifyGreedyRequest) -> S.VerifyGreedyResponse:
-        verify_fn = getattr(backend, "verify_greedy", None)
-        if verify_fn is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"backend {backend.capabilities.name!r} does not implement "
-                    "verify_greedy; speculative decoding is not supported here."
-                ),
-            )
         with lock:
+            backend = _require_ready(slot)
+            verify_fn = getattr(backend, "verify_greedy", None)
+            if verify_fn is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"backend {backend.capabilities.name!r} does not implement "
+                        "verify_greedy; speculative decoding is not supported here."
+                    ),
+                )
             accepted, correction = verify_fn(list(req.context_ids), list(req.draft_ids))
         return S.VerifyGreedyResponse(
             accepted=int(accepted),
@@ -155,6 +376,11 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
         see a clean end.
         """
         sampler = _build_sampler_or_400(req.sampler)
+        # Fail fast with a clean 409 if no model is loaded -- once the
+        # StreamingResponse body starts, headers are committed and the
+        # only way to report an error is the in-band ``done`` event.
+        with lock:
+            _require_ready(slot)
         # Snapshot the request now so the streaming generator doesn't
         # accidentally close over a pydantic model that FastAPI might
         # invalidate by the time the body actually runs (it won't in
@@ -171,7 +397,7 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
         )
 
         def event_stream() -> Iterator[bytes]:
-            yield from _run_generate_stream(backend, lock, sampler, **params)
+            yield from _run_generate_stream(slot, sampler, **params)
 
         return StreamingResponse(
             event_stream(),
@@ -193,6 +419,9 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
                 "backend_kind": backend_kind,
                 "endpoints": [
                     "/v1/info",
+                    "/v1/status",
+                    "/v1/models",
+                    "/v1/reload",
                     "/v1/tokenize",
                     "/v1/detokenize",
                     "/v1/piece",
@@ -204,12 +433,36 @@ def make_app(backend: Backend, *, backend_kind: str = "unknown") -> FastAPI:
             }
         )
 
+    app.state.slot = slot
     return app
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _require_ready(slot: BackendSlot) -> Backend:
+    """Return the live backend or raise a clean 409 describing the slot state.
+
+    Callers hold ``slot.lock`` so the ``backend`` they get back can't be
+    swapped out from under them mid-call.
+    """
+    state = slot.state
+    backend = slot.backend
+    if state == "ready" and backend is not None:
+        return backend
+    if state == "loading":
+        raise HTTPException(status_code=409, detail="model is loading; retry shortly")
+    if state == "error":
+        raise HTTPException(
+            status_code=409,
+            detail=f"model failed to load: {slot.error or 'unknown error'}",
+        )
+    raise HTTPException(
+        status_code=409,
+        detail="no model loaded; POST /v1/reload to load one",
+    )
+
+
 def _detect_loaded_model(backend: Backend) -> str | None:
     """Best-effort 'what model is loaded?' across backends.
 
@@ -259,8 +512,7 @@ def _sse(payload: dict) -> bytes:
 
 
 def _run_generate_stream(
-    backend: Backend,
-    lock: threading.Lock,
+    slot: BackendSlot,
     sampler,
     *,
     prompt: str,
@@ -274,17 +526,18 @@ def _run_generate_stream(
 ) -> Iterator[bytes]:
     """Drive ``core.engine.generate`` and yield SSE bytes per step.
 
-    The whole generation runs while holding ``lock`` so a concurrent
-    inspect/score_prompt can't corrupt the backend's KV cache mid-decode.
-    Any exception is reported as a final ``done`` event with ``error=...``
-    rather than a hard HTTP 500 -- by the time we start streaming we've
-    already committed headers, so an exception mid-flight has no other way
-    to reach the client cleanly.
+    The whole generation runs while holding ``slot.lock`` so a concurrent
+    inspect/score_prompt -- or a model reload -- can't corrupt the
+    backend's KV cache mid-decode. Any exception is reported as a final
+    ``done`` event with ``error=...`` rather than a hard HTTP 500 -- by the
+    time we start streaming we've already committed headers, so an
+    exception mid-flight has no other way to reach the client cleanly.
     """
     rng = random.Random(seed)
     last_reason: str | None = None
-    with lock:
+    with slot.lock:
         try:
+            backend = _require_ready_inline(slot)
             for gs in generate(
                 backend,
                 prompt,
@@ -306,4 +559,21 @@ def _run_generate_stream(
     yield _sse(S.DoneEvent(stop_reason=last_reason).model_dump())
 
 
-__all__ = ["make_app"]
+def _require_ready_inline(slot: BackendSlot) -> Backend:
+    """Like :func:`_require_ready` but raises a plain error for the stream path.
+
+    The streaming body has already committed headers, so it converts any
+    error into a ``done`` event itself -- here we just need a backend or a
+    descriptive exception (never an ``HTTPException``, which Starlette would
+    not know how to render mid-stream).
+    """
+    if slot.state == "ready" and slot.backend is not None:
+        return slot.backend
+    raise RuntimeError(
+        f"no model ready to serve (state={slot.state}"
+        + (f": {slot.error}" if slot.error else "")
+        + ")"
+    )
+
+
+__all__ = ["make_app", "BackendSlot"]
