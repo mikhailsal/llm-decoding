@@ -238,6 +238,22 @@
     prompt = prompt + text;
   }
 
+  // Snapshot of the prompt text that produced the on-screen generation.
+  // Captured at run start so the running-completion view renders a STABLE
+  // prefix (the live ``prompt`` may be edited afterwards, and "move to
+  // prompt" rewrites it -- using the snapshot keeps the displayed
+  // prefix+steps consistent and stops "move to prompt" from duplicating
+  // the completion back into its own prefix).
+  let runPromptText = $state('');
+
+  /** Fold the run's prompt + everything the model generated into the
+   *  prompt box as a single continuous string, so the user can keep
+   *  generating from exactly what the running-completion shows. Replaces
+   *  (rather than appends) so an edited prompt never desyncs the result. */
+  function moveCompletionToPrompt(): void {
+    prompt = runPromptText + completionText;
+  }
+
   /** Scroll the matching generation-steps row into view and flash it, so
    *  "find in list" from the running completion lands the user on the
    *  exact step row. */
@@ -257,6 +273,17 @@
     steps.map((s) => s.decision.token_text).join('')
   );
 
+  // Prefix shown in the running-completion view. Once a run has produced
+  // output we show the captured ``runPromptText`` snapshot (NOT the live
+  // ``prompt``, which the user may edit or which "move to prompt" rewrites
+  // -- either would otherwise duplicate/desync the displayed completion).
+  // Before any run we mirror the live prompt so the box isn't empty.
+  let runningPromptDisplay = $derived<string>(
+    steps.length > 0 || promptSteps.length > 0 || pickedTexts.length > 0
+      ? runPromptText
+      : prompt
+  );
+
   /** Reset the generation view (steps / tables / usage / manual session).
    *  Called when the user switches backend or model so stale output never
    *  looks like it came from the newly-selected model/provider. */
@@ -274,6 +301,7 @@
     pickedIds = [];
     pickedTexts = [];
     pickedProbs = [];
+    runPromptText = '';
   }
 
   // ``producedKey`` records the backend+model that generated whatever is
@@ -608,6 +636,7 @@
     // Stamp the config that produces this output so a later backend/model
     // switch knows whether the displayed result is stale.
     producedKey = `${backend}\u0000${model}`;
+    runPromptText = prompt;
     if (opts.resetUi) {
       steps = [];
       promptSteps = [];
@@ -1484,9 +1513,9 @@
             <button
               type="button"
               class="btn btn-ghost text-[11px] py-0.5 px-2"
-              onclick={() => addTokenToPrompt(completionText)}
+              onclick={moveCompletionToPrompt}
               disabled={busy}
-              title="Append the whole generated continuation to the prompt, so you can keep generating from where the model left off."
+              title="Fold the run's prompt + the whole generated continuation into the prompt box, so you can keep generating from exactly what's shown here."
             >→ move to prompt</button>
           {/if}
         </div>
@@ -1512,7 +1541,7 @@
               title={isUnscoredFirst
                 ? 'First prompt token · INPUT only, not predicted. The upstream returned no logprob for position 0 because autoregressive models have nothing to predict from before the first token.'
                 : `prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
-            />{/each}{:else}<span class="text-slate-400">{prompt}</span>{/if}{#each pickedTexts as pt, i}{@const pp = pickedProb(i)}<TokenInline
+            />{/each}{:else}<span class="text-slate-400">{runningPromptDisplay}</span>{/if}{#each pickedTexts as pt, i}{@const pp = pickedProb(i)}<TokenInline
             text={pt}
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(pp)}

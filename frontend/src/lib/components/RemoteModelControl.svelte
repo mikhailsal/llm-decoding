@@ -43,20 +43,23 @@
 
   const slotState = $derived<RemoteSlotState>(status?.state ?? 'unknown');
 
-  // Rough throughput used to turn a model's byte size into an estimated
-  // load time. Calibrated against observed dsbx-host-py loads (a ~5.5 GB
-  // Q4_K_M model warms up in ~40 s from a Linux-mounted drive ≈ 140 MB/s);
-  // we round up to 180 MB/s so the estimate runs slightly SHORT and the
-  // bar pins near the end ("finalizing") rather than racing ahead and
-  // claiming near-done while the model is still loading.
-  const LOAD_BYTES_PER_SEC = 180 * 1024 * 1024;
+  // Turn a model's byte size into an estimated load time. The earlier
+  // 180 MB/s was too optimistic -- a ~6 GB 9B model reached 95% and then
+  // sat there ~20 s, i.e. real end-to-end throughput (read + mmap + CUDA
+  // warmup) is nearer ~100 MB/s with a few seconds of fixed init that
+  // doesn't scale with size. We model both and deliberately err toward
+  // OVER-estimating: it's better for the host to report ``ready`` while
+  // the bar is still climbing (it jumps to done) than to pin at 95% for
+  // many seconds.
+  const LOAD_BYTES_PER_SEC = 100 * 1024 * 1024;
+  const LOAD_BASE_SEC = 5;
 
   // Estimated load seconds for the model currently being (re)loaded. 0
   // when the size is unknown -> the template falls back to indeterminate.
   const estimateSec = $derived.by<number>(() => {
     const sz = modelSizes[selected];
     if (!sz || sz <= 0) return 0;
-    return Math.max(3, sz / LOAD_BYTES_PER_SEC);
+    return LOAD_BASE_SEC + sz / LOAD_BYTES_PER_SEC;
   });
 
   // Determinate fill percent, capped at 95% until the slot actually

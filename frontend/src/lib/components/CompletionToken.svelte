@@ -11,13 +11,15 @@
    * dsbx-host-py tokens were inert while fireworks tokens weren't).
    *
    * Behaviour:
-   *   - HOVER: when ``candidates`` are supplied, a popover lists the top-K
-   *     alternative tokens with their probabilities.
-   *   - CLICK: pins a small action menu. Each item appears only when the
-   *     matching callback is provided, so the same component serves the
-   *     completion (watch / prompt / find-in-list) and the tables
-   *     (watch / prompt / bias-when-supported). Closes on outside click
-   *     or Escape.
+   *   - HOVER (or keyboard focus): a popover shows the top-K alternative
+   *     tokens with their probabilities AND the action buttons together.
+   *     Each action appears only when its callback is provided, so the
+   *     same component serves the completion (find / prompt / watch) and
+   *     the tables (prompt / watch / bias-when-supported).
+   *   - CLICK: runs the primary action -- "find in list" (jump to this
+   *     token's row in the steps table below) when available. The other
+   *     actions live in the hover popover, so a plain click is a fast path
+   *     to the most common "where did this come from" lookup.
    */
   interface Props {
     text: string;
@@ -52,7 +54,7 @@
 
   let rootEl: HTMLElement;
   let hovering = $state(false);
-  let pinned = $state(false);
+  let focused = $state(false);
 
   // A real, biasable/watchable token id (finite, not a synthetic intern
   // id >= 1<<24 that the upstream never sees).
@@ -78,50 +80,33 @@
     !!onPrompt || (!!onWatch && realId !== null) || !!onFind || (!!onBias && realId !== null)
   );
 
-  // Show the popover on hover (alternatives preview) or while pinned
-  // (alternatives + actions).
-  const popoverOpen = $derived<boolean>((hovering && hasAlts) || pinned);
+  // The popover (alternatives + actions) opens on hover OR keyboard focus
+  // -- no click needed. It stays open while the pointer is anywhere in the
+  // root subtree (the popover is a DOM descendant, so moving onto it does
+  // not fire the root's mouseleave), which is how the action buttons stay
+  // reachable.
+  const popoverOpen = $derived<boolean>(
+    (hovering || focused) && (hasAlts || hasActions)
+  );
 
-  function toggle() {
-    if (!hasActions && !hasAlts) return;
-    pinned = !pinned;
+  /** Primary action for a plain click: jump to this token in the steps
+   *  list. No-op for table cells (which have no list to find). */
+  function primary() {
+    if (onFind) onFind();
   }
 
   function doWatch() {
     if (onWatch && realId !== null) onWatch(realId, text);
-    pinned = false;
   }
   function doPrompt() {
     if (onPrompt) onPrompt(text);
-    pinned = false;
   }
   function doFind() {
     if (onFind) onFind();
-    pinned = false;
   }
   function doBias() {
     if (onBias && realId !== null) onBias(realId);
-    pinned = false;
   }
-
-  // Close the pinned menu on an outside click / Escape. Registered only
-  // while pinned; the listener is added AFTER the opening click has
-  // finished propagating, so it never catches the click that opened it.
-  $effect(() => {
-    if (!pinned) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (rootEl && !rootEl.contains(e.target as Node)) pinned = false;
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') pinned = false;
-    };
-    document.addEventListener('click', onDocClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('click', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  });
 
   function segmentClass(kind: TokenSegment['kind']): string {
     if (kind === 'ws' || kind === 'control') return 'tok-ws';
@@ -136,6 +121,8 @@
   class="ct-root"
   onmouseenter={() => (hovering = true)}
   onmouseleave={() => (hovering = false)}
+  onfocusin={() => (focused = true)}
+  onfocusout={() => (focused = false)}
   role="group"
 >
   <span
@@ -144,12 +131,11 @@
     role="button"
     tabindex="0"
     class:ct-interactive={hasActions || hasAlts}
-    class:ct-pinned={pinned}
-    onclick={toggle}
+    onclick={primary}
     onkeydown={(e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        toggle();
+        primary();
       }
     }}
     title={probTitle}
@@ -170,16 +156,16 @@
         </span>
       {/if}
 
-      {#if pinned && hasActions}
+      {#if hasActions}
         <span class="ct-actions">
+          {#if onFind}
+            <button type="button" class="ct-action" onclick={doFind}>find in list</button>
+          {/if}
           {#if onPrompt}
             <button type="button" class="ct-action" onclick={doPrompt}>add to prompt</button>
           {/if}
           {#if onWatch && realId !== null}
             <button type="button" class="ct-action" onclick={doWatch}>add to watch</button>
-          {/if}
-          {#if onFind}
-            <button type="button" class="ct-action" onclick={doFind}>find in list</button>
           {/if}
           {#if onBias && realId !== null}
             <button type="button" class="ct-action" onclick={doBias}>add to logit bias</button>
@@ -203,9 +189,6 @@
     outline: 1px solid rgb(56 189 248 / 0.5);
     outline-offset: 0;
   }
-  .ct-pinned {
-    outline: 1px solid rgb(56 189 248 / 0.9);
-  }
   .token-inline {
     border-radius: 0.25rem;
     padding: 0 1px;
@@ -216,7 +199,10 @@
     top: 100%;
     left: 0;
     z-index: 60;
-    margin-top: 2px;
+    /* Flush against the token's bottom edge: a hover-only popover must
+       leave no dead gap, or the pointer crossing the gap would fire the
+       root's mouseleave and close it before reaching the buttons. */
+    margin-top: 0;
     min-width: 12rem;
     max-width: 20rem;
     display: block;
