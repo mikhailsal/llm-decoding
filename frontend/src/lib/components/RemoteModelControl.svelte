@@ -31,8 +31,29 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  // Live elapsed-seconds counter shown next to the progress bar while a
+  // load is in flight. Large GGUF models take tens of seconds to mmap +
+  // warm up and the host gives us no percentage, so an honest "still
+  // working, Ns elapsed" indeterminate bar beats a frozen-looking UI.
+  let elapsedSec = $state(0);
 
   const slotState = $derived<RemoteSlotState>(status?.state ?? 'unknown');
+
+  // Tick the elapsed counter for as long as a load is busy. The effect
+  // re-runs when ``busy`` flips; its cleanup clears the interval so we
+  // never leak a timer when the load finishes or the component unmounts.
+  $effect(() => {
+    if (!busy) {
+      elapsedSec = 0;
+      return;
+    }
+    const start = Date.now();
+    elapsedSec = 0;
+    const t = setInterval(() => {
+      elapsedSec = Math.floor((Date.now() - start) / 1000);
+    }, 250);
+    return () => clearInterval(t);
+  });
 
   function labelFor(id: string): string {
     // GGUF ids are absolute paths; show the basename but keep the full id
@@ -180,6 +201,18 @@
     </button>
   </div>
 
+  {#if busy}
+    <div class="mt-2" role="status" aria-live="polite">
+      <div class="progress-track">
+        <div class="progress-bar"></div>
+      </div>
+      <p class="text-[10px] text-slate-400 mt-1 font-mono">
+        loading model… {elapsedSec}s — large models can take a while to
+        warm up; the interface is not frozen.
+      </p>
+    </div>
+  {/if}
+
   {#if modelsNote && models.length > 0}
     <p class="text-[10px] text-slate-500 mt-1 font-mono">{modelsNote}</p>
   {/if}
@@ -205,5 +238,40 @@
     padding: 0.1rem 0.45rem;
     border-radius: 0.375rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  /* Indeterminate progress: the host can't report a load percentage, so
+     a sliding bar communicates "work in progress" without lying about
+     how far along it is. */
+  .progress-track {
+    height: 4px;
+    width: 100%;
+    background: rgb(51 65 85 / 0.6);
+    border-radius: 9999px;
+    overflow: hidden;
+  }
+  .progress-bar {
+    height: 100%;
+    width: 40%;
+    border-radius: 9999px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(56 189 248),
+      transparent
+    );
+    animation: indeterminate 1.2s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% {
+      transform: translateX(-110%);
+    }
+    100% {
+      transform: translateX(310%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .progress-bar {
+      animation-duration: 2.4s;
+    }
   }
 </style>

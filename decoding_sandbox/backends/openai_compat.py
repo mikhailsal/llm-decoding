@@ -1289,12 +1289,19 @@ class OpenAICompatBackend(Backend):
         # step. Subsequent steps append the emitted token id.
         tokens_before: list[int] = self.tokenize(prompt)
         step_idx = 0
-        # Buffer of per-token records flushed as GenStep events at the
-        # end. Each entry: (token_id_or_None, text, logprob, top_payload,
-        # sampling_mask_count). The ``token_id_or_None`` is the REAL
-        # model token id when the provider speaks NewLogProbs, else
-        # ``None`` (legacy path falls back to ``self._intern(text)``).
-        pending: list[tuple[int | None, str, float, Any, int | None]] = []
+        # True incremental streaming with a ONE-token lookahead. Each
+        # GenStep is emitted as soon as the *next* token's record lands,
+        # so the browser's running-completion view paints token-by-token
+        # instead of all at once. We hold back exactly one token because
+        # the provider only reveals ``finish_reason`` on the very last
+        # chunk -- keeping the final record buffered lets us stamp the
+        # terminal ``stop_reason`` onto it without buffering the whole
+        # completion (the old "collect everything, then yield" shape was
+        # what made streamed tokens appear only when the run finished).
+        # Record shape: (token_id_or_None, text, logprob, top_payload,
+        # sampling_mask_count). ``token_id_or_None`` is the REAL model id
+        # on NewLogProbs providers, else ``None`` (legacy path interns).
+        prev_record: tuple[int | None, str, float, Any, int | None] | None = None
         last_finish_reason: str | None = None
 
         for chunk in self._iter_completions_stream(body, extra_headers=extra_headers):
@@ -1329,6 +1336,7 @@ class OpenAICompatBackend(Backend):
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
+            records: list[tuple[int | None, str, float, Any, int | None]] = []
             if self._provider_flag("supports_new_logprobs") and "content" in lp_obj:
                 # NewLogProbs streaming: each chunk carries a content[]
                 # of per-position entries with real token_ids and
@@ -1345,7 +1353,7 @@ class OpenAICompatBackend(Backend):
                     lp = float(lp_raw) if lp_raw is not None else float("nan")
                     smc_raw = entry.get("sampling_mask_count")
                     smc = int(smc_raw) if smc_raw is not None else None
-                    pending.append((tid, tok, lp, entry.get("top_logprobs", []), smc))
+                    records.append((tid, tok, lp, entry.get("top_logprobs", []), smc))
             else:
                 chunk_tokens = lp_obj.get("tokens") or []
                 chunk_lps = lp_obj.get("token_logprobs") or []
@@ -1357,79 +1365,36 @@ class OpenAICompatBackend(Backend):
                         else float("nan")
                     )
                     top_entry = chunk_tops[i] if i < len(chunk_tops) else None
-                    pending.append((None, tok, lp, top_entry, None))
+                    records.append((None, tok, lp, top_entry, None))
             fr = ch.get("finish_reason")
             if fr is not None:
                 last_finish_reason = str(fr)
+            for rec in records:
+                if prev_record is not None:
+                    yield self._genstep_from_emit_record(
+                        prev_record,
+                        tokens_before=tokens_before,
+                        step_idx=step_idx,
+                        is_last=False,
+                        last_finish_reason=last_finish_reason,
+                        watch_ids=watch_ids,
+                        note=note,
+                    )
+                    step_idx += 1
+                prev_record = rec
 
-        # All chunks consumed: turn the buffer into GenStep events. We
-        # delay finishing until here so we know ``finish_reason`` for the
-        # terminal step (the provider sends it in the *last* chunk).
-        total = len(pending)
-        for i, (tok_id_real, tok_text, tok_lp, top_entry, smc) in enumerate(pending):
-            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
-                cands = self._cands_from_new_logprobs(top_entry)
-            else:
-                cands = self._candidates_from_top_entry(top_entry)
-            if tok_id_real is not None:
-                tok_id = tok_id_real
-                if tok_text and tok_id not in self._id_to_text:
-                    self._id_to_text[tok_id] = tok_text
-            else:
-                tok_id = self._intern(tok_text)
-            # Specials (a prepended BOS in the echo prefix, or a generated
-            # EOS / chat marker) echo back blank -> render the piece so the
-            # running-completion prefix and the SEED row show the real token
-            # name instead of the dim ``<empty>``, matching the live token
-            # preview. No-op for non-empty text and for synthetic intern ids.
-            tok_text = self._surface_text(tok_id, tok_text)
-            if smc is not None:
-                for c in cands:
-                    c.sampling_mask_count = smc
-            chosen = next((c for c in cands if c.token_id == tok_id), None)
-            if chosen is None:
-                # The emitted token didn't make the top_k cut. Synthesize
-                # a candidate with rank=-1 so the UI still has something
-                # to show; this matches what ``score_prompt`` does.
-                chosen = TokenCandidate(
-                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
-                )
-            greedy_id = cands[0].token_id if cands else tok_id
-            sr = StepResult(
-                position=len(tokens_before),
-                candidates=cands,
-                is_full_vocab=False,
-                chosen=chosen,
-            )
-            # Per-step watch column: fish each watched id out of the
-            # same chunk's top_k. Cloud providers cap top_k at 5
-            # (Fireworks) / 20 (NIM/OpenRouter), so ids outside that
-            # window render as ``rank=-1, logprob=NaN`` (dim "—" in
-            # the UI). The bias-probe trick that would let us read
-            # outside-top-k values cheaply is postponed; for now
-            # honestly showing "unknown" beats a misleading number.
-            for wid in watch_ids:
-                sr.watched[int(wid)] = self.lookup_watch(sr, int(wid))
-            is_last = i == total - 1
-            stop_reason: str | None = None
-            if is_last:
-                stop_reason = self._finish_reason_to_stop(last_finish_reason)
-            decision = SamplerDecision(
-                token_id=tok_id,
-                token_text=tok_text,
-                kept=[],
-                greedy_token_id=greedy_id,
+        # Flush the final held-back token, now known to be terminal, so it
+        # carries the provider's ``finish_reason``-derived ``stop_reason``.
+        if prev_record is not None:
+            yield self._genstep_from_emit_record(
+                prev_record,
+                tokens_before=tokens_before,
+                step_idx=step_idx,
+                is_last=True,
+                last_finish_reason=last_finish_reason,
+                watch_ids=watch_ids,
                 note=note,
             )
-            yield GenStep(
-                step=step_idx,
-                tokens_before=list(tokens_before),
-                step_result=sr,
-                decision=decision,
-                stop_reason=stop_reason,
-            )
-            tokens_before.append(tok_id)
-            step_idx += 1
 
     def stream_native_with_echo(
         self,
@@ -1592,36 +1557,42 @@ class OpenAICompatBackend(Backend):
                 note_parts.append(f"{k}={body[k]:g}")
         note = ", ".join(note_parts)
 
-        # Collect ALL positions first, then split into prompt-echo +
-        # emitted-token streams. Fireworks streams ONE position per
-        # SSE chunk (regardless of whether it's an echoed prompt
-        # token or a freshly generated one), so we can't use
-        # "first chunk = all echo, rest = emit" heuristic. Instead
-        # we use a three-tier signal, strongest first:
+        # Incremental echo+stream. The provider sends ONE position per SSE
+        # chunk in strict echo-then-emit order, so we classify each
+        # position the instant it lands instead of buffering the whole
+        # response (the old "collect all, split, then yield" shape made
+        # the browser paint generated tokens only after the run closed).
+        # Classification mirrors the old batch split exactly -- a
+        # three-tier signal, strongest first:
         #
         # 1. ``text_offset`` (NewLogProbs): an echo entry has
-        #    ``text_offset < len(prompt)``; the first emit entry
-        #    starts at ``text_offset == len(prompt)``. This is the
-        #    OpenAI-documented field and Fireworks honors it.
+        #    ``text_offset < len(prompt)``; the first emit entry starts
+        #    at ``text_offset == len(prompt)``. OpenAI-documented and
+        #    honored by Fireworks.
         # 2. ``sampling_mask_count`` / ``sampling_logprob`` presence:
-        #    Fireworks omits both for echoed positions (they were
-        #    never actually sampled) and populates them for emitted
-        #    positions. Acts as a backup when the upstream omits
-        #    ``text_offset`` (some providers do).
-        # 3. Cumulative ``text`` length: accumulate the token strings
-        #    and switch as soon as the running total exceeds
-        #    ``len(prompt)``. Used as a last-resort fallback when
-        #    neither of the above is available.
+        #    omitted for echoed positions, populated for emitted ones.
+        #    A backup when the upstream omits ``text_offset``.
+        # 3. Cumulative ``text`` length: switch once the running total
+        #    exceeds ``len(prompt)``. Last-resort fallback.
         #
-        # Entry shape: (token_id_or_None, text, logprob, top_payload,
-        # sampling_mask_count, text_offset, has_sampling_signal).
-        all_positions: list[
-            tuple[int | None, str, float, Any, int | None, int | None, bool]
-        ] = []
+        # Echo positions are yielded as ``StepResult`` immediately; the
+        # first emit position flips us into emit mode, after which every
+        # position is streamed as a ``GenStep`` with the same one-token
+        # lookahead ``stream_native`` uses so the terminal step can carry
+        # ``stop_reason``. Per-position record shape: (token_id_or_None,
+        # text, logprob, top_payload, sampling_mask_count, text_offset,
+        # has_sampling_signal).
+        prompt_len = len(prompt)
+        tokens_before: list[int] = self.tokenize(prompt)
+        echo_pos_idx = 0
+        emit_step_idx = 0
+        running_text_len = 0
+        in_emit = False
+        prev_emit: (
+            tuple[int | None, str, float, Any, int | None, int | None, bool] | None
+        ) = None
         last_finish_reason: str | None = None
-        for chunk_idx, chunk in enumerate(
-            self._iter_completions_stream(body, extra_headers=extra_headers)
-        ):
+        for chunk in self._iter_completions_stream(body, extra_headers=extra_headers):
             u = chunk.get("usage") if isinstance(chunk, dict) else None
             if isinstance(u, dict):
                 usage_mod.record_tokens(
@@ -1641,6 +1612,9 @@ class OpenAICompatBackend(Backend):
                 continue
             ch = choices[0]
             lp_obj = ch.get("logprobs") or {}
+            positions: list[
+                tuple[int | None, str, float, Any, int | None, int | None, bool]
+            ] = []
             if self._provider_flag("supports_new_logprobs") and "content" in lp_obj:
                 for entry in lp_obj.get("content") or []:
                     if not isinstance(entry, dict):
@@ -1663,7 +1637,7 @@ class OpenAICompatBackend(Backend):
                         "sampling_logprob" in entry
                         or "sampling_mask_count" in entry
                     )
-                    all_positions.append(
+                    positions.append(
                         (
                             tid,
                             tok,
@@ -1689,185 +1663,194 @@ class OpenAICompatBackend(Backend):
                     text_off = (
                         int(offsets[i]) if i < len(offsets) and offsets[i] is not None else None
                     )
-                    all_positions.append(
+                    positions.append(
                         (None, tok, lp, top_entry, None, text_off, False)
                     )
             fr = ch.get("finish_reason")
             if fr is not None:
                 last_finish_reason = str(fr)
+            for pos in positions:
+                if not in_emit:
+                    _tid, pos_text, _lp, _top, _smc, text_off, has_signal = pos
+                    if text_off is not None:
+                        is_emit = text_off >= prompt_len
+                    elif has_signal:
+                        is_emit = True
+                    else:
+                        running_text_len += len(pos_text)
+                        is_emit = running_text_len > prompt_len
+                    if not is_emit:
+                        yield self._stepresult_from_echo_record(
+                            pos, pos_idx=echo_pos_idx, watch_ids=watch_ids
+                        )
+                        echo_pos_idx += 1
+                        continue
+                    in_emit = True
+                # Emit position -- stream with one-token lookahead so the
+                # last token can carry the provider's stop_reason.
+                if prev_emit is not None:
+                    yield self._genstep_from_emit_record(
+                        prev_emit[:5],
+                        tokens_before=tokens_before,
+                        step_idx=emit_step_idx,
+                        is_last=False,
+                        last_finish_reason=last_finish_reason,
+                        watch_ids=watch_ids,
+                        note=note,
+                    )
+                    emit_step_idx += 1
+                prev_emit = pos
 
-        # Split point: walk all positions and classify each as echo or
-        # emit using the three-tier signal. The split is the FIRST
-        # emit index found; everything before is echo (and we trust
-        # the upstream to maintain order, since OpenAI-style completions
-        # always echo-then-emit).
-        prompt_len = len(prompt)
-        split_at = len(all_positions)
-        running_text_len = 0
-        for idx, (_, tok_text, _, _, _, text_off, has_signal) in enumerate(
-            all_positions
-        ):
-            is_emit = False
-            if text_off is not None:
-                # Primary signal: text_offset >= len(prompt) means the
-                # position starts AT or AFTER the end of the prompt
-                # (the first emitted token has text_offset == prompt_len
-                # in Fireworks; some providers use > so we accept both).
-                is_emit = text_off >= prompt_len
-            elif has_signal:
-                # Secondary: sampling_logprob/mask_count presence.
-                is_emit = True
-            else:
-                # Tertiary: cumulative text accounting. Once we've
-                # echoed at least the full prompt the next position
-                # must be the first emit.
-                running_text_len += len(tok_text)
-                is_emit = running_text_len > prompt_len
-            if is_emit:
-                split_at = idx
-                break
-
-        prompt_records = all_positions[:split_at]
-        emit_records = all_positions[split_at:]
-
-        # Build StepResults for prompt-echo positions. ``chosen`` is the
-        # token that actually appears at this prompt position; rank
-        # comes from looking it up inside the chunk's top_logprobs.
-        for pos_idx, (
-            tok_id_real,
-            tok_text,
-            tok_lp,
-            top_entry,
-            smc,
-            _text_off,
-            _has_signal,
-        ) in enumerate(prompt_records):
-            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
-                cands = self._cands_from_new_logprobs(top_entry)
-            else:
-                cands = self._candidates_from_top_entry(top_entry)
-            if tok_id_real is not None:
-                tok_id = tok_id_real
-                if tok_text and tok_id not in self._id_to_text:
-                    self._id_to_text[tok_id] = tok_text
-            else:
-                tok_id = self._intern(tok_text)
-            # Specials (a prepended BOS in the echo prefix, or a generated
-            # EOS / chat marker) echo back blank -> render the piece so the
-            # running-completion prefix and the SEED row show the real token
-            # name instead of the dim ``<empty>``, matching the live token
-            # preview. No-op for non-empty text and for synthetic intern ids.
-            tok_text = self._surface_text(tok_id, tok_text)
-            if smc is not None:
-                for c in cands:
-                    c.sampling_mask_count = smc
-            chosen = next((c for c in cands if c.token_id == tok_id), None)
-            if chosen is None:
-                # Fireworks (and OpenAI-compat echo in general) emits
-                # position 0 with NO ``top_logprobs`` -- the model has no
-                # prior context to score against, so the upstream returns
-                # ``logprob: 0.0`` as a placeholder rather than a real
-                # value. If we propagate that 0.0 the UI renders the
-                # token at exp(0.0)=1.0=100%, which is a lie:
-                # autoregressive models can't predict position 0 without
-                # BOS conditioning. Detect the placeholder by the absence
-                # of ``cands`` (an empty top_logprobs list is the
-                # upstream's "no data here" signal) and downgrade the
-                # logprob to NaN so the UI renders an honest "?" instead
-                # of the misleading 100%. Emit positions where the chosen
-                # is outside top-K still have a real ``tok_lp`` from the
-                # entry's ``logprob`` field and a populated ``cands``, so
-                # this guard doesn't touch them.
-                effective_lp = float("nan") if not cands else tok_lp
-                chosen = TokenCandidate(
-                    tok_id, tok_text, effective_lp, rank=-1, sampling_mask_count=smc
-                )
-            prompt_step = StepResult(
-                position=pos_idx,
-                candidates=cands,
-                is_full_vocab=False,
-                chosen=chosen,
-                context_text=tok_text,
-            )
-            # Watch column on echoed prompt positions: same top-k-only
-            # contract as the per-emitted-step path. Lets ``include_prompt``
-            # runs render the same "P(watched)" rows the inspect path does.
-            for wid in watch_ids:
-                prompt_step.watched[int(wid)] = self.lookup_watch(prompt_step, int(wid))
-            yield prompt_step
-
-        # GenSteps for emitted tokens -- same shape as stream_native.
-        # tokens_before starts as the local tokenize() of the prompt
-        # (synthetic intern ids); accumulates real emitted ids as we
-        # go. The synthetic prompt-id space never overlaps real model
-        # ids thanks to ``_INTERN_ID_BASE``.
-        tokens_before: list[int] = self.tokenize(prompt)
-        step_idx = 0
-        total = len(emit_records)
-        for i, (
-            tok_id_real,
-            tok_text,
-            tok_lp,
-            top_entry,
-            smc,
-            _text_off,
-            _has_signal,
-        ) in enumerate(emit_records):
-            if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
-                cands = self._cands_from_new_logprobs(top_entry)
-            else:
-                cands = self._candidates_from_top_entry(top_entry)
-            if tok_id_real is not None:
-                tok_id = tok_id_real
-                if tok_text and tok_id not in self._id_to_text:
-                    self._id_to_text[tok_id] = tok_text
-            else:
-                tok_id = self._intern(tok_text)
-            # Specials (a prepended BOS in the echo prefix, or a generated
-            # EOS / chat marker) echo back blank -> render the piece so the
-            # running-completion prefix and the SEED row show the real token
-            # name instead of the dim ``<empty>``, matching the live token
-            # preview. No-op for non-empty text and for synthetic intern ids.
-            tok_text = self._surface_text(tok_id, tok_text)
-            if smc is not None:
-                for c in cands:
-                    c.sampling_mask_count = smc
-            chosen = next((c for c in cands if c.token_id == tok_id), None)
-            if chosen is None:
-                chosen = TokenCandidate(
-                    tok_id, tok_text, tok_lp, rank=-1, sampling_mask_count=smc
-                )
-            greedy_id = cands[0].token_id if cands else tok_id
-            sr = StepResult(
-                position=len(tokens_before),
-                candidates=cands,
-                is_full_vocab=False,
-                chosen=chosen,
-            )
-            # Per-step watch column on emitted tokens; same rules as
-            # the prompt-echo loop above.
-            for wid in watch_ids:
-                sr.watched[int(wid)] = self.lookup_watch(sr, int(wid))
-            is_last = i == total - 1
-            stop_reason: str | None = None
-            if is_last:
-                stop_reason = self._finish_reason_to_stop(last_finish_reason)
-            decision = SamplerDecision(
-                token_id=tok_id,
-                token_text=tok_text,
-                kept=[],
-                greedy_token_id=greedy_id,
+        # Flush the held-back terminal emit token (if any) with its
+        # finish-reason-derived stop_reason.
+        if prev_emit is not None:
+            yield self._genstep_from_emit_record(
+                prev_emit[:5],
+                tokens_before=tokens_before,
+                step_idx=emit_step_idx,
+                is_last=True,
+                last_finish_reason=last_finish_reason,
+                watch_ids=watch_ids,
                 note=note,
             )
-            yield GenStep(
-                step=step_idx,
-                tokens_before=list(tokens_before),
-                step_result=sr,
-                decision=decision,
-                stop_reason=stop_reason,
+
+    def _genstep_from_emit_record(
+        self,
+        record: tuple[int | None, str, float, Any, int | None],
+        *,
+        tokens_before: list[int],
+        step_idx: int,
+        is_last: bool,
+        last_finish_reason: str | None,
+        watch_ids: Sequence[int],
+        note: str,
+    ) -> GenStep:
+        """Build one emitted-token :class:`GenStep` from a streamed record.
+
+        Shared by :meth:`stream_native` and
+        :meth:`stream_native_with_echo` so both incremental paths produce
+        byte-identical GenSteps. ``tokens_before`` is mutated in place
+        (the emitted id is appended) so successive calls advance the
+        context exactly as the old buffered loops did. ``is_last`` stamps
+        the provider's ``finish_reason``-derived ``stop_reason`` onto the
+        terminal step; non-terminal steps carry ``stop_reason=None``.
+        """
+        tok_id_real, tok_text, tok_lp, top_entry, smc = record
+        if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
+            cands = self._cands_from_new_logprobs(top_entry)
+        else:
+            cands = self._candidates_from_top_entry(top_entry)
+        if tok_id_real is not None:
+            tok_id = tok_id_real
+            if tok_text and tok_id not in self._id_to_text:
+                self._id_to_text[tok_id] = tok_text
+        else:
+            tok_id = self._intern(tok_text)
+        # Specials (a prepended BOS in the echo prefix, or a generated
+        # EOS / chat marker) echo back blank -> render the piece so the
+        # running-completion prefix and the SEED row show the real token
+        # name instead of the dim ``<empty>``, matching the live token
+        # preview. No-op for non-empty text and for synthetic intern ids.
+        text = self._surface_text(tok_id, tok_text)
+        if smc is not None:
+            for c in cands:
+                c.sampling_mask_count = smc
+        chosen = next((c for c in cands if c.token_id == tok_id), None)
+        if chosen is None:
+            # The emitted token didn't make the top_k cut. Synthesize
+            # a candidate with rank=-1 so the UI still has something
+            # to show; this matches what ``score_prompt`` does.
+            chosen = TokenCandidate(tok_id, text, tok_lp, rank=-1, sampling_mask_count=smc)
+        greedy_id = cands[0].token_id if cands else tok_id
+        sr = StepResult(
+            position=len(tokens_before),
+            candidates=cands,
+            is_full_vocab=False,
+            chosen=chosen,
+        )
+        # Per-step watch column: fish each watched id out of the
+        # same chunk's top_k. Cloud providers cap top_k at 5
+        # (Fireworks) / 20 (NIM/OpenRouter), so ids outside that
+        # window render as ``rank=-1, logprob=NaN`` (dim "—" in
+        # the UI).
+        for wid in watch_ids:
+            sr.watched[int(wid)] = self.lookup_watch(sr, int(wid))
+        stop_reason = self._finish_reason_to_stop(last_finish_reason) if is_last else None
+        decision = SamplerDecision(
+            token_id=tok_id,
+            token_text=text,
+            kept=[],
+            greedy_token_id=greedy_id,
+            note=note,
+        )
+        gs = GenStep(
+            step=step_idx,
+            tokens_before=list(tokens_before),
+            step_result=sr,
+            decision=decision,
+            stop_reason=stop_reason,
+        )
+        tokens_before.append(tok_id)
+        return gs
+
+    def _stepresult_from_echo_record(
+        self,
+        record: tuple[int | None, str, float, Any, int | None, int | None, bool],
+        *,
+        pos_idx: int,
+        watch_ids: Sequence[int],
+    ) -> StepResult:
+        """Build one prompt-echo :class:`StepResult` from a streamed record.
+
+        Extracted from the old buffered echo loop so
+        :meth:`stream_native_with_echo` can yield each echoed prompt
+        position the moment it's classified instead of after the whole
+        stream is drained.
+        """
+        tok_id_real, tok_text, tok_lp, top_entry, smc, _text_off, _has_signal = record
+        if isinstance(top_entry, list) and self._provider_flag("supports_new_logprobs"):
+            cands = self._cands_from_new_logprobs(top_entry)
+        else:
+            cands = self._candidates_from_top_entry(top_entry)
+        if tok_id_real is not None:
+            tok_id = tok_id_real
+            if tok_text and tok_id not in self._id_to_text:
+                self._id_to_text[tok_id] = tok_text
+        else:
+            tok_id = self._intern(tok_text)
+        text = self._surface_text(tok_id, tok_text)
+        if smc is not None:
+            for c in cands:
+                c.sampling_mask_count = smc
+        chosen = next((c for c in cands if c.token_id == tok_id), None)
+        if chosen is None:
+            # Fireworks (and OpenAI-compat echo in general) emits
+            # position 0 with NO ``top_logprobs`` -- the model has no
+            # prior context to score against, so the upstream returns
+            # ``logprob: 0.0`` as a placeholder rather than a real value.
+            # Propagating 0.0 would render the token at exp(0.0)=100%,
+            # a lie: autoregressive models can't predict position 0
+            # without BOS conditioning. Detect the placeholder by the
+            # absence of ``cands`` and downgrade to NaN so the UI shows
+            # an honest "?" instead. Emit positions outside top-K keep
+            # their real ``tok_lp`` (cands populated), so this guard
+            # doesn't touch them.
+            effective_lp = float("nan") if not cands else tok_lp
+            chosen = TokenCandidate(
+                tok_id, text, effective_lp, rank=-1, sampling_mask_count=smc
             )
-            tokens_before.append(tok_id)
-            step_idx += 1
+        prompt_step = StepResult(
+            position=pos_idx,
+            candidates=cands,
+            is_full_vocab=False,
+            chosen=chosen,
+            context_text=text,
+        )
+        # Watch column on echoed prompt positions: same top-k-only
+        # contract as the per-emitted-step path.
+        for wid in watch_ids:
+            prompt_step.watched[int(wid)] = self.lookup_watch(prompt_step, int(wid))
+        return prompt_step
 
     def _iter_completions_stream(
         self,

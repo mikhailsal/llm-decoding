@@ -1756,6 +1756,101 @@ def test_stream_native_emits_one_genstep_per_token(monkeypatch) -> None:
     assert len(steps[0].tokens_before) + 2 == len(steps[2].tokens_before)
 
 
+def test_stream_native_yields_incrementally_not_buffered(monkeypatch) -> None:
+    """Regression: GenSteps must surface as upstream chunks arrive, NOT
+    all at once after the whole completion is drained.
+
+    The old shape collected every token into a buffer and only yielded
+    GenSteps once the stream closed (so it could learn ``finish_reason``
+    for the terminal step). That made the browser's running-completion
+    view paint nothing until the final token landed. The fix streams with
+    a one-token lookahead. We prove the property by counting how many
+    upstream data chunks have been *read* at the moment the FIRST GenStep
+    is produced: with the lookahead it must be strictly fewer than the
+    total (the old buffered path read all of them before yielding once).
+    """
+    backend, mock = _make_oc_backend(
+        monkeypatch, routes={}, has_completions=True, max_top=5
+    )
+    chunks = [
+        {
+            "choices": [
+                {
+                    "text": " Paris",
+                    "logprobs": {
+                        "tokens": [" Paris"],
+                        "token_logprobs": [-0.2],
+                        "top_logprobs": [{" Paris": -0.2}],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "text": " is",
+                    "logprobs": {
+                        "tokens": [" is"],
+                        "token_logprobs": [-0.4],
+                        "top_logprobs": [{" is": -0.4}],
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "text": " warm",
+                    "logprobs": {
+                        "tokens": [" warm"],
+                        "token_logprobs": [-0.6],
+                        "top_logprobs": [{" warm": -0.6}],
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    ]
+
+    produced = {"n": 0}
+
+    class _RecordingResponse(_MockStreamResponse):
+        def iter_lines(self):
+            for line in self._lines:
+                if line.startswith(b"data:") and line != b"data: [DONE]":
+                    produced["n"] += 1
+                yield line
+
+    _attach_stream_factory(mock, [_RecordingResponse(200, _sse_lines(chunks))])
+
+    gen = backend.stream_native(
+        "The capital of France",
+        sampler_name="greedy",
+        sampler_params={},
+        max_tokens=3,
+        top_k=5,
+        stop_ids=None,
+    )
+    first = next(gen)
+    assert first.decision.token_text == " Paris"
+    # The first token surfaced after reading only enough chunks for the
+    # one-token lookahead -- strictly fewer than all of them. A buffered
+    # implementation would have read every chunk (== len(chunks)) before
+    # yielding anything.
+    assert produced["n"] < len(chunks)
+    rest = list(gen)
+    assert [gs.decision.token_text for gs in (first, *rest)] == [
+        " Paris",
+        " is",
+        " warm",
+    ]
+    # Terminal stop_reason still lands on the final step despite streaming.
+    assert first.stop_reason is None
+    assert rest[-1].stop_reason == "max_tokens"
+
+
 def test_stream_native_maps_stop_finish_reason_to_user_stop(monkeypatch) -> None:
     """``finish_reason=stop`` propagates as ``stop_reason='user_stop'``."""
     backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
