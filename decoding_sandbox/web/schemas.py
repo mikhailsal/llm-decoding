@@ -157,6 +157,12 @@ class ModelsResponse(BaseModel):
     fetched_at: float | None = None
     cache_ttl_s: float = 0.0
     note: str = ""
+    # Optional ``id -> on-disk size in bytes`` map. Populated only for
+    # ``remote`` dsbx-serve hosts that report per-model ``size_bytes``
+    # (every GGUF); the browser uses it to draw a determinate,
+    # size-proportional model-load progress bar instead of an
+    # indeterminate flicker. Empty for cloud / local / HF backends.
+    model_sizes: dict[str, int] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #

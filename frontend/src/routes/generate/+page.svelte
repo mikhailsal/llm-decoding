@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import BackendSelect from '$lib/components/BackendSelect.svelte';
   import ModelInput from '$lib/components/ModelInput.svelte';
   import RemoteModelControl from '$lib/components/RemoteModelControl.svelte';
@@ -8,6 +8,7 @@
   import ConfidenceBar from '$lib/components/ConfidenceBar.svelte';
   import TokenText from '$lib/components/TokenText.svelte';
   import TokenInline from '$lib/components/TokenInline.svelte';
+  import CompletionToken from '$lib/components/CompletionToken.svelte';
   import TokenComposer from '$lib/components/TokenComposer.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
@@ -217,6 +218,87 @@
     ];
   }
 
+  // -------- Token-click actions (running completion + tables) ---------
+  // These power the unified ``CompletionToken`` menu so a click does the
+  // same thing on EVERY backend (the old behaviour gated all token
+  // clicks on logit_bias support, leaving dsbx-host-py tokens inert while
+  // fireworks tokens were clickable).
+
+  /** Pin a token to the watch panel so its per-step probability shows up
+   *  as a dedicated column in the tables below. */
+  function addToWatchToken(tokenId: number, text: string): void {
+    rememberToken(tokenId, text);
+    const s = String(tokenId);
+    if (!watchIds.includes(s)) watchIds = [...watchIds, s];
+  }
+
+  /** Append a single token's text to the prompt (the per-token sibling of
+   *  the "move generation to prompt" button). */
+  function addTokenToPrompt(text: string): void {
+    prompt = prompt + text;
+  }
+
+  /** Scroll the matching generation-steps row into view and flash it, so
+   *  "find in list" from the running completion lands the user on the
+   *  exact step row. */
+  function findStepInList(step: number): void {
+    const el = document.getElementById(`gen-step-${step}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('row-flash');
+    window.setTimeout(() => el.classList.remove('row-flash'), 1600);
+  }
+
+  // ``completionText`` is everything the model has emitted this run (the
+  // concatenated per-step token text). Drives the "move to prompt"
+  // button so the user can fold a generation back into the prompt and
+  // keep going.
+  let completionText = $derived<string>(
+    steps.map((s) => s.decision.token_text).join('')
+  );
+
+  /** Reset the generation view (steps / tables / usage / manual session).
+   *  Called when the user switches backend or model so stale output never
+   *  looks like it came from the newly-selected model/provider. */
+  function clearRun(): void {
+    steps = [];
+    promptSteps = [];
+    promptNote = '';
+    stopReason = null;
+    streamError = null;
+    usage = null;
+    perf = null;
+    rawOutput = null;
+    manualDistribution = null;
+    manualMode = false;
+    pickedIds = [];
+    pickedTexts = [];
+    pickedProbs = [];
+  }
+
+  // ``producedKey`` records the backend+model that generated whatever is
+  // currently on screen (set at the start of every run). Clear-on-switch
+  // compares against it so we only wipe the view when the selection
+  // actually diverges from what produced the displayed output.
+  let producedKey: string | null = null;
+
+  // Clear-on-switch: changing the active backend or model wipes the view
+  // so stale output never looks like it came from the newly-selected
+  // model/provider. Triggered from explicit change handlers
+  // (``onBackendChange``, ``ModelInput``'s ``onChange``, and the remote
+  // reload's ``onReady``) rather than a reactive effect, so there is no
+  // read/write cycle to trip Svelte's update-depth guard. An in-flight
+  // stream is cancelled first.
+  function maybeClearForSwitch(): void {
+    const hasOutput =
+      steps.length > 0 || promptSteps.length > 0 || pickedIds.length > 0 || manualMode;
+    if (!hasOutput) return;
+    if (`${backend}\u0000${model}` === producedKey) return;
+    cancelFn?.();
+    busy = false;
+    clearRun();
+  }
+
   // Cached sorted view for the <datalist>: numeric ascending so the
   // dropdown reads predictably (the user picks IDs by text 90% of
   // the time anyway -- the alphabetical-by-text option would shuffle
@@ -254,7 +336,14 @@
     backendInfo?.family === 'cloud' && !activeCaps?.supports_ignore_eos
   );
   $effect(() => {
-    if (respectEosLocked && !respectEos) respectEos = true;
+    // Force ``respect EOS`` on when the active backend locks it. Track
+    // only ``respectEosLocked``; untrack the read+write of ``respectEos``
+    // so the self-write (and the checkbox ``bind:checked`` write-back)
+    // can't re-trigger this effect into the update-depth guard.
+    const locked = respectEosLocked;
+    untrack(() => {
+      if (locked && !respectEos) respectEos = true;
+    });
   });
   // Show the service-tier selector only on backends that advertise it
   // (Fireworks). Other backends silently ignore the field anyway, but
@@ -343,11 +432,18 @@
   // exact "silently ignored" UX the user pointed at.
   let altsMax = $derived<number>(activeCaps?.max_top_logprobs ?? 50);
   $effect(() => {
-    // Whenever the cap shrinks (backend swap or capabilities refresh),
-    // re-clamp the current value. Never grow it automatically -- if
-    // the user picked 3 and the cap is 20, leave it at 3.
-    if (alternatives > altsMax) alternatives = altsMax;
-    if (alternatives < 1) alternatives = 1;
+    // Re-clamp ONLY when the cap changes (backend swap / capabilities
+    // refresh). ``untrack`` the read+write of ``alternatives`` so this
+    // effect never depends on -- nor re-triggers from -- its own write;
+    // pairing a self-writing effect with the number input's
+    // ``bind:value`` write-back otherwise spins the update-depth guard.
+    // Never grow the value automatically: if the user picked 3 and the
+    // cap is 20, leave it at 3.
+    const cap = altsMax;
+    untrack(() => {
+      if (alternatives > cap) alternatives = cap;
+      if (alternatives < 1) alternatives = 1;
+    });
   });
 
   // ``seed`` only changes the result when the sampler has randomness to
@@ -379,6 +475,7 @@
     info.select(next);
     const b = $info.info?.backends.find((x) => x.name === next) ?? null;
     model = b?.loaded_model ?? '';
+    maybeClearForSwitch();
   }
 
   function samplerParams(): Record<string, number | null> {
@@ -508,6 +605,9 @@
   ): Promise<void> {
     streamError = null;
     stopReason = null;
+    // Stamp the config that produces this output so a later backend/model
+    // switch knows whether the displayed result is stale.
+    producedKey = `${backend}\u0000${model}`;
     if (opts.resetUi) {
       steps = [];
       promptSteps = [];
@@ -891,18 +991,19 @@
   isSpecial: boolean,
   classes: string
 )}
-  {#if logitBiasSupported && tokenId !== null && tokenId !== undefined && Number.isFinite(tokenId) && tokenId < 1 << 24}
-    <button
-      type="button"
-      class="bias-add-btn"
-      title={`token id ${tokenId} — click to add to logit_bias (default −100)`}
-      onclick={() => addToBias(tokenId)}
-    >
-      <TokenText text={text} isSpecial={isSpecial} className={classes} />
-    </button>
-  {:else}
-    <TokenText text={text} isSpecial={isSpecial} className={classes} />
-  {/if}
+  <CompletionToken
+    text={text}
+    isSpecial={isSpecial}
+    tokenId={tokenId ?? null}
+    showMarkers={true}
+    className={classes}
+    probTitle={tokenId !== null && tokenId !== undefined && Number.isFinite(tokenId)
+      ? `token id ${tokenId}`
+      : ''}
+    onWatch={addToWatchToken}
+    onPrompt={addTokenToPrompt}
+    onBias={logitBiasSupported ? (id) => addToBias(id) : undefined}
+  />
 {/snippet}
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -927,11 +1028,18 @@
         <RemoteModelControl
           backend={backendInfo}
           compact={true}
-          onReady={(m) => { if (m) model = m; }}
+          onReady={(m) => {
+            if (m) model = m;
+            maybeClearForSwitch();
+          }}
         />
       </div>
     {:else}
-      <ModelInput backend={backendInfo} bind:value={model} />
+      <ModelInput
+        backend={backendInfo}
+        bind:value={model}
+        onChange={() => maybeClearForSwitch()}
+      />
     {/if}
     <CapabilityBadges backend={backend} />
     <!--
@@ -1370,7 +1478,18 @@
 
     <div class="card">
       <div class="flex items-center justify-between mb-1">
-        <div class="text-xs uppercase tracking-wider text-slate-500">running completion</div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs uppercase tracking-wider text-slate-500">running completion</span>
+          {#if completionText.length > 0}
+            <button
+              type="button"
+              class="btn btn-ghost text-[11px] py-0.5 px-2"
+              onclick={() => addTokenToPrompt(completionText)}
+              disabled={busy}
+              title="Append the whole generated continuation to the prompt, so you can keep generating from where the model left off."
+            >→ move to prompt</button>
+          {/if}
+        </div>
         <div class="text-[10px] uppercase tracking-wider text-slate-600 flex items-center gap-2">
           <span class="inline-block w-3 h-3 rounded bg-emerald-500/40"></span>≥80%
           <span class="inline-block w-3 h-3 rounded bg-sky-500/40"></span>≥50%
@@ -1398,11 +1517,17 @@
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(pp)}
             title={`manual pick #${i + 1}${pp !== null ? ` · p=${(pp * 100).toFixed(2)}%` : ' · forced'}`}
-          />{/each}{#if !hideStepsInRunningCompletion}{#each steps as s}<TokenInline
+          />{/each}{#if !hideStepsInRunningCompletion}{#each steps as s}<CompletionToken
             text={s.decision.token_text}
+            tokenId={s.decision.token_id}
             showMarkers={showMarkers}
             bgClass={tokenBackgroundClass(chosenProb(s))}
-            title={`p=${chosenProb(s) !== null ? ((chosenProb(s) ?? 0) * 100).toFixed(2) + '%' : '?'}`}
+            candidates={s.step_result.candidates}
+            probTitle={`p=${chosenProb(s) !== null ? ((chosenProb(s) ?? 0) * 100).toFixed(2) + '%' : '?'}`}
+            onWatch={addToWatchToken}
+            onPrompt={addTokenToPrompt}
+            onFind={() => findStepInList(s.step)}
+            onBias={logitBiasSupported ? (id) => addToBias(id) : undefined}
           />{/each}{/if}{#if busy}<span class="animate-pulse text-sky-400">▌</span>{/if}
       </div>
       {#if stopReason}
@@ -1860,7 +1985,7 @@
                 .slice(0, alternatives)
                 .some((c) => c.token_id === s.decision.token_id)}
               {@const chosenCand = s.step_result.chosen}
-              <tr class="border-b border-slate-800/60" data-token-row>
+              <tr id={`gen-step-${s.step}`} class="border-b border-slate-800/60" data-token-row>
                 <td class="table-cell font-mono text-slate-400">{s.step}</td>
                 <td class="table-cell">
                   {@render biasable(
@@ -1972,31 +2097,24 @@
 </div>
 
 <style>
-  /* "Click a token to bias it" affordance used in every prompt-logits
-     and generation-steps table cell. We keep it visually almost
-     identical to the surrounding TokenText so the tables don't turn
-     into a sea of buttons -- a faint underline on hover plus a tiny
-     border-bottom hint that the token is clickable. The button
-     resets default browser styling (background, padding, font) so
-     ``TokenText`` can render the token glyphs unchanged. */
-  .bias-add-btn {
-    background: transparent;
-    border: 0;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    border-bottom: 1px dotted rgb(71 85 105 / 0.6);
-    border-radius: 0;
-    line-height: inherit;
+  /* Transient highlight applied to a generation-steps row when the user
+     picks "find in list" from a running-completion token, so the eye
+     lands on the exact step they clicked. */
+  :global(tr.row-flash) {
+    animation: row-flash 1.6s ease-out;
   }
-  .bias-add-btn:hover {
-    border-bottom-color: rgb(56 189 248);
-    background: rgb(56 189 248 / 0.08);
+  @keyframes row-flash {
+    0% {
+      background: rgb(56 189 248 / 0.35);
+    }
+    100% {
+      background: transparent;
+    }
   }
-  .bias-add-btn:focus-visible {
-    outline: 2px solid rgb(56 189 248);
-    outline-offset: 2px;
+  @media (prefers-reduced-motion: reduce) {
+    :global(tr.row-flash) {
+      animation: none;
+      background: rgb(56 189 248 / 0.18);
+    }
   }
 </style>

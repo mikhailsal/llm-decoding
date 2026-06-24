@@ -919,8 +919,20 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
         return build_backend(args.backend, cfg, model=model)
 
     def model_lister() -> list[S.ServerModelEntry]:
+        import os as _os
+
+        def _size(model_id: str) -> int | None:
+            # GGUF ids are real file paths -> expose on-disk size for the
+            # UI's size-proportional load bar; HF repo ids stay None.
+            try:
+                if _os.path.isfile(model_id):
+                    return _os.path.getsize(model_id)
+            except OSError:
+                pass
+            return None
+
         return [
-            S.ServerModelEntry(id=i, label=label)
+            S.ServerModelEntry(id=i, label=label, size_bytes=_size(i))
             for i, label in list_available_models(args.backend, cfg)
         ]
 

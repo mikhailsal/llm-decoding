@@ -148,6 +148,14 @@ export interface ModelsResponse {
   fetched_at: number | null;
   cache_ttl_s: number;
   note: string;
+  /**
+   * Optional ``id -> on-disk size in bytes`` map. Populated only for
+   * ``remote`` dsbx-serve hosts whose catalogue reports per-model sizes
+   * (every GGUF). The reload control uses it to draw a determinate,
+   * size-proportional load-progress bar instead of an indeterminate
+   * flicker. Absent / empty for cloud / local / HF backends.
+   */
+  model_sizes?: Record<string, number>;
 }
 
 export interface TokenCandidate {

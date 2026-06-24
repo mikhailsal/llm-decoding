@@ -165,10 +165,17 @@ class ServerModelEntry(BaseModel):
     For ``llamacpp-py`` the ``id`` is the absolute GGUF path and ``label``
     its filename stem; for ``hf`` both are the HuggingFace model id. The
     ``id`` is what the client POSTs back to ``/v1/reload``.
+
+    ``size_bytes`` is the on-disk size of the model file when it is a real
+    local file (every GGUF), and ``None`` otherwise (HF repo ids, whose
+    size isn't known without a network call). The web UI uses it to draw a
+    determinate, size-proportional load-progress bar instead of an
+    indeterminate flicker.
     """
 
     id: str
     label: str
+    size_bytes: int | None = None
 
 
 class ServerModelList(BaseModel):

@@ -219,6 +219,7 @@ def make_web_app(
             fetched_at=result.fetched_at,
             cache_ttl_s=float(MODEL_LIST_TTL_S),
             note=result.note,
+            model_sizes=dict(getattr(result, "model_sizes", {}) or {}),
         )
 
     # ------------------------------------------------- remote model control

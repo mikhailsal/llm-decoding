@@ -26,32 +26,69 @@
 
   let status = $state<RemoteStatus | null>(null);
   let models = $state<string[]>([]);
+  // ``id -> on-disk size in bytes`` from the host catalogue (GGUF only).
+  // Drives the size-proportional determinate load bar; empty -> fall back
+  // to the indeterminate animation.
+  let modelSizes = $state<Record<string, number>>({});
   let selected = $state<string>('');
   let modelsNote = $state('');
   let busy = $state(false);
   let error = $state<string | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  // Live elapsed-seconds counter shown next to the progress bar while a
-  // load is in flight. Large GGUF models take tens of seconds to mmap +
-  // warm up and the host gives us no percentage, so an honest "still
-  // working, Ns elapsed" indeterminate bar beats a frozen-looking UI.
-  let elapsedSec = $state(0);
+  // Live elapsed-milliseconds counter while a load is in flight. Large
+  // GGUF models take tens of seconds to mmap + warm up; we drive a
+  // determinate progress bar from this plus a size-based estimate, and
+  // display the floor in whole seconds.
+  let elapsedMs = $state(0);
 
   const slotState = $derived<RemoteSlotState>(status?.state ?? 'unknown');
+
+  // Rough throughput used to turn a model's byte size into an estimated
+  // load time. Calibrated against observed dsbx-host-py loads (a ~5.5 GB
+  // Q4_K_M model warms up in ~40 s from a Linux-mounted drive ≈ 140 MB/s);
+  // we round up to 180 MB/s so the estimate runs slightly SHORT and the
+  // bar pins near the end ("finalizing") rather than racing ahead and
+  // claiming near-done while the model is still loading.
+  const LOAD_BYTES_PER_SEC = 180 * 1024 * 1024;
+
+  // Estimated load seconds for the model currently being (re)loaded. 0
+  // when the size is unknown -> the template falls back to indeterminate.
+  const estimateSec = $derived.by<number>(() => {
+    const sz = modelSizes[selected];
+    if (!sz || sz <= 0) return 0;
+    return Math.max(3, sz / LOAD_BYTES_PER_SEC);
+  });
+
+  // Determinate fill percent, capped at 95% until the slot actually
+  // reports ``ready`` (we never claim 100% before the host confirms it).
+  const loadPct = $derived<number>(
+    estimateSec > 0
+      ? Math.min(95, (elapsedMs / 1000 / estimateSec) * 95)
+      : 0
+  );
+
+  const elapsedSec = $derived<number>(Math.floor(elapsedMs / 1000));
+
+  function fmtSize(bytes: number | undefined): string {
+    if (!bytes || bytes <= 0) return '';
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return `${gb.toFixed(1)} GB`;
+    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  }
 
   // Tick the elapsed counter for as long as a load is busy. The effect
   // re-runs when ``busy`` flips; its cleanup clears the interval so we
   // never leak a timer when the load finishes or the component unmounts.
   $effect(() => {
     if (!busy) {
-      elapsedSec = 0;
+      elapsedMs = 0;
       return;
     }
     const start = Date.now();
-    elapsedSec = 0;
+    elapsedMs = 0;
     const t = setInterval(() => {
-      elapsedSec = Math.floor((Date.now() - start) / 1000);
-    }, 250);
+      elapsedMs = Date.now() - start;
+    }, 100);
     return () => clearInterval(t);
   });
 
@@ -96,6 +133,7 @@
         `/api/v1/models/${encodeURIComponent(backend.name)}`
       );
       models = resp.models ?? [];
+      modelSizes = resp.model_sizes ?? {};
       modelsNote = resp.note ?? '';
       if (!selected && models.length > 0) selected = models[0];
     } catch (exc) {
@@ -186,7 +224,9 @@
           <option value="">{modelsNote || 'no models found on host'}</option>
         {:else}
           {#each models as m}
-            <option value={m} title={m}>{labelFor(m)}</option>
+            <option value={m} title={m}>
+              {labelFor(m)}{modelSizes[m] ? ` · ${fmtSize(modelSizes[m])}` : ''}
+            </option>
           {/each}
         {/if}
       </select>
@@ -204,12 +244,24 @@
   {#if busy}
     <div class="mt-2" role="status" aria-live="polite">
       <div class="progress-track">
-        <div class="progress-bar"></div>
+        {#if estimateSec > 0}
+          <div class="progress-bar-determinate" style={`width: ${loadPct}%`}></div>
+        {:else}
+          <div class="progress-bar"></div>
+        {/if}
       </div>
-      <p class="text-[10px] text-slate-400 mt-1 font-mono">
-        loading model… {elapsedSec}s — large models can take a while to
-        warm up; the interface is not frozen.
-      </p>
+      {#if estimateSec > 0}
+        <p class="text-[10px] text-slate-400 mt-1 font-mono">
+          loading {fmtSize(modelSizes[selected])} model… {elapsedSec}s /
+          ~{Math.round(estimateSec)}s est ({Math.round(loadPct)}%) — estimate
+          from file size; the interface is not frozen.
+        </p>
+      {:else}
+        <p class="text-[10px] text-slate-400 mt-1 font-mono">
+          loading model… {elapsedSec}s — large models can take a while to
+          warm up; the interface is not frozen.
+        </p>
+      {/if}
     </div>
   {/if}
 
@@ -268,6 +320,15 @@
     100% {
       transform: translateX(310%);
     }
+  }
+  /* Determinate progress: width is driven by elapsed/estimate, so the bar
+     fills proportionally to the model's file size. Capped at 95% until the
+     host confirms `ready` (we never claim 100% before it's actually up). */
+  .progress-bar-determinate {
+    height: 100%;
+    border-radius: 9999px;
+    background: rgb(56 189 248);
+    transition: width 0.2s linear;
   }
   @media (prefers-reduced-motion: reduce) {
     .progress-bar {

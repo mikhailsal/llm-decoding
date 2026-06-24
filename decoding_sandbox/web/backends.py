@@ -32,7 +32,7 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator, Literal
 
 from decoding_sandbox.core.backend import Backend
@@ -65,6 +65,12 @@ class ModelListEntry:
     source: ModelListSource
     fetched_at: float
     note: str = ""
+    # Optional ``id -> on-disk size in bytes`` map, populated only for
+    # ``remote`` dsbx-serve hosts whose ``/v1/models`` catalogue reports
+    # per-model ``size_bytes`` (every GGUF). Lets the browser draw a
+    # determinate, size-proportional load-progress bar. Empty for cloud /
+    # local / HF backends where a file size isn't known.
+    model_sizes: dict[str, int] = field(default_factory=dict)
 
 
 log = logging.getLogger("decoding_sandbox.web.backends")
@@ -466,6 +472,7 @@ class BackendRegistry:
                     source="cached",
                     fetched_at=cached.fetched_at,
                     note=cached.note,
+                    model_sizes=dict(cached.model_sizes),
                 )
 
         if entry.family == "remote":
@@ -478,11 +485,18 @@ class BackendRegistry:
                 backend = self.ensure_loaded(name)
                 raw = backend.list_server_models()  # type: ignore[attr-defined]
                 models = [str(m["id"]) for m in raw if m.get("id")]
+                sizes: dict[str, int] = {}
+                for m in raw:
+                    mid = m.get("id")
+                    sz = m.get("size_bytes")
+                    if mid and isinstance(sz, (int, float)) and sz > 0:
+                        sizes[str(mid)] = int(sz)
                 result = ModelListEntry(
                     models=models,
                     source="live",
                     fetched_at=now,
                     note=f"{len(models)} available on the remote host",
+                    model_sizes=sizes,
                 )
             except Exception as exc:  # noqa: BLE001
                 _loaded, suggested, _ = self._public_model_info(entry)
@@ -501,6 +515,7 @@ class BackendRegistry:
                 source=result.source,
                 fetched_at=result.fetched_at,
                 note=result.note,
+                model_sizes=dict(result.model_sizes),
             )
 
         if entry.family != "cloud":
