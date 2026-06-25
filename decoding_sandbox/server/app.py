@@ -146,7 +146,27 @@ class BackendSlot:
             self.loaded_model = model or _detect_loaded_model(new_backend)
             self.error = None
 
+    def unload(self) -> None:
+        """Unload the current model, leaving the slot empty."""
+        with self._state_lock:
+            if self.state == "loading":
+                raise _AlreadyLoading()
+            self.state = "empty"
+            self.loaded_model = None
+            self.error = None
+        
+        with self.lock:
+            old = self.backend
+            self.backend = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("dsbx server: error closing backend on unload: %s", exc)
+
     def close(self) -> None:
+        with self._state_lock:
+            self.state = "empty"
         with self.lock:
             old = self.backend
             self.backend = None
@@ -277,6 +297,17 @@ def make_app(
     def reload(req: S.ReloadRequest) -> S.ServerStatus:
         try:
             slot.start_load(req.model)
+        except _AlreadyLoading as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="a model load is already in progress; poll /v1/status",
+            ) from exc
+        return slot.status()
+
+    @app.post("/v1/unload", response_model=S.ServerStatus)
+    def unload() -> S.ServerStatus:
+        try:
+            slot.unload()
         except _AlreadyLoading as exc:
             raise HTTPException(
                 status_code=409,

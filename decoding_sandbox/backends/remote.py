@@ -193,6 +193,10 @@ class RemoteBackend(Backend):
         """
         return self._post("/v1/reload", {"model": model})
 
+    def unload_model(self) -> dict:
+        """Ask the host to unload the current model; returns the new status dict."""
+        return self._post("/v1/unload", {})
+
     # ------------------------------------------------------------- HTTP
     def _get(self, path: str) -> dict:
         try:

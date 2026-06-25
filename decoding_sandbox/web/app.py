@@ -291,6 +291,33 @@ def make_web_app(
             error=status.get("error"),
         )
 
+    @app.post(
+        "/api/v1/backends/{name}/unload",
+        response_model=S.RemoteStatusResponse,
+        tags=["meta"],
+        dependencies=[Depends(require_bearer)],
+    )
+    def remote_unload(name: str) -> S.RemoteStatusResponse:
+        """Ask a remote dsbx-serve host to unload its current model."""
+        try:
+            status = registry.unload_remote(name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            log.warning("dsbx-web: remote unload for %r failed: %s", name, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"could not reach the remote host to unload ({exc.__class__.__name__})",
+            ) from exc
+        return S.RemoteStatusResponse(
+            backend=name,
+            state=str(status.get("state", "unknown")),
+            loaded_model=status.get("loaded_model"),
+            error=status.get("error"),
+        )
+
     # --------------------------------------------------- tokenize / detok
     @app.post(
         "/api/v1/tokenize",

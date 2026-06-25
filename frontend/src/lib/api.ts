@@ -140,6 +140,14 @@ export function reloadRemoteModel(
   );
 }
 
+/** Ask a remote host to unload its current model. */
+export function unloadRemoteModel(name: string): Promise<RemoteStatus> {
+  return apiFetch<RemoteStatus>(
+    `/api/v1/backends/${encodeURIComponent(name)}/unload`,
+    { method: 'POST' }
+  );
+}
+
 // --------------------------------------------------------------------------- //
 // Upstream-request log API
 // --------------------------------------------------------------------------- //

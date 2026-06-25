@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { apiFetch, ApiError, getRemoteStatus, reloadRemoteModel } from '$lib/api';
+  import { apiFetch, ApiError, getRemoteStatus, reloadRemoteModel, unloadRemoteModel } from '$lib/api';
   import { info } from '$lib/stores/info';
   import type { BackendInfo, ModelsResponse, RemoteStatus, RemoteSlotState } from '$lib/types';
 
@@ -186,6 +186,20 @@
     }
   }
 
+  async function doUnload() {
+    busy = true;
+    error = null;
+    try {
+      status = await unloadRemoteModel(backend.name);
+      busy = false;
+      await info.refresh();
+      if (status.state === 'empty') onReady?.(null);
+    } catch (exc) {
+      busy = false;
+      error = exc instanceof ApiError ? exc.message : String(exc);
+    }
+  }
+
   onMount(async () => {
     await Promise.all([refreshStatus(), loadModels()]);
     if (status?.state === 'loading') {
@@ -234,14 +248,24 @@
         {/if}
       </select>
     </div>
-    <button
-      class="btn btn-primary text-sm whitespace-nowrap"
-      onclick={doReload}
-      disabled={busy || !selected}
-      title="(Re)load the selected model on the remote host"
-    >
-      {busy ? 'loading…' : slotState === 'ready' ? 'Reload' : 'Load'}
-    </button>
+    <div class="flex gap-2">
+      <button
+        class="btn btn-secondary text-sm whitespace-nowrap"
+        onclick={doUnload}
+        disabled={busy || slotState === 'empty'}
+        title="Unload the current model"
+      >
+        Unload
+      </button>
+      <button
+        class="btn btn-primary text-sm whitespace-nowrap"
+        onclick={doReload}
+        disabled={busy || !selected}
+        title="Load the selected model on the remote host"
+      >
+        {busy ? 'loading…' : 'Load'}
+      </button>
+    </div>
   </div>
 
   {#if busy}

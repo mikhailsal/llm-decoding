@@ -755,6 +755,16 @@ class BackendRegistry:
         self.invalidate_models_cache(name)
         return status
 
+    def unload_remote(self, name: str) -> dict:
+        """Ask the remote host to unload the current model; returns the new status."""
+        entry = self.get(name)
+        if entry.family != "remote":
+            raise LookupError(f"backend {name!r} is not a remote dsbx server")
+        backend = self.ensure_loaded(name)
+        status = backend.unload_model()  # type: ignore[attr-defined]
+        self.invalidate_models_cache(name)
+        return status
+
     # ---------------------------------------------------------- lifecycle
     def close_all(self) -> None:
         """Close every backend we ever loaded.
