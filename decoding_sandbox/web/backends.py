@@ -33,7 +33,10 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Iterator, Literal
+from typing import Iterator, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decoding_sandbox.server.schemas import WireCapabilities
 
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.config import Config
@@ -232,7 +235,6 @@ class BackendRegistry:
         secret -- :func:`tests.test_web_info` enforces this.
         """
         from decoding_sandbox.server.schemas import (
-            WireCapabilities,
             capabilities_to_wire,
         )
 
@@ -722,20 +724,20 @@ class BackendRegistry:
         """Proxy the remote host's live slot status.
 
         Refreshes the cached ``RemoteBackend``'s capability envelope when
-        the upstream reports ``ready`` so a subsequent ``/api/v1/info``
-        reflects the freshly-loaded model. Raises ``LookupError`` for a
-        non-remote backend (the caller maps it to a 400).
+        the upstream reports ``ready``, ``empty``, or ``error`` so a subsequent
+        ``/api/v1/info`` reflects the freshly-loaded/unloaded model. Raises
+        ``LookupError`` for a non-remote backend (the caller maps it to a 400).
         """
         entry = self.get(name)
         if entry.family != "remote":
             raise LookupError(f"backend {name!r} is not a remote dsbx server")
         backend = self.ensure_loaded(name)
         status = backend.server_status()  # type: ignore[attr-defined]
-        if status.get("state") == "ready":
+        if status.get("state") in ("ready", "empty", "error"):
             try:
                 backend.refresh_info()  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001
-                log.warning("dsbx-web: refresh_info after ready failed: %s", exc)
+                log.warning("dsbx-web: refresh_info after status change failed: %s", exc)
         return status
 
     def reload_remote(self, name: str, model: str | None) -> dict:
@@ -762,6 +764,10 @@ class BackendRegistry:
             raise LookupError(f"backend {name!r} is not a remote dsbx server")
         backend = self.ensure_loaded(name)
         status = backend.unload_model()  # type: ignore[attr-defined]
+        try:
+            backend.refresh_info()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("dsbx-web: refresh_info after unload failed: %s", exc)
         self.invalidate_models_cache(name)
         return status
 

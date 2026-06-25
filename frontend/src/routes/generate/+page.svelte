@@ -1069,7 +1069,7 @@
           backend={backendInfo}
           compact={true}
           onReady={(m) => {
-            if (m) model = m;
+            model = m ?? '';
             maybeClearForSwitch();
           }}
         />

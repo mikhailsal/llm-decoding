@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.types import StepResult, TokenCandidate
 from decoding_sandbox.server import schemas as S
-from decoding_sandbox.server.app import make_app
+from decoding_sandbox.server.app import BackendSlot, make_app
 from tests.fakes import FakeBackend, cand
 
 
@@ -550,6 +550,20 @@ def test_eager_backend_still_serves_and_reload_swaps() -> None:
         assert st["loaded_model"] == "second.gguf"
     # The previous backend was closed during the swap.
     assert first.closed is True
+
+
+def test_unload_closes_backend_and_marks_slot_empty() -> None:
+    backend = _make_fake()
+    backend.model_path = "loaded.gguf"
+    slot = BackendSlot(backend_kind="llamacpp-py", builder=lambda _m: _make_fake())
+    slot.adopt(backend, "loaded.gguf")
+
+    assert slot.status().state == "ready"
+    slot.unload()
+    status = slot.status()
+    assert status.state == "empty"
+    assert status.loaded_model is None
+    assert backend.closed is True
 
 
 def test_generate_stream_409_when_no_model() -> None:

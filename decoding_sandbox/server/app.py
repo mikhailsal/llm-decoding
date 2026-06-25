@@ -151,10 +151,7 @@ class BackendSlot:
         with self._state_lock:
             if self.state == "loading":
                 raise _AlreadyLoading()
-            self.state = "empty"
-            self.loaded_model = None
-            self.error = None
-        
+
         with self.lock:
             old = self.backend
             self.backend = None
@@ -163,6 +160,11 @@ class BackendSlot:
                 old.close()
             except Exception as exc:  # noqa: BLE001
                 log.warning("dsbx server: error closing backend on unload: %s", exc)
+
+        with self._state_lock:
+            self.state = "empty"
+            self.loaded_model = None
+            self.error = None
 
     def close(self) -> None:
         with self._state_lock:

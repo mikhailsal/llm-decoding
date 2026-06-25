@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { apiFetch, ApiError, getRemoteStatus, reloadRemoteModel, unloadRemoteModel } from '$lib/api';
   import { info } from '$lib/stores/info';
   import type { BackendInfo, ModelsResponse, RemoteStatus, RemoteSlotState } from '$lib/types';
@@ -118,12 +118,23 @@
     return 'unknown';
   }
 
+  function reconcileLoadedModel() {
+    const loaded = status?.loaded_model;
+    if (loaded && !models.includes(loaded)) {
+      models = [loaded, ...models];
+    }
+    if (loaded && (!selected || !models.includes(selected))) {
+      selected = loaded;
+    } else if (!selected && models.length > 0) {
+      selected = models[0];
+    }
+  }
+
   async function refreshStatus(): Promise<RemoteSlotState> {
     try {
       status = await getRemoteStatus(backend.name);
       error = null;
-      // Default the picker to whatever's loaded, once, if untouched.
-      if (!selected && status.loaded_model) selected = status.loaded_model;
+      reconcileLoadedModel();
     } catch (exc) {
       error = exc instanceof ApiError ? exc.message : String(exc);
     }
@@ -138,7 +149,7 @@
       models = resp.models ?? [];
       modelSizes = resp.model_sizes ?? {};
       modelsNote = resp.note ?? '';
-      if (!selected && models.length > 0) selected = models[0];
+      reconcileLoadedModel();
     } catch (exc) {
       modelsNote = exc instanceof ApiError ? exc.message : String(exc);
     }
@@ -178,6 +189,7 @@
       } else {
         busy = false;
         await info.refresh();
+        reconcileLoadedModel();
         if (status.state === 'ready') onReady?.(status.loaded_model ?? null);
       }
     } catch (exc) {
@@ -193,6 +205,8 @@
       status = await unloadRemoteModel(backend.name);
       busy = false;
       await info.refresh();
+      await loadModels();
+      reconcileLoadedModel();
       if (status.state === 'empty') onReady?.(null);
     } catch (exc) {
       busy = false;
@@ -200,7 +214,7 @@
     }
   }
 
-  onMount(async () => {
+  async function refreshAll() {
     await Promise.all([refreshStatus(), loadModels()]);
     if (status?.state === 'loading') {
       busy = true;
@@ -208,6 +222,20 @@
     } else if (status?.state === 'ready') {
       onReady?.(status.loaded_model ?? null);
     }
+  }
+
+  $effect(() => {
+    const name = backend.name;
+    stopPolling();
+    status = null;
+    models = [];
+    modelSizes = {};
+    selected = '';
+    modelsNote = '';
+    error = null;
+    busy = false;
+    void name;
+    void refreshAll();
   });
 
   onDestroy(stopPolling);
