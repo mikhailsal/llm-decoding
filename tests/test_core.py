@@ -388,7 +388,7 @@ def test_generate_propagates_watch_ids_into_step_watched() -> None:
     )
 
     steps = list(
-        generate(backend, "P", Sampler("greedy"), max_tokens=2, watch_ids=[7])
+        generate(backend, "P", Sampler("greedy", temperature=0.0), max_tokens=2, watch_ids=[7])
     )
 
     assert len(steps) == 2

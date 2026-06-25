@@ -239,6 +239,10 @@ the server has no way to ingest arbitrary client code.
   to start with an empty slot and load a model on demand from the web UI.
   Requires `pip install -e ".[server]"`. See
   [Running the server on `dsbx-host`](#running-the-server-on-dsbx-host).
+- `dsbx web` -- run the HTTP web middleware that hosts the browser-facing API.
+  Hides backend keys and URLs behind a single bearer token and static-serves
+  the pre-built frontend. Requires `pip install -e ".[web]"`. See
+  [Web UI](#web-ui).
 - `dsbx session` -- convenience REPL with command history and a single
   loaded backend. Meta commands: `:caps`, `:backend NAME [MODEL]`
   (swaps the loaded model), `:timing on|off`, `:history`, `:help`,
