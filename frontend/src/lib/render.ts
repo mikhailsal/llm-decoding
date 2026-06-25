@@ -123,6 +123,45 @@ export function renderTokenPlain(text: string, isSpecial = false): string {
     .join('');
 }
 
+/**
+ * Order candidates for display by their *raw* (full-precision) logprob,
+ * highest first, with the chosen token winning exact ties.
+ *
+ * Why this exists: backends return top-K candidates with a ``rank`` field,
+ * but when two tokens share the same logprob (or the same value once
+ * rounded for display) the chosen token -- the one greedy's argmax
+ * actually picked -- can end up rendered at index >= 1, which reads as
+ * "greedy picked a non-top logit". Sorting on the raw logprob and putting
+ * the chosen id first on ties guarantees the selected token is always the
+ * top row, and defends against any upstream that returns ``top_logprobs``
+ * unordered (e.g. server-side native streaming).
+ *
+ * Stable: equal-logprob, non-chosen candidates keep their original order.
+ */
+export function rankCandidates<T extends { logprob: number | null; token_id: number }>(
+  cands: readonly T[] | null | undefined,
+  chosenId?: number | null
+): T[] {
+  if (!cands || cands.length === 0) return [];
+  const lp = (c: T): number =>
+    c.logprob !== null && c.logprob !== undefined && Number.isFinite(c.logprob)
+      ? c.logprob
+      : Number.NEGATIVE_INFINITY;
+  return cands
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => {
+      const d = lp(b.c) - lp(a.c);
+      if (d !== 0) return d;
+      if (chosenId !== null && chosenId !== undefined) {
+        const ac = a.c.token_id === chosenId;
+        const bc = b.c.token_id === chosenId;
+        if (ac !== bc) return ac ? -1 : 1;
+      }
+      return a.i - b.i;
+    })
+    .map((x) => x.c);
+}
+
 /** Format a probability for tables -- mirrors ``cli/render.fmt_prob``. */
 export function fmtProb(p: number | null | undefined): string {
   if (p === null || p === undefined || !Number.isFinite(p)) return '?';

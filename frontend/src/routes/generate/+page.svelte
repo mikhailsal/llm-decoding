@@ -13,7 +13,7 @@
   import Toast from '$lib/components/Toast.svelte';
   import { apiStream } from '$lib/api';
   import { info } from '$lib/stores/info';
-  import { probFromLogprob, tokenBackgroundClass, formatProbPct } from '$lib/render';
+  import { probFromLogprob, tokenBackgroundClass, formatProbPct, rankCandidates } from '$lib/render';
   import type {
     GenStep,
     StepResult,
@@ -259,6 +259,17 @@
    *  exact step row. */
   function findStepInList(step: number): void {
     const el = document.getElementById(`gen-step-${step}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('row-flash');
+    window.setTimeout(() => el.classList.remove('row-flash'), 1600);
+  }
+
+  /** "find in list" for a PROMPT token: scroll to its row in the
+   *  prompt-logits table (the prompt analogue of findStepInList). */
+  function findPromptStepInList(position: number | null | undefined): void {
+    if (position === null || position === undefined) return;
+    const el = document.getElementById(`prompt-step-${position}`);
     if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.classList.add('row-flash');
@@ -1533,14 +1544,20 @@
               showMarkers={showMarkers}
               bgClass=""
               title="First prompt token · INPUT only, not predicted. Autoregressive models compute P(next | prior tokens); position 0 has no prior, so the model has nothing to predict from (unless you prepend a BOS marker — currently not done on this backend)."
-            />{/if}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}{@const isUnscoredFirst = (!ps.candidates || ps.candidates.length === 0) && (lp === null || !Number.isFinite(lp))}<TokenInline
+            />{/if}{#each promptPrefixSteps as ps}{@const lp = ps.chosen?.logprob ?? null}{@const p = probFromLogprob(lp)}{@const isUnscoredFirst = (!ps.candidates || ps.candidates.length === 0) && (lp === null || !Number.isFinite(lp))}<CompletionToken
               text={ps.chosen?.text ?? ''}
               isSpecial={ps.chosen?.is_special ?? false}
+              tokenId={ps.chosen?.token_id ?? null}
               showMarkers={showMarkers}
               bgClass={isUnscoredFirst ? '' : tokenBackgroundClass(p)}
-              title={isUnscoredFirst
+              candidates={ps.candidates}
+              probTitle={isUnscoredFirst
                 ? 'First prompt token · INPUT only, not predicted. The upstream returned no logprob for position 0 because autoregressive models have nothing to predict from before the first token.'
                 : `prompt · p=${p !== null ? ((p ?? 0) * 100).toFixed(2) + '%' : '?'}`}
+              onWatch={addToWatchToken}
+              onPrompt={addTokenToPrompt}
+              onFind={() => findPromptStepInList(ps.position)}
+              onBias={logitBiasSupported ? (id) => addToBias(id) : undefined}
             />{/each}{:else}<span class="text-slate-400">{runningPromptDisplay}</span>{/if}{#each pickedTexts as pt, i}{@const pp = pickedProb(i)}<TokenInline
             text={pt}
             showMarkers={showMarkers}
@@ -1881,6 +1898,7 @@
               {@const isPrependedSeedRow =
                 promptScorePrependCount > 0 && s.position < promptScorePrependCount}
               <tr
+                id={`prompt-step-${s.position}`}
                 class="border-b border-slate-800/60 {isBosConditioned
                   ? 'border-l-2 border-l-emerald-500/60'
                   : isPrependedSeedRow
@@ -1938,7 +1956,7 @@
                     >no model prediction · autoregressive model needs prior context (BOS)</span>
                   {:else}
                     <div class="flex flex-col gap-0.5">
-                      {#each s.candidates.slice(0, alternatives) as c}
+                      {#each rankCandidates(s.candidates, s.chosen?.token_id).slice(0, alternatives) as c}
                         <div class="flex items-center gap-2">
                           {@render biasable(c.token_id, c.text, c.is_special, 'font-mono text-xs')}
                           <span
@@ -2010,7 +2028,8 @@
           </thead>
           <tbody>
             {#each steps as s}
-              {@const chosenInTopK = s.step_result.candidates
+              {@const rankedCands = rankCandidates(s.step_result.candidates, s.decision.token_id)}
+              {@const chosenInTopK = rankedCands
                 .slice(0, alternatives)
                 .some((c) => c.token_id === s.decision.token_id)}
               {@const chosenCand = s.step_result.chosen}
@@ -2077,7 +2096,7 @@
                         >← chosen · outside top-{alternatives}</span>
                       </div>
                     {/if}
-                    {#each s.step_result.candidates.slice(0, alternatives) as c}
+                    {#each rankedCands.slice(0, alternatives) as c}
                       {@const eligible = (s.decision.kept ?? []).some((k) => k.token_id === c.token_id)}
                       {@const isChosen = c.token_id === s.decision.token_id}
                       <div class="flex items-center gap-2">

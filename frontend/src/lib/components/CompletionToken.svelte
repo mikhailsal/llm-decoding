@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { renderTokenSegments, formatProbPct, type TokenSegment } from '$lib/render';
+  import { renderTokenSegments, formatProbPct, rankCandidates, type TokenSegment } from '$lib/render';
   import type { TokenCandidate } from '$lib/types';
 
   /**
@@ -20,6 +20,13 @@
    *     token's row in the steps table below) when available. The other
    *     actions live in the hover popover, so a plain click is a fast path
    *     to the most common "where did this come from" lookup.
+   *
+   * WHITESPACE INVARIANT: ``.ct-root`` inherits ``white-space: pre-wrap``
+   * from the running-completion container, so ANY source whitespace
+   * between the inner token ``<span>`` and the ``{#if popoverOpen}`` block
+   * (or between ``{/if}`` and the root ``</span>``) renders as a literal,
+   * preserved space AFTER every token -- a visible gap between adjacent
+   * tokens. Keep those inline siblings strictly flush (no newlines).
    */
   interface Props {
     text: string;
@@ -74,7 +81,13 @@
           : [{ kind: 'plain', text }]
   );
 
-  const topAlts = $derived<TokenCandidate[]>((candidates ?? []).slice(0, 8));
+  // Sort by raw logprob (chosen-first on ties) so the selected token is
+  // always the top row -- see rankCandidates. Show the position-based rank
+  // (loop index) rather than the backend ``rank`` so the numbering matches
+  // this re-sorted order.
+  const topAlts = $derived<TokenCandidate[]>(
+    rankCandidates(candidates, realId).slice(0, 8)
+  );
   const hasAlts = $derived<boolean>(topAlts.length > 0);
   const hasActions = $derived<boolean>(
     !!onPrompt || (!!onWatch && realId !== null) || !!onFind || (!!onBias && realId !== null)
@@ -139,16 +152,13 @@
       }
     }}
     title={probTitle}
-  >{#each segments as seg}<span class={segmentClass(seg.kind)}>{seg.text}</span>{/each}</span>
-
-  {#if popoverOpen}
-    <span class="ct-popover">
+  >{#each segments as seg}<span class={segmentClass(seg.kind)}>{seg.text}</span>{/each}</span>{#if popoverOpen}<span class="ct-popover">
       {#if hasAlts}
         <span class="ct-section-label">alternatives</span>
         <span class="ct-alts">
-          {#each topAlts as c}
+          {#each topAlts as c, ci}
             <span class="ct-alt" class:ct-alt-chosen={realId !== null && c.token_id === realId}>
-              <span class="ct-alt-rank">{c.rank + 1}</span>
+              <span class="ct-alt-rank">{ci + 1}</span>
               <span class="ct-alt-text font-mono">{c.text === '' ? '<empty>' : c.text}</span>
               <span class="ct-alt-prob">{formatProbPct(c.logprob)}</span>
             </span>
@@ -172,9 +182,7 @@
           {/if}
         </span>
       {/if}
-    </span>
-  {/if}
-</span>
+    </span>{/if}</span>
 
 <style>
   .ct-root {
