@@ -4,7 +4,7 @@ DSBX_DEST ?= llm-decoding
 REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
 
 .PHONY: help sync doctor probe doctor-local probe-local serve-py serve-hf fmt \
-        web-dev web-build web-test
+        web-dev web-build web-prod web-test
 
 help:
 	@echo "Targets:"
@@ -19,6 +19,7 @@ help:
 	@echo "Web UI (middleware on this machine + SvelteKit frontend):"
 	@echo "  web-dev       run middleware on :8765 with frontend dev server on :5173"
 	@echo "  web-build     build the SvelteKit bundle into frontend/build/"
+	@echo "  web-prod      run middleware on :8765 serving pre-built frontend from build/"
 	@echo "  web-test      run pytest -k web and pnpm test (frontend unit tests)"
 
 sync:
@@ -62,6 +63,11 @@ web-dev:
 	  trap "kill $$!" INT TERM EXIT; \
 	  cd .. ; \
 	  dsbx web --host 127.0.0.1 --port 8765'
+
+web-prod:
+	@bash -c 'set -eo pipefail; \
+	  test -d frontend/build || (cd frontend && pnpm install && pnpm build); \
+	  dsbx web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build'
 
 web-test:
 	pytest tests -k web

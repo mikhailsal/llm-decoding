@@ -625,20 +625,18 @@ export DSBX_WEB_TOKEN="$(openssl rand -hex 32)"
 # talk to (the client's CLI already does this with `dsbx doctor`):
 make serve-py    # starts `dsbx serve --backend llamacpp-py` on dsbx-host
 
-# Build the frontend bundle (output: frontend/build/):
-make web-build
-
-# Run the middleware (this also static-serves the bundle at /):
-dsbx web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build
+# Run in production mode (builds the frontend if needed and serves it at http://localhost:8765):
+make web-prod
 
 # Open http://localhost:8765 in a browser, paste the token, log in.
 ```
 
-For frontend development with hot reload, use the dev-mode launcher:
+For frontend development (Vite dev server with hot reload on :5173, proxied to API on :8765):
 
 ```bash
 make web-dev   # runs FastAPI on :8765 and `pnpm dev` on :5173
 ```
+Open http://localhost:5173 in the browser (changes to frontend files will reflect instantly).
 
 ### What is and isn't exposed
 
