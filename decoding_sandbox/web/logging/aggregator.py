@@ -119,7 +119,7 @@ def _parse_sse_frames(raw: bytes) -> list[Any]:
         return []
     try:
         text = raw.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001 -- defensive; decode with errors=replace shouldn't raise
+    except Exception:
         return []
 
     frames: list[Any] = []
@@ -239,12 +239,8 @@ def _merge_openai_stream(frames: list[Any]) -> AggregatedStream:
         if isinstance(usage, dict):
             usage_data = usage
 
-    is_text_completion = (
-        str(extra_fields.get("object", "")).lower() == "text_completion"
-        or any(
-            isinstance(c, dict) and "text" in c and "content" not in c
-            for c in merged_choices.values()
-        )
+    is_text_completion = str(extra_fields.get("object", "")).lower() == "text_completion" or any(
+        isinstance(c, dict) and "text" in c and "content" not in c for c in merged_choices.values()
     )
     if is_text_completion:
         choices_out = _build_text_choices(merged_choices)
@@ -353,7 +349,9 @@ def _merge_logprobs(target: dict[str, Any], source: dict[str, Any]) -> None:
             target[k] = v
 
 
-def _merge_delta(merged_choices: dict[int, dict[str, Any]], idx: int, delta: dict[str, Any]) -> None:
+def _merge_delta(
+    merged_choices: dict[int, dict[str, Any]], idx: int, delta: dict[str, Any]
+) -> None:
     merged = merged_choices.setdefault(idx, {})
     for key, value in delta.items():
         if value is None:
@@ -444,7 +442,8 @@ def _merge_dsbx_stream(frames: list[Any]) -> AggregatedStream:
             # the frame (no nested ``usage`` key on the dsbx wire).
             usage_block = {k: v for k, v in frame.items() if k != "event"}
         elif kind == "done":
-            out.stop_reason = frame.get("stop_reason") if isinstance(frame.get("stop_reason"), str) else out.stop_reason
+            sr = frame.get("stop_reason")
+            out.stop_reason = sr if isinstance(sr, str) else out.stop_reason
             err = frame.get("error")
             if isinstance(err, str) and err:
                 out.error_message = err

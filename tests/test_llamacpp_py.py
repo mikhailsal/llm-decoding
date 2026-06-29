@@ -82,7 +82,7 @@ class _FakeLlama:
         return self._vocab
 
     def tokenize(self, data: bytes, add_bos: bool = True, special: bool = False) -> list[int]:
-        return [b for b in data]
+        return list(data)
 
     def detokenize(self, ids: list[int], special: bool = False) -> bytes:
         return bytes(int(i) & 0xFF for i in ids)
@@ -299,6 +299,7 @@ def test_score_prompt_raises_when_logits_all_false(monkeypatch, tmp_path) -> Non
 
 def test_log_softmax_helper_normalizes_rows() -> None:
     import numpy as np
+
     from decoding_sandbox.backends.llamacpp_py import _log_softmax
 
     arr = np.array([[1.0, 2.0, 3.0], [10.0, 0.0, 0.0]], dtype=np.float32)
@@ -491,9 +492,7 @@ def test_capabilities_drop_bos_when_metadata_says_add_bos_token_false(
     assert b.capabilities.bos_token_ids == ()
 
 
-def test_capabilities_drop_bos_when_metadata_omits_bos_token_id(
-    monkeypatch, tmp_path
-) -> None:
+def test_capabilities_drop_bos_when_metadata_omits_bos_token_id(monkeypatch, tmp_path) -> None:
     """No ``tokenizer.ggml.bos_token_id`` key -> empty tuple.
 
     Same shape as above but the model author left the key off entirely
@@ -523,9 +522,7 @@ def test_capabilities_drop_bos_when_metadata_omits_bos_token_id(
     assert b.capabilities.bos_token_ids == ()
 
 
-def test_capabilities_expose_bos_when_metadata_declares_real_one(
-    monkeypatch, tmp_path
-) -> None:
+def test_capabilities_expose_bos_when_metadata_declares_real_one(monkeypatch, tmp_path) -> None:
     """add_bos_token=true + bos_token_id present -> tuple carries the id.
 
     The happy path: Llama-3 style models declare a real BOS in
@@ -619,9 +616,7 @@ def test_piece_renders_special_token_name(monkeypatch, tmp_path) -> None:
     fake_gguf.write_bytes(b"")
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
-    b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
-    )
+    b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     assert b.piece(42) == "<|endoftext|>"
 
 
@@ -638,24 +633,22 @@ def test_special_tokens_scans_control_and_user_defined(monkeypatch, tmp_path) ->
 
         def detokenize(self, ids, special: bool = False):
             names = {5: b"<|im_start|>", 9: b"<|endoftext|>"}
-            if special and list(ids) and list(ids)[0] in names:
-                return names[list(ids)[0]]
+            if special and list(ids) and next(iter(ids)) in names:
+                return names[next(iter(ids))]
             return super().detokenize(ids, special=special)
 
     mod = types.ModuleType("llama_cpp")
     mod.Llama = _LlamaWithVocab
-    mod.llama_model_get_vocab = lambda m: "VOCAB"  # noqa: ARG005
+    mod.llama_model_get_vocab = lambda m: "VOCAB"
     # id 5 = CONTROL (1<<3), id 9 = USER_DEFINED (1<<4), rest = normal.
     attr_map = {5: 1 << 3, 9: 1 << 4}
-    mod.llama_vocab_get_attr = lambda vocab, i: attr_map.get(i, 0)  # noqa: ARG005
+    mod.llama_vocab_get_attr = lambda vocab, i: attr_map.get(i, 0)
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
-    b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
-    )
+    b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     specials = b.special_tokens()
     assert (5, "<|im_start|>") in specials
     assert (9, "<|endoftext|>") in specials
@@ -672,7 +665,5 @@ def test_special_tokens_empty_when_attr_api_missing(monkeypatch, tmp_path) -> No
     fake_gguf.write_bytes(b"")
     from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
 
-    b = LlamaCppPyBackend(
-        model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True
-    )
+    b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     assert b.special_tokens() == []

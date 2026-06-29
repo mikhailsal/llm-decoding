@@ -251,7 +251,7 @@ def test_build_backend_bare_remote_errors_when_no_entries() -> None:
     """``--backend remote`` with no configured aliases is a helpful error."""
     cfg = load_config(load_secrets=False)
     cfg.remotes = {}
-    with pytest.raises(ValueError, match="no \\[remote.NAME\\] blocks"):
+    with pytest.raises(ValueError, match=r"no \[remote\.NAME\] blocks"):
         factory_mod.build_backend("remote", cfg)
 
 

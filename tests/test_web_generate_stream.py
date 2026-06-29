@@ -142,16 +142,11 @@ def test_generate_stream_returns_400_for_chat_only_backend() -> None:
                 prompt_logprobs=False,
                 max_top_logprobs=base.max_top_logprobs,
                 can_force_token=False,
-                notes=(
-                    "chat-only provider; generation disabled until "
-                    "proper chat-mode UI lands"
-                ),
+                notes=("chat-only provider; generation disabled until proper chat-mode UI lands"),
                 generation_disabled=True,
             )
 
-    backend = _ChatOnlyFake(
-        tokens={"ab": [97, 98]}, pieces={97: "a", 98: "b"}, distributions={}
-    )
+    backend = _ChatOnlyFake(tokens={"ab": [97, 98]}, pieces={97: "a", 98: "b"}, distributions={})
     app = build_test_app({"chat-only": backend})
     body = {
         "backend": "chat-only",
@@ -315,9 +310,7 @@ def test_generate_stream_accepts_prefix_token_ids(client) -> None:
     r = client.post("/api/v1/generate/stream", json=body)
     assert r.status_code == 200, r.text
     events = _parse_sse(r.text)
-    assert any(e["event"] == "step" for e in events) or any(
-        e["event"] == "done" for e in events
-    )
+    assert any(e["event"] == "step" for e in events) or any(e["event"] == "done" for e in events)
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +341,7 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
             )
             self.native_calls: list[dict] = []
 
-        def supports_native_sampler(self, name, params):  # noqa: D401
+        def supports_native_sampler(self, name, params):
             return name in {"greedy", "top_p"}
 
         def stream_native(

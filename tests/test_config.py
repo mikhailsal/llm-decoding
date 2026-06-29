@@ -72,9 +72,7 @@ def test_load_config_uses_defaults_when_no_file(tmp_path, monkeypatch) -> None:
     assert cfg.providers["fireworks"].supports_prompt_logprobs is True
 
 
-def test_fireworks_defaults_carry_corrected_tokenizers_and_denylist(
-    tmp_path, monkeypatch
-) -> None:
+def test_fireworks_defaults_carry_corrected_tokenizers_and_denylist(tmp_path, monkeypatch) -> None:
     """The Fireworks defaults map each model to its authoritative HF repo
     and denylist the chat-only model.
 
@@ -89,10 +87,7 @@ def test_fireworks_defaults_carry_corrected_tokenizers_and_denylist(
     assert toks["accounts/fireworks/models/minimax-m2p7"] == "MiniMaxAI/MiniMax-M2.7"
     assert toks["accounts/fireworks/models/glm-5p1"] == "zai-org/GLM-5.1-FP8"
     assert toks["accounts/fireworks/models/glm-5p2"] == "zai-org/GLM-5.2"
-    assert (
-        toks["accounts/fireworks/models/deepseek-v4-pro"]
-        == "deepseek-ai/DeepSeek-V4-Pro"
-    )
+    assert toks["accounts/fireworks/models/deepseek-v4-pro"] == "deepseek-ai/DeepSeek-V4-Pro"
     # Kimi (tiktoken, no tokenizer.json) and Qwen-plus (no public repo)
     # are intentionally absent from the tokenizer map.
     assert "accounts/fireworks/models/kimi-k2p6" not in toks
@@ -144,9 +139,7 @@ def test_load_config_repo_env_does_not_overwrite_central(tmp_path, monkeypatch) 
     monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
     central = tmp_path / "central.env"
     central.write_text("HF_TOKEN=central_wins\n")
-    (tmp_path / "config.toml").write_text(
-        f'secrets_env_file = "{central}"\n'
-    )
+    (tmp_path / "config.toml").write_text(f'secrets_env_file = "{central}"\n')
     (tmp_path / ".env").write_text("HF_TOKEN=repo_loses\n")
     monkeypatch.delenv("HF_TOKEN", raising=False)
 
@@ -194,10 +187,10 @@ def test_load_config_parses_remote_blocks(tmp_path, monkeypatch) -> None:
     ``remote.<name>.timeout`` overrides the default."""
     monkeypatch.setattr(cfg_mod, "REPO_ROOT", tmp_path)
     (tmp_path / "config.toml").write_text(
-        '[remote.dsbx-host-py]\n'
+        "[remote.dsbx-host-py]\n"
         'base_url = "http://192.0.2.42:8000"\n'
-        'timeout = 42.0\n'
-        '[remote.dsbx-host-hf]\n'
+        "timeout = 42.0\n"
+        "[remote.dsbx-host-hf]\n"
         'base_url = "http://192.0.2.42:8001"\n'
     )
 

@@ -119,7 +119,7 @@ def _report_remote_servers(cfg: Config) -> None:
             version = str(info.get("engine_version", "?"))
         except httpx.HTTPError as exc:
             status = f"[red]unreachable[/red] [dim]({type(exc).__name__})[/dim]"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             status = f"[red]error[/red] [dim]({type(exc).__name__}: {exc})[/dim]"
         table.add_row(name, rc.base_url, status, backend, model, version)
 
@@ -137,21 +137,21 @@ def _report_local_engines() -> None:
         cuda = torch.cuda.is_available()
         dev = torch.cuda.get_device_name(0) if cuda else "cpu only"
         table.add_row("torch", f"[green]{torch.__version__}[/green] (cuda={cuda}, {dev})")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         table.add_row("torch", f"[yellow]not installed[/yellow] ({type(exc).__name__})")
 
     try:
         import transformers  # type: ignore
 
         table.add_row("transformers", f"[green]{transformers.__version__}[/green]")
-    except Exception:  # noqa: BLE001
+    except Exception:
         table.add_row("transformers", "[yellow]not installed[/yellow]")
 
     try:
         import bitsandbytes  # type: ignore
 
         table.add_row("bitsandbytes", f"[green]{bitsandbytes.__version__}[/green]")
-    except Exception:  # noqa: BLE001
+    except Exception:
         table.add_row("bitsandbytes", "[yellow]not installed[/yellow]")
 
     try:
@@ -161,7 +161,7 @@ def _report_local_engines() -> None:
         # Probing CUDA support without loading a model is hard; just report the
         # binding version. The build flags went through CMAKE_ARGS at install.
         table.add_row("llama-cpp-python", f"[green]{ver}[/green] (for the llamacpp-py backend)")
-    except Exception:  # noqa: BLE001
+    except Exception:
         table.add_row(
             "llama-cpp-python",
             "[yellow]not installed[/yellow] (needed for llamacpp-py)",

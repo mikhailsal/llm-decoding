@@ -238,8 +238,9 @@ def test_run_probe_renders_table_and_returns_zero_on_success(monkeypatch) -> Non
 
     monkeypatch.setattr(provider_probe, "probe_provider", fake_probe)
 
-    from rich.console import Console
     import io
+
+    from rich.console import Console
 
     output = io.StringIO()
     console = Console(file=output, force_terminal=False, color_system=None, width=120)
@@ -287,6 +288,7 @@ def test_run_probe_returns_two_when_provider_unknown(monkeypatch) -> None:
         providers={},
     )
     import io
+
     from rich.console import Console
 
     out = io.StringIO()

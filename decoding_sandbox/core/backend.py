@@ -95,7 +95,7 @@ class Backend(ABC):
         ``Capabilities.supports_prepend_token_ids`` is the per-backend
         opt-in the web layer / UI consult before sending the field.
         """
-        ids = list(int(t) for t in (prepend_token_ids or [])) + self.tokenize(prompt)
+        ids = [int(t) for t in (prepend_token_ids or [])] + self.tokenize(prompt)
         watch_ids = watch_ids or []
         results: list[StepResult] = []
         for i in range(1, len(ids) + 1):
@@ -152,7 +152,7 @@ class Backend(ABC):
             token_id=token_id, text=self.piece(token_id), logprob=math.nan, rank=-1
         )
 
-    def close(self) -> None:  # optional cleanup
+    def close(self) -> None:  # noqa: B027 -- optional no-op hook; subclasses override when they hold resources
         pass
 
 

@@ -78,6 +78,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
+    "mypy>=1.13",
     # Tests for the server endpoints + RemoteBackend round-trip need
     # FastAPI's TestClient; pull the [server] extras in for the dev env.
     "fastapi>=0.115",
@@ -97,6 +98,54 @@ include = ["decoding_sandbox*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+# A pragmatic superset of pyflakes/pycodestyle plus the high-signal plugin
+# rule sets we care about (bugbear, pyupgrade, simplify, pathlib, datetimez,
+# naming, comprehensions, type-checking, bandit, ruff-native). Kept lighter
+# than a production proxy gateway (no forced T20/print ban project-wide) to fit a sandbox.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+    "PTH", # flake8-use-pathlib
+    "S",   # flake8-bandit (security)
+]
+ignore = [
+    "S101", # asserts are fine (tests + internal invariants)
+    "S311", # non-crypto random is intentional (sampling jitter, backoff)
+    "B008", # FastAPI's `Depends()` in defaults is the idiomatic pattern
+    "N812", # `import torch.nn.functional as F` and similar are conventional
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests carry long inline fixtures (E501), poke the filesystem directly
+# (PTH), and define throwaway fake classes with mutable attrs (RUF012).
+"tests/**/*.py" = ["S101", "S105", "S106", "S108", "S311", "E501", "PTH", "RUF012"]
+# One-off smoke scripts: prints are the point (T20), subprocess is expected
+# (S603/S607), best-effort cleanup swallows errors (S110), and a couple of
+# long literal lines (E501) are fine.
+"scripts/**/*.py" = ["T20", "S603", "S607", "S110", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["decoding_sandbox"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true
+# Intentionally NOT strict yet: the ~13k-line surface needs incremental
+# typing. mypy runs informationally in CI (continue-on-error) until the
+# typing pass lands. Tracked as a follow-up issue.
 
 [tool.pytest.ini_options]
 # Auto-mode lets us write ``async def test_*`` without @pytest.mark.asyncio

@@ -416,15 +416,9 @@ def capabilities_to_wire(caps) -> WireCapabilities:
         supports_sampling_mask=bool(getattr(caps, "supports_sampling_mask", False)),
         supports_raw_output=bool(getattr(caps, "supports_raw_output", False)),
         supports_logit_bias=bool(getattr(caps, "supports_logit_bias", False)),
-        supports_combined_echo_stream=bool(
-            getattr(caps, "supports_combined_echo_stream", False)
-        ),
-        supports_prepend_token_ids=bool(
-            getattr(caps, "supports_prepend_token_ids", False)
-        ),
-        supports_local_tokenize=bool(
-            getattr(caps, "supports_local_tokenize", False)
-        ),
+        supports_combined_echo_stream=bool(getattr(caps, "supports_combined_echo_stream", False)),
+        supports_prepend_token_ids=bool(getattr(caps, "supports_prepend_token_ids", False)),
+        supports_local_tokenize=bool(getattr(caps, "supports_local_tokenize", False)),
         generation_disabled=bool(getattr(caps, "generation_disabled", False)),
     )
 
@@ -453,36 +447,36 @@ def genstep_to_wire(gs) -> WireGenStep:
 
 
 __all__ = [
-    "WireTokenCandidate",
-    "WireWatched",
-    "WireStepResult",
-    "WireCapabilities",
-    "InfoResponse",
-    "ServerStatus",
-    "ServerModelEntry",
-    "ServerModelList",
-    "ReloadRequest",
-    "TokenizeRequest",
-    "TokenizeResponse",
     "DetokenizeRequest",
     "DetokenizeResponse",
+    "DoneEvent",
+    "GenerateRequest",
+    "InfoResponse",
+    "NextDistributionRequest",
     "PieceRequest",
     "PieceResponse",
-    "NextDistributionRequest",
+    "ReloadRequest",
+    "SamplerSpec",
     "ScorePromptRequest",
     "ScorePromptResponse",
+    "ServerModelEntry",
+    "ServerModelList",
+    "ServerStatus",
+    "StepEvent",
+    "TokenizeRequest",
+    "TokenizeResponse",
     "VerifyGreedyRequest",
     "VerifyGreedyResponse",
-    "SamplerSpec",
-    "GenerateRequest",
+    "WireCapabilities",
+    "WireGenStep",
     "WireKeptEntry",
     "WireSamplerDecision",
-    "WireGenStep",
-    "StepEvent",
-    "DoneEvent",
+    "WireStepResult",
+    "WireTokenCandidate",
+    "WireWatched",
     "candidate_to_wire",
-    "step_to_wire",
     "capabilities_to_wire",
     "decision_to_wire",
     "genstep_to_wire",
+    "step_to_wire",
 ]

@@ -1,0 +1,35 @@
+# Lightweight pre-commit gate for the decoding-sandbox.
+#
+# Deliberately lighter than a production service: we run the fast, high-signal
+# checks (hygiene + ruff lint/format + a file-size guard) on every commit, but
+# leave mypy and the test/coverage suite to CI so committing stays snappy.
+#
+#   pip install pre-commit && pre-commit install
+#
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^frontend/
+      - id: end-of-file-fixer
+        exclude: ^frontend/
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.18
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: code-limits
+        name: code limits (file-size gate + function advisories)
+        entry: python scripts/check_code_limits.py
+        language: system
+        pass_filenames: false

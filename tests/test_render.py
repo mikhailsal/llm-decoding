@@ -53,7 +53,7 @@ def test_token_repr_keeps_normal_text_intact() -> None:
     assert render.token_repr("hello") == "hello"
 
 
-def test_token_repr_distinguishes_I_from_space_I() -> None:
+def test_token_repr_distinguishes_capital_i_from_space_i() -> None:
     """The motivating case: ``"I"`` vs ``" I"`` vs ``"I "`` must not collapse."""
     bare = render.token_repr("I")
     lead = render.token_repr(" I")

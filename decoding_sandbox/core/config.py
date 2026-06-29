@@ -206,16 +206,12 @@ _DEFAULTS: dict[str, Any] = {
                 # is fine for the FP8 serverless endpoint).
                 "accounts/fireworks/models/glm-5p1": "zai-org/GLM-5.1-FP8",
                 "accounts/fireworks/models/glm-5p2": "zai-org/GLM-5.2",
-                "accounts/fireworks/models/deepseek-v4-flash": (
-                    "deepseek-ai/DeepSeek-V4-Flash"
-                ),
+                "accounts/fireworks/models/deepseek-v4-flash": ("deepseek-ai/DeepSeek-V4-Flash"),
                 # ``deepseek-v4-pro`` shares DeepSeek's full-width
                 # ``<\uff5cbegin\u2581of\u2581sentence\uff5c>`` BOS (id 0)
                 # with the flash variant; the weights differ, the vocab
                 # does not.
-                "accounts/fireworks/models/deepseek-v4-pro": (
-                    "deepseek-ai/DeepSeek-V4-Pro"
-                ),
+                "accounts/fireworks/models/deepseek-v4-pro": ("deepseek-ai/DeepSeek-V4-Pro"),
                 # MiniMax M2.7's public tokenizer (NOT the older MiniMax-M2).
                 # Its declared BOS is the unusual literal ``]~!b[`` (see
                 # ``_BOS_TOKEN_CANDIDATES`` in openai_compat -- we teach the
@@ -310,7 +306,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def expand(path: str | os.PathLike[str]) -> Path:
     """Expand ``~`` and environment variables in a path."""
-    return Path(os.path.expandvars(os.path.expanduser(str(path))))
+    return Path(os.path.expandvars(str(path))).expanduser()
 
 
 @dataclass
@@ -595,9 +591,7 @@ def load_config(
             supports_session_affinity=bool(pdata.get("supports_session_affinity", False)),
             supports_new_logprobs=bool(pdata.get("supports_new_logprobs", False)),
             supports_logit_bias=bool(pdata.get("supports_logit_bias", False)),
-            supports_combined_echo_stream=bool(
-                pdata.get("supports_combined_echo_stream", False)
-            ),
+            supports_combined_echo_stream=bool(pdata.get("supports_combined_echo_stream", False)),
         )
 
     remotes: dict[str, RemoteConfig] = {}

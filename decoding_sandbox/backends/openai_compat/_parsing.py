@@ -33,7 +33,7 @@ class _ParsingMixin:
         "<|startoftext|>",  # gpt-oss family
         "<|begin_of_text|>",  # Llama 3.x
         "<s>",  # Llama 2, Mistral
-        # DeepSeek uses U+FF5C FULLWIDTH VERTICAL LINE (｜) instead of the
+        # DeepSeek uses U+FF5C FULLWIDTH VERTICAL LINE (｜) instead of the  # noqa: RUF003
         # ASCII pipe -- the same string with regular ``|`` won't match.
         # Two variants exist in the wild: the original (V2/V3) form
         # spells "begin_of_sentence" with a U+2581 LOWER ONE EIGHTH BLOCK

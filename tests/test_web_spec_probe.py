@@ -18,7 +18,6 @@ from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
 from tests.fakes import FakeBackend
 from tests.web_helpers import build_test_app, make_authed_client
 
-
 # --------------------------------------------------------------------------- #
 # spec/stream
 # --------------------------------------------------------------------------- #

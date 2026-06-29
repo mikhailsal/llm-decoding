@@ -32,8 +32,9 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from decoding_sandbox.server.schemas import WireCapabilities
@@ -261,7 +262,7 @@ class BackendRegistry:
             if inst is not None:
                 try:
                     caps = capabilities_to_wire(inst.capabilities)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     caps = None
             # Per-model capability envelopes for cloud providers. We
             # emit one entry per CURRENTLY-LOADED variant; the static
@@ -273,12 +274,12 @@ class BackendRegistry:
             # success, and the next /info response carries the
             # per-model caps -- so glm-5p1's empty ``bos_token_ids``
             # no longer "inherits" gpt-oss-120b's ``[199998]``.
-            models_caps: dict[str, "WireCapabilities"] = {}
+            models_caps: dict[str, WireCapabilities] = {}
             if entry.family == "cloud":
                 for mkey, minst in entry.cloud_variants.items():
                     try:
                         models_caps[mkey] = capabilities_to_wire(minst.capabilities)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: S112 -- skip a single malformed variant; the rest still render
                         continue
             # For cloud providers we can synthesize the capability envelope
             # from static ProviderConfig data even before a single request
@@ -341,7 +342,7 @@ class BackendRegistry:
         self,
         prov,  # type: ignore[no-untyped-def]
         model: str | None,
-    ) -> "WireCapabilities | None":
+    ) -> WireCapabilities | None:
         """Build a :class:`WireCapabilities` from static ``ProviderConfig``.
 
         Used both for the top-level ``capabilities`` of an unloaded
@@ -360,10 +361,7 @@ class BackendRegistry:
             return None
         is_chat_only = not bool(prov.has_completions)
         if is_chat_only:
-            notes = (
-                "chat-only provider; generation disabled "
-                "until proper chat-mode UI lands"
-            )
+            notes = "chat-only provider; generation disabled until proper chat-mode UI lands"
         else:
             notes = "static caps from provider config (backend not yet loaded)"
         # Optimistic prediction of "local tokenizer available": if THIS
@@ -372,9 +370,8 @@ class BackendRegistry:
         # If the actual load fails the loaded-backend envelope will
         # downgrade the flag on the next /info fetch.
         lookup_model = model or prov.default_model
-        has_tokenizer_mapping = bool(
-            prov.tokenizers and prov.tokenizers.get(lookup_model)
-        )
+        has_tokenizer_mapping = bool(prov.tokenizers and prov.tokenizers.get(lookup_model))
+
         # Helper so each call site below stays readable; per-model
         # overrides are applied uniformly.
         def flag(name: str) -> bool:
@@ -396,9 +393,7 @@ class BackendRegistry:
             supports_raw_output=flag("supports_raw_output"),
             supports_logit_bias=flag("supports_logit_bias"),
             supports_combined_echo_stream=flag("supports_combined_echo_stream"),
-            supports_prepend_token_ids=(
-                has_tokenizer_mapping and not is_chat_only
-            ),
+            supports_prepend_token_ids=(has_tokenizer_mapping and not is_chat_only),
             supports_local_tokenize=has_tokenizer_mapping,
             generation_disabled=is_chat_only,
         )
@@ -500,15 +495,13 @@ class BackendRegistry:
                     note=f"{len(models)} available on the remote host",
                     model_sizes=sizes,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 _loaded, suggested, _ = self._public_model_info(entry)
                 result = ModelListEntry(
                     models=list(suggested),
                     source="fallback",
                     fetched_at=now,
-                    note=(
-                        f"remote catalogue unavailable ({exc.__class__.__name__})"
-                    ),
+                    note=(f"remote catalogue unavailable ({exc.__class__.__name__})"),
                 )
             with self._models_lock:
                 self._models_cache[name] = result
@@ -521,7 +514,7 @@ class BackendRegistry:
             )
 
         if entry.family != "cloud":
-            loaded_model, suggested, _ = self._public_model_info(entry)
+            _loaded_model, suggested, _ = self._public_model_info(entry)
             result = ModelListEntry(
                 models=list(suggested),
                 source="static",
@@ -577,7 +570,7 @@ class BackendRegistry:
                 live = probe.fetch_available_models()
             finally:
                 probe.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning(
                 "dsbx-web: failed to fetch %r model catalogue: %s", name, exc.__class__.__name__
             )
@@ -599,7 +592,7 @@ class BackendRegistry:
                 note=result.note,
             )
 
-        # Union live ∪ curated, preserving curated order at the front so
+        # Union of live and curated, preserving curated order at the front so
         # the user's favourites stay near the top. ``exclude_models`` is
         # applied to BOTH sources so a denylisted id (e.g. a chat-only
         # model that hangs on /completions) can never reach the picker,
@@ -705,7 +698,7 @@ class BackendRegistry:
             )
         return entry.instance
 
-    def use(self, name: str, model: str | None = None) -> "_LockedBackend":
+    def use(self, name: str, model: str | None = None) -> _LockedBackend:
         """Context manager that yields the live backend under its lock.
 
         Mirrors the lock usage in ``server/app.py``. The lock is held only
@@ -736,7 +729,7 @@ class BackendRegistry:
         if status.get("state") in ("ready", "empty", "error"):
             try:
                 backend.refresh_info()  # type: ignore[attr-defined]
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("dsbx-web: refresh_info after status change failed: %s", exc)
         return status
 
@@ -766,7 +759,7 @@ class BackendRegistry:
         status = backend.unload_model()  # type: ignore[attr-defined]
         try:
             backend.refresh_info()  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("dsbx-web: refresh_info after unload failed: %s", exc)
         self.invalidate_models_cache(name)
         return status
@@ -783,14 +776,14 @@ class BackendRegistry:
             if entry.instance is not None:
                 try:
                     entry.instance.close()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning("dsbx-web: error closing backend %r: %s", entry.name, exc)
                 finally:
                     entry.instance = None
             for mkey, inst in list(entry.cloud_variants.items()):
                 try:
                     inst.close()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.warning(
                         "dsbx-web: error closing cloud variant %r/%r: %s",
                         entry.name,
@@ -799,7 +792,7 @@ class BackendRegistry:
                     )
             entry.cloud_variants.clear()
 
-    def __enter__(self) -> "BackendRegistry":
+    def __enter__(self) -> BackendRegistry:
         return self
 
     def __exit__(self, *_excinfo: object) -> None:
@@ -833,8 +826,8 @@ def iter_backend_names(cfg: Config) -> Iterator[str]:
 
 
 __all__ = [
+    "MODEL_LIST_TTL_S",
     "BackendRegistry",
     "ModelListEntry",
-    "MODEL_LIST_TTL_S",
     "iter_backend_names",
 ]

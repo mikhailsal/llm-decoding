@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 
 class _TokenizerMixin:
-    def _ensure_tokenizer(self) -> "Tokenizer | None":
+    def _ensure_tokenizer(self) -> Tokenizer | None:
         """Lazy-load the HF tokenizer for ``self.model``; cache the result.
 
         Returns the loaded ``tokenizers.Tokenizer`` instance, or ``None``
@@ -37,7 +37,7 @@ class _TokenizerMixin:
                 self._tokenizer = self._do_load_tokenizer()
                 if self._tokenizer is not None:
                     self._bos_ids = self._discover_bos_ids(self._tokenizer)
-            except Exception as exc:  # noqa: BLE001 (we re-raise as warning text)
+            except Exception as exc:
                 self._tokenizer_load_error = f"{type(exc).__name__}: {exc}"
                 log.warning(
                     "tokenizer load failed for %s/%s: %s; "
@@ -55,7 +55,7 @@ class _TokenizerMixin:
             self._tokenizer_load_attempted = True
             return self._tokenizer
 
-    def _do_load_tokenizer(self) -> "Tokenizer | None":
+    def _do_load_tokenizer(self) -> Tokenizer | None:
         """Resolve the HF repo for ``self.model`` and load tokenizer.json.
 
         Returns ``None`` (rather than raising) when no repo is configured
@@ -92,7 +92,7 @@ class _TokenizerMixin:
         )
         return tok
 
-    def _discover_bos_ids(self, tok: "Tokenizer") -> tuple[int, ...]:
+    def _discover_bos_ids(self, tok: Tokenizer) -> tuple[int, ...]:
         """Best-effort BOS discovery from the tokenizer's special tokens.
 
         We don't have access to a ``tokenizer_config.json``-style
@@ -104,7 +104,7 @@ class _TokenizerMixin:
         """
         try:
             added = tok.get_added_tokens_decoder()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return ()
         # Build a {content -> id} index over only the SPECIAL added
         # tokens (regular added tokens like merged-word entries don't
@@ -149,8 +149,9 @@ class _TokenizerMixin:
         """Resolve the renderable surface form of an echoed token.
 
         Providers detokenize SPECIAL tokens (BOS / EOS / chat markers) to
-        an EMPTY string -- Fireworks echoes a prepended ``<\uff5cbegin\u2581of\u2581sentence\uff5c>``
-        back as ``""``, which the UI then renders as the dim ``<empty>``
+        an EMPTY string -- Fireworks echoes a prepended
+        ``<\uff5cbegin\u2581of\u2581sentence\uff5c>`` back as ``""``, which the
+        UI then renders as the dim ``<empty>``
         placeholder. That's inconsistent with the live token preview,
         which routes the same id through :meth:`piece` and shows the real
         token name. When the provider's text is empty but we hold a REAL
@@ -184,7 +185,7 @@ class _TokenizerMixin:
             for tid, added in decoder.items():
                 if getattr(added, "special", False):
                     out.append((int(tid), str(added.content)))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return []
         out.sort(key=lambda pair: pair[0])
         return out
@@ -199,5 +200,5 @@ class _TokenizerMixin:
         # the UI's "piece" RPC consumers expect.
         try:
             return tok.decode([int(token_id)], skip_special_tokens=False)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return self._id_to_text.get(token_id, "")

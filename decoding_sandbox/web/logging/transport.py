@@ -171,7 +171,7 @@ class LoggingTransport(httpx.BaseTransport):
         self,
         *,
         request_id: uuid.UUID,
-        request_capture: "_RequestCapture",
+        request_capture: _RequestCapture,
         response: httpx.Response,
         response_headers: dict[str, str],
         started: float,
@@ -220,7 +220,11 @@ class LoggingTransport(httpx.BaseTransport):
             # ``{"detail": "..."}``; surface a short string into
             # error_message so the row glance can flag it red.
             entry.error_message = _extract_error_message(parsed, response.status_code)
-            entry.prompt_tokens, entry.completion_tokens, entry.total_tokens = _extract_usage(parsed)
+            (
+                entry.prompt_tokens,
+                entry.completion_tokens,
+                entry.total_tokens,
+            ) = _extract_usage(parsed)
             # Many providers echo the resolved model back; harvest if we
             # didn't already pick it off the request.
             if entry.model_resolved is None:
@@ -231,7 +235,7 @@ class LoggingTransport(httpx.BaseTransport):
     def _enqueue_error(
         self,
         request_id: uuid.UUID,
-        request_capture: "_RequestCapture",
+        request_capture: _RequestCapture,
         exc: Exception,
         started: float,
     ) -> None:
@@ -282,7 +286,7 @@ class LoggingTransport(httpx.BaseTransport):
 class _RequestCapture:
     """Plain attrs container so we can pass one thing around."""
 
-    __slots__ = ("method", "url", "path", "headers", "body_json", "body_text", "model_resolved")
+    __slots__ = ("body_json", "body_text", "headers", "method", "model_resolved", "path", "url")
 
     def __init__(
         self,
@@ -313,7 +317,7 @@ def _capture_request(request: httpx.Request) -> _RequestCapture:
     """
     try:
         body_bytes = request.content
-    except Exception:  # noqa: BLE001 -- defensive against custom streams
+    except Exception:
         body_bytes = b""
     body_text: str | None = None
     body_json: Any = None
@@ -358,7 +362,7 @@ class _TeeStream(SyncByteStream, AsyncByteStream):
     or close.
     """
 
-    __slots__ = ("_inner", "_captured", "_ttft_holder", "_started", "_on_done", "_emitted")
+    __slots__ = ("_captured", "_emitted", "_inner", "_on_done", "_started", "_ttft_holder")
 
     def __init__(
         self,
@@ -384,7 +388,7 @@ class _TeeStream(SyncByteStream, AsyncByteStream):
                         self._ttft_holder["ms"] = (time.monotonic() - self._started) * 1000.0
                     self._captured.append(chunk)
                 yield chunk
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._finish(error=f"{type(exc).__name__}: {exc}")
             raise
         else:
@@ -398,7 +402,7 @@ class _TeeStream(SyncByteStream, AsyncByteStream):
                         self._ttft_holder["ms"] = (time.monotonic() - self._started) * 1000.0
                     self._captured.append(chunk)
                 yield chunk
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._finish(error=f"{type(exc).__name__}: {exc}")
             raise
         else:
@@ -438,7 +442,7 @@ class _TeeStream(SyncByteStream, AsyncByteStream):
         self._emitted = True
         try:
             self._on_done(error)
-        except Exception:  # noqa: BLE001 -- never let logging break the caller
+        except Exception:
             log.exception("dsbx-web: log entry emission failed for stream")
 
 
@@ -450,7 +454,7 @@ def _headers_to_dict(headers: Any) -> dict[str, str]:
     try:
         for k, v in headers.items():
             out[str(k)] = str(v)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
     return out
 
@@ -473,7 +477,7 @@ def _safe_decode(body: bytes) -> str | None:
     truncated = body[:_MAX_BODY_BYTES]
     try:
         return truncated.decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -514,12 +518,14 @@ def _extract_usage(parsed: Any) -> tuple[int | None, int | None, int | None]:
     usage = parsed.get("usage")
     if not isinstance(usage, dict):
         return None, None, None
+
     def _coerce(v: Any) -> int | None:
         if isinstance(v, int) and not isinstance(v, bool):
             return v
         if isinstance(v, float):
             return int(v)
         return None
+
     return (
         _coerce(usage.get("prompt_tokens")),
         _coerce(usage.get("completion_tokens")),

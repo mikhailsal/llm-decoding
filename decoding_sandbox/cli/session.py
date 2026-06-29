@@ -22,8 +22,8 @@ from __future__ import annotations
 import argparse
 import shlex
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from rich.console import Console
 
@@ -259,7 +259,7 @@ def _switch_backend(state: SessionState, rest: str) -> DispatchResult:
     state.console.print("[dim]closing previous backend...[/dim]")
     try:
         old.close()  # type: ignore[union-attr]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         state.console.print(f"[yellow]close warning: {exc}[/yellow]")
 
     state.console.print(f"[dim]building backend '{name}'...[/dim]")
@@ -268,7 +268,7 @@ def _switch_backend(state: SessionState, rest: str) -> DispatchResult:
         from decoding_sandbox.core.factory import build_backend
 
         state.backend = build_backend(name, state.cfg, model=model)  # type: ignore[arg-type]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return DispatchResult("parse_error", exit_code=1, message=f"failed to build backend: {exc}")
     state.backend_name = name
     state.backend_model = model

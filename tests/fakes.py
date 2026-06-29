@@ -83,9 +83,7 @@ class FakeBackend(Backend):
         watch_ids: Sequence[int] = (),
     ) -> StepResult:
         cands = list(self.distributions.get(tuple(token_ids), []))[:top_k]
-        step = StepResult(
-            position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab
-        )
+        step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=self.full_vocab)
         for wid in watch_ids:
             step.watched[int(wid)] = self.lookup_watch(step, int(wid))
         return step
@@ -140,13 +138,13 @@ class MockHTTPClient:
         # off the existing client. Expose both so the same mock can stand in.
         self.headers: dict[str, str] = {}
 
-    def __enter__(self) -> "MockHTTPClient":
+    def __enter__(self) -> MockHTTPClient:
         return self
 
     def __exit__(self, *_excinfo: Any) -> None:
         return None
 
-    def _resolve(self, method: str, url: str) -> "MockResponse":
+    def _resolve(self, method: str, url: str) -> MockResponse:
         key = (method, url)
         if key not in self.routes:
             raise AssertionError(
@@ -166,11 +164,11 @@ class MockHTTPClient:
         status = int(self.status_overrides.get(key, 200))
         return MockResponse(status, entry)
 
-    def get(self, url: str, **kwargs: Any) -> "MockResponse":
+    def get(self, url: str, **kwargs: Any) -> MockResponse:
         self.calls.append({"method": "GET", "url": url, "kwargs": kwargs})
         return self._resolve("GET", url)
 
-    def post(self, url: str, *, json: Any | None = None, **kwargs: Any) -> "MockResponse":
+    def post(self, url: str, *, json: Any | None = None, **kwargs: Any) -> MockResponse:
         self.calls.append({"method": "POST", "url": url, "json": json, "kwargs": kwargs})
         return self._resolve("POST", url)
 

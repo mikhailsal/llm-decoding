@@ -306,9 +306,7 @@ class OpenAICompatBackend(
             return True
         if sampler_name == "typical" and self._provider_flag("supports_typical_p_native"):
             return True
-        if sampler_name == "mirostat" and self._provider_flag("supports_mirostat"):
-            return True
-        return False
+        return bool(sampler_name == "mirostat" and self._provider_flag("supports_mirostat"))
 
     def next_distribution(
         self,

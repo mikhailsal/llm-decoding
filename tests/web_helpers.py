@@ -14,8 +14,8 @@ without ever instantiating heavy engines or talking to dsbx-host.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from fastapi.testclient import TestClient
 
@@ -168,8 +168,8 @@ def make_authed_client(app, token: str = DEFAULT_TOKEN) -> TestClient:
 
 __all__ = [
     "DEFAULT_TOKEN",
-    "make_test_config",
     "build_test_app",
     "make_authed_client",
+    "make_test_config",
     "patched_registry",
 ]

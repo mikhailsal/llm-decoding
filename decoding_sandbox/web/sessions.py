@@ -24,14 +24,15 @@ session.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.manual import ManualSession
@@ -265,10 +266,8 @@ def load_transcript_into_session(entry: _Entry, payload: dict) -> None:
     sess.prompt_ids = [int(i) for i in payload.get("prompt_ids", sess.prompt_ids)]
     sess.generated_ids = [int(i) for i in payload.get("generated_ids", [])]
     if "top_k" in payload:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             sess.top_k = int(payload["top_k"])
-        except (TypeError, ValueError):
-            pass
     entry.generated_probs = [None for _ in sess.generated_ids]
     if "model" in payload and payload["model"] is not None:
         entry.model = str(payload["model"])
@@ -282,9 +281,9 @@ def write_transcript(path: str | Path, data: dict) -> None:
 
 
 __all__ = [
-    "ManualSessionRegistry",
     "DEFAULT_MAX_SESSIONS",
-    "transcript_to_dict",
+    "ManualSessionRegistry",
     "load_transcript_into_session",
+    "transcript_to_dict",
     "write_transcript",
 ]

@@ -21,8 +21,8 @@ the token. Every other ``/api/v1/*`` route MUST attach the dependency.
 from __future__ import annotations
 
 import hmac
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from fastapi import Header, HTTPException, status
 

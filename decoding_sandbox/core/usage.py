@@ -192,12 +192,12 @@ def record_raw_output(sink: UsageSink | None, raw: dict | None) -> None:
 
 
 __all__ = [
-    "UsageSink",
     "UsageAware",
-    "make_sink",
-    "record_request",
-    "record_tokens",
+    "UsageSink",
     "add_note",
+    "make_sink",
     "record_perf_metrics",
     "record_raw_output",
+    "record_request",
+    "record_tokens",
 ]

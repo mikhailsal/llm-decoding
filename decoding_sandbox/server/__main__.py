@@ -43,8 +43,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from decoding_sandbox.core.config import load_config
     from decoding_sandbox.core.factory import build_backend, list_available_models
-    from decoding_sandbox.server.app import make_app
     from decoding_sandbox.server import schemas as S
+    from decoding_sandbox.server.app import make_app
 
     cfg = load_config(args.config)
 
@@ -52,17 +52,18 @@ def main(argv: list[str] | None = None) -> int:
         return build_backend(args.backend, cfg, model=model)
 
     def model_lister() -> list[S.ServerModelEntry]:
-        import os as _os
+        from pathlib import Path as _Path
 
         def _size(model_id: str) -> int | None:
             # GGUF ids are real file paths; expose their on-disk size so the
             # UI can draw a size-proportional load bar. HF repo ids aren't
             # local files -> size stays None.
+            p = _Path(model_id)
             try:
-                if _os.path.isfile(model_id):
-                    return _os.path.getsize(model_id)
+                if p.is_file():
+                    return p.stat().st_size
             except OSError:
-                pass
+                return None
             return None
 
         return [

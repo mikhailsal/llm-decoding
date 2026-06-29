@@ -40,7 +40,7 @@ class RemoteBackendError(RuntimeError):
     """Raised when the server returns a non-2xx response or invalid JSON."""
 
 
-class RemoteStreamTimeout(RemoteBackendError):
+class RemoteStreamTimeoutError(RemoteBackendError):
     """Raised when the upstream remote server stops sending bytes mid-stream.
 
     Kept as a dedicated subclass so callers (notably ``stream_generate``
@@ -67,7 +67,7 @@ class RemoteBackend(Backend):
     # not "the whole response finishes within N seconds". Defaults to
     # 45 s, which is generous enough for a single GPU generate step on
     # a long prompt but tight enough that a fully hung server surfaces
-    # as ``RemoteStreamTimeout`` before the user gives up and reloads.
+    # as ``RemoteStreamTimeoutError`` before the user gives up and reloads.
     # Bumped via ``stream_read_timeout=`` if a slow deployment trips it.
     DEFAULT_STREAM_READ_TIMEOUT: float = 45.0
 
@@ -288,9 +288,7 @@ class RemoteBackend(Backend):
             # of continuations -- exceedingly rare, but mirror the
             # in-process verify_greedy contract by raising rather than
             # returning a fake "" candidate the caller has to special-case.
-            raise RemoteBackendError(
-                "verify_greedy: server returned no correction/bonus token"
-            )
+            raise RemoteBackendError("verify_greedy: server returned no correction/bonus token")
         return int(data["accepted"]), _candidate_from_dict(correction)
 
     # ------------------------------------------------- streaming generate
@@ -343,7 +341,7 @@ class RemoteBackend(Backend):
             "prefix_token_ids": [int(i) for i in prefix_token_ids],
         }
         # Per-stream timeout: tight ``read`` so a hung server surfaces as
-        # ``RemoteStreamTimeout`` within seconds (and lets the web layer
+        # ``RemoteStreamTimeoutError`` within seconds (and lets the web layer
         # release its sync generator so Starlette's ``GeneratorExit``
         # from a disconnected browser tab can actually take effect).
         # ``write`` / ``pool`` stay short because the upload is a small
@@ -363,7 +361,7 @@ class RemoteBackend(Backend):
                     # detail makes it back to the user.
                     try:
                         detail = r.read().decode("utf-8", errors="replace")
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         detail = ""
                     raise RemoteBackendError(
                         f"POST /v1/generate/stream -> HTTP {r.status_code}: {detail}"
@@ -376,9 +374,7 @@ class RemoteBackend(Backend):
                         elif kind == "done":
                             err = event.get("error")
                             if err:
-                                raise RemoteBackendError(
-                                    f"server reported error: {err}"
-                                )
+                                raise RemoteBackendError(f"server reported error: {err}")
                             return
                         # Unknown event kinds are silently ignored; this lets
                         # the server add new event types (e.g. "progress")
@@ -396,7 +392,7 @@ class RemoteBackend(Backend):
             # loop is blocked by a prior request, or the network path
             # is one-way. The web layer surfaces this as a clean
             # ``done.error`` SSE so the browser shows it in the toast.
-            raise RemoteStreamTimeout(
+            raise RemoteStreamTimeoutError(
                 f"upstream stopped sending data for >{self._stream_read_timeout:.0f}s; "
                 "the remote ``dsbx serve`` may be hung or overloaded"
             ) from exc
@@ -417,7 +413,7 @@ def _check_json(r: httpx.Response, path: str) -> dict:
         try:
             payload = r.json()
             detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
-        except Exception:  # noqa: BLE001
+        except Exception:
             detail = r.text
         raise RemoteBackendError(f"{path} -> HTTP {r.status_code}: {detail}")
     try:
@@ -499,9 +495,7 @@ def _capabilities_from_dict(d: dict) -> Capabilities:
         supports_sampling_mask=bool(d.get("supports_sampling_mask", False)),
         supports_raw_output=bool(d.get("supports_raw_output", False)),
         supports_logit_bias=bool(d.get("supports_logit_bias", False)),
-        supports_combined_echo_stream=bool(
-            d.get("supports_combined_echo_stream", False)
-        ),
+        supports_combined_echo_stream=bool(d.get("supports_combined_echo_stream", False)),
         bos_token_ids=tuple(int(i) for i in d.get("bos_token_ids", [])),
         supports_prepend_token_ids=bool(d.get("supports_prepend_token_ids", False)),
         supports_local_tokenize=bool(d.get("supports_local_tokenize", False)),
@@ -586,4 +580,4 @@ def _iter_sse_events(lines: Iterator[str]) -> Iterator[dict]:
             return
 
 
-__all__ = ["RemoteBackend", "RemoteBackendError", "RemoteStreamTimeout"]
+__all__ = ["RemoteBackend", "RemoteBackendError", "RemoteStreamTimeoutError"]

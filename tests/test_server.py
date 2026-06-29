@@ -220,6 +220,7 @@ def test_score_prompt_forwards_prepend_token_ids_to_backend() -> None:
         @property
         def capabilities(self):
             from decoding_sandbox.core.types import Capabilities
+
             return Capabilities(
                 name="capture",
                 full_vocab=True,
@@ -457,10 +458,7 @@ def test_no_preload_starts_empty_and_blocks_inference() -> None:
         assert info["state"] == "empty"
         # Every inference route should refuse with a clean 409.
         assert c.post("/v1/tokenize", json={"text": "ab"}).status_code == 409
-        assert (
-            c.post("/v1/next_distribution", json={"ids": [97], "top_k": 3}).status_code
-            == 409
-        )
+        assert c.post("/v1/next_distribution", json={"ids": [97], "top_k": 3}).status_code == 409
 
 
 def test_reload_lifecycle_loading_then_ready() -> None:

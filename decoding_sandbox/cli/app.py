@@ -153,7 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--watch",
         action="append",
         default=[],
-        help="Token text to highlight at every position (repeatable). Use a leading space, e.g. --watch ' Paris'.",
+        help=(
+            "Token text to highlight at every position (repeatable). "
+            "Use a leading space, e.g. --watch ' Paris'."
+        ),
     )
     p_inspect.add_argument(
         "--watch-id",
@@ -376,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # pragma: no cover
         console.print("\n[dim]interrupted[/dim]")
         return 130
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # RemoteBackendError (and a few other "network failed / config
         # wrong" errors) are routine for a tool that talks to a server on
         # another host -- not programming bugs. Render them as one clean
@@ -405,19 +408,29 @@ from decoding_sandbox.cli._shared import WatchTarget as WatchTarget  # noqa: E40
 from decoding_sandbox.cli._shared import (  # noqa: E402
     _build_backend_with_load_timing as _build_backend_with_load_timing,
 )
-from decoding_sandbox.cli._shared import _collect_watch_targets as _collect_watch_targets  # noqa: E402
+from decoding_sandbox.cli._shared import (  # noqa: E402
+    _collect_watch_targets as _collect_watch_targets,
+)
 from decoding_sandbox.cli._shared import _maybe_phase as _maybe_phase  # noqa: E402
 from decoding_sandbox.cli._shared import _null_phase as _null_phase  # noqa: E402
-from decoding_sandbox.cli._shared import _print_backend_banner as _print_backend_banner  # noqa: E402
+from decoding_sandbox.cli._shared import (  # noqa: E402
+    _print_backend_banner as _print_backend_banner,
+)
 from decoding_sandbox.cli._shared import _print_candidates as _print_candidates  # noqa: E402
 from decoding_sandbox.cli._shared import _resolve_stop_ids as _resolve_stop_ids  # noqa: E402
 from decoding_sandbox.cli._shared import _resolve_watch as _resolve_watch  # noqa: E402
 from decoding_sandbox.cli._shared import _resolve_watch_eos as _resolve_watch_eos  # noqa: E402
 from decoding_sandbox.cli._shared import _resolve_watch_ids as _resolve_watch_ids  # noqa: E402
+from decoding_sandbox.cli.commands.doctor import (  # noqa: E402
+    _NO_KEY_PROVIDERS as _NO_KEY_PROVIDERS,
+)
 from decoding_sandbox.cli.commands.doctor import _mask as _mask  # noqa: E402
-from decoding_sandbox.cli.commands.doctor import _NO_KEY_PROVIDERS as _NO_KEY_PROVIDERS  # noqa: E402
-from decoding_sandbox.cli.commands.doctor import _report_local_engines as _report_local_engines  # noqa: E402
-from decoding_sandbox.cli.commands.doctor import _report_remote_servers as _report_remote_servers  # noqa: E402
+from decoding_sandbox.cli.commands.doctor import (  # noqa: E402
+    _report_local_engines as _report_local_engines,
+)
+from decoding_sandbox.cli.commands.doctor import (  # noqa: E402
+    _report_remote_servers as _report_remote_servers,
+)
 from decoding_sandbox.cli.commands.doctor import cmd_doctor as cmd_doctor  # noqa: E402
 from decoding_sandbox.cli.commands.generate import cmd_generate as cmd_generate  # noqa: E402
 from decoding_sandbox.cli.commands.inspect import cmd_inspect as cmd_inspect  # noqa: E402

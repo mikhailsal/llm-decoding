@@ -424,7 +424,7 @@ class _StreamingMixin:
             usage_mod.record_request(self._active_usage)
             try:
                 stream_cm = self._client.stream("POST", "/completions", **stream_kwargs)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_exc = exc
                 if attempt < self._max_retries:
                     wait = self._base_backoff_s * (2**attempt) + random.uniform(0.0, 0.25)
@@ -449,7 +449,8 @@ class _StreamingMixin:
                     if wait is None:
                         wait = self._base_backoff_s * (2**attempt) + random.uniform(0.0, 0.25)
                     log.warning(
-                        "%s: POST /completions (stream) -> HTTP %d; sleeping %.2fs before retry %d/%d",
+                        "%s: POST /completions (stream) -> HTTP %d; "
+                        "sleeping %.2fs before retry %d/%d",
                         self.provider.name,
                         status,
                         wait,

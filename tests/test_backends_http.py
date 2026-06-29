@@ -80,9 +80,7 @@ def _make_oc_backend(
         supports_combined_echo_stream=supports_combined_echo_stream,
     )
     sleep_fn = sleeps.append if sleeps is not None else (lambda _w: None)
-    backend = OpenAICompatBackend(
-        prov, model="test/m", max_retries=max_retries, sleep=sleep_fn
-    )
+    backend = OpenAICompatBackend(prov, model="test/m", max_retries=max_retries, sleep=sleep_fn)
     return backend, mock
 
 
@@ -135,9 +133,7 @@ def test_openai_compat_next_distribution_populates_watched_from_top_k(monkeypatc
                 "choices": [
                     {
                         "logprobs": {
-                            "top_logprobs": [
-                                {" Paris": -0.5, " London": -3.0, " Berlin": -4.0}
-                            ]
+                            "top_logprobs": [{" Paris": -0.5, " London": -3.0, " Berlin": -4.0}]
                         }
                     }
                 ]
@@ -151,15 +147,14 @@ def test_openai_compat_next_distribution_populates_watched_from_top_k(monkeypatc
     # logprob; the second comes back NaN.
     paris_id = backend._intern(" Paris")
     unknown_id = 999_999
-    step = backend.next_distribution(
-        prompt_ids, top_k=3, watch_ids=[paris_id, unknown_id]
-    )
+    step = backend.next_distribution(prompt_ids, top_k=3, watch_ids=[paris_id, unknown_id])
     assert paris_id in step.watched
     assert step.watched[paris_id].logprob == pytest.approx(-0.5)
     assert step.watched[paris_id].rank == 0
     assert unknown_id in step.watched
     assert step.watched[unknown_id].rank == -1
     import math as _m
+
     assert _m.isnan(step.watched[unknown_id].logprob)
     # Only one /completions POST -- we did not fire a second probe call.
     assert sum(1 for c in mock.calls if c["url"] == "/completions") == 1
@@ -221,9 +216,7 @@ def test_openai_compat_legacy_logprobs_request_shape_when_disabled(monkeypatch) 
         monkeypatch,
         routes={
             ("POST", "/completions"): {
-                "choices": [
-                    {"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}
-                ]
+                "choices": [{"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}]
             }
         },
         has_completions=True,
@@ -380,9 +373,7 @@ def test_openai_compat_stream_native_new_logprobs_parses_content(monkeypatch) ->
     # intern (we don't have a real tokenizer for the prompt, so the
     # synthetic intern id is fine -- but it must be in the intern
     # range, NOT overlapping the real id 12345).
-    assert all(
-        t >= backend._INTERN_ID_BASE for t in gs.tokens_before
-    ), gs.tokens_before
+    assert all(t >= backend._INTERN_ID_BASE for t in gs.tokens_before), gs.tokens_before
 
 
 def test_openai_compat_next_distribution_raises_on_chat_only_provider(
@@ -467,11 +458,7 @@ def test_openai_compat_injects_require_parameters(monkeypatch) -> None:
     between the two routes (``_post`` runs before the route choice)."""
     backend, mock = _make_oc_backend(
         monkeypatch,
-        routes={
-            ("POST", "/completions"): {
-                "choices": [{"logprobs": {"top_logprobs": [{}]}}]
-            }
-        },
+        routes={("POST", "/completions"): {"choices": [{"logprobs": {"top_logprobs": [{}]}}]}},
         has_completions=True,
         require_parameters=True,
     )
@@ -702,8 +689,7 @@ class _FakeTokenizer:
         self._word_to_id = dict(word_to_id)
         self._id_to_word = {tid: w for w, tid in word_to_id.items()}
         self._specials = {
-            int(tid): _FakeAddedToken(content, special=True)
-            for tid, content in specials.items()
+            int(tid): _FakeAddedToken(content, special=True) for tid, content in specials.items()
         }
         for tid, tok in self._specials.items():
             self._id_to_word.setdefault(tid, tok.content)
@@ -932,7 +918,7 @@ def test_openai_compat_per_model_override_drops_sampling_mask_from_body(
     # Reuse the same mock so we can read body[2]; in practice the new
     # backend instantiates its own client but the same MockHTTPClient
     # object answers because httpx.Client was patched at module level.
-    sibling._client = mock  # noqa: SLF001
+    sibling._client = mock
     assert sibling.capabilities.supports_sampling_mask is True
     sibling.next_distribution([10], top_k=3)
     body = mock.calls[-1]["json"]
@@ -1000,8 +986,7 @@ def test_stream_native_with_echo_renders_empty_bos_via_piece(monkeypatch) -> Non
                     "logprobs": {
                         "content": [
                             # Position 0: the prepended BOS, echoed blank.
-                            {"token": "", "token_id": 0, "logprob": 0.0,
-                             "top_logprobs": []},
+                            {"token": "", "token_id": 0, "logprob": 0.0, "top_logprobs": []},
                             # Position 1: first real prompt token.
                             {
                                 "token": "Once",
@@ -1051,37 +1036,56 @@ def test_fetch_fireworks_models_includes_vision_and_custom_drops_denylist(
     """
     catalogue = {
         "models": [
-            {"name": "accounts/fireworks/models/gpt-oss-120b",
-             "supportsServerless": True, "kind": "HF_BASE_MODEL",
-             "supportsImageInput": False},
+            {
+                "name": "accounts/fireworks/models/gpt-oss-120b",
+                "supportsServerless": True,
+                "kind": "HF_BASE_MODEL",
+                "supportsImageInput": False,
+            },
             # Vision LLM -- previously dropped, must now be KEPT.
-            {"name": "accounts/fireworks/models/kimi-k2p6",
-             "supportsServerless": True, "kind": "HF_BASE_MODEL",
-             "supportsImageInput": True},
+            {
+                "name": "accounts/fireworks/models/kimi-k2p6",
+                "supportsServerless": True,
+                "kind": "HF_BASE_MODEL",
+                "supportsImageInput": True,
+            },
             # CUSTOM_MODEL kind -- previously dropped, must now be KEPT.
-            {"name": "accounts/fireworks/models/qwen3p7-plus",
-             "supportsServerless": True, "kind": "CUSTOM_MODEL",
-             "supportsImageInput": True},
+            {
+                "name": "accounts/fireworks/models/qwen3p7-plus",
+                "supportsServerless": True,
+                "kind": "CUSTOM_MODEL",
+                "supportsImageInput": True,
+            },
             # Chat-only model on the denylist -- must be DROPPED.
-            {"name": "accounts/fireworks/models/minimax-m3",
-             "supportsServerless": True, "kind": "HF_BASE_MODEL",
-             "supportsImageInput": True},
+            {
+                "name": "accounts/fireworks/models/minimax-m3",
+                "supportsServerless": True,
+                "kind": "HF_BASE_MODEL",
+                "supportsImageInput": True,
+            },
             # Not generative -- must be DROPPED.
-            {"name": "accounts/fireworks/models/qwen3-embedding-8b",
-             "supportsServerless": True, "kind": "EMBEDDING_MODEL",
-             "supportsImageInput": False},
-            {"name": "accounts/fireworks/models/flux-1-schnell-fp8",
-             "supportsServerless": True, "kind": "FLUMINA_BASE_MODEL",
-             "supportsImageInput": False},
+            {
+                "name": "accounts/fireworks/models/qwen3-embedding-8b",
+                "supportsServerless": True,
+                "kind": "EMBEDDING_MODEL",
+                "supportsImageInput": False,
+            },
+            {
+                "name": "accounts/fireworks/models/flux-1-schnell-fp8",
+                "supportsServerless": True,
+                "kind": "FLUMINA_BASE_MODEL",
+                "supportsImageInput": False,
+            },
             # Not serverless -- must be DROPPED.
-            {"name": "accounts/fireworks/models/some-dedicated-only",
-             "supportsServerless": False, "kind": "HF_BASE_MODEL",
-             "supportsImageInput": False},
+            {
+                "name": "accounts/fireworks/models/some-dedicated-only",
+                "supportsServerless": False,
+                "kind": "HF_BASE_MODEL",
+                "supportsImageInput": False,
+            },
         ]
     }
-    mock = MockHTTPClient(
-        {("GET", "/v1/accounts/fireworks/models?pageSize=200"): catalogue}
-    )
+    mock = MockHTTPClient({("GET", "/v1/accounts/fireworks/models?pageSize=200"): catalogue})
     monkeypatch.setattr(oc_mod.httpx, "Client", lambda **kw: mock)
     prov = ProviderConfig(
         name="fireworks",
@@ -1277,9 +1281,7 @@ def test_openai_compat_stream_native_with_echo_switches_to_token_array(
             }
         ]
     }
-    _attach_stream_factory(
-        mock, [_MockStreamResponse(200, _sse_lines([echo_chunk, emit_chunk]))]
-    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([echo_chunk, emit_chunk]))])
     list(
         backend.stream_native_with_echo(
             "hello world",
@@ -1310,9 +1312,7 @@ def test_request_retries_on_429_and_honors_retry_after(monkeypatch) -> None:
     """
     sleeps: list[float] = []
     success_payload = {
-        "choices": [
-            {"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}
-        ]
+        "choices": [{"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}]
     }
     backend, mock = _make_oc_backend(
         monkeypatch,
@@ -1426,7 +1426,7 @@ def _sse_lines(chunks: list[dict]) -> list[bytes]:
     """Turn JSON chunks into the line-stream httpx's iter_lines yields."""
     out: list[bytes] = []
     for ch in chunks:
-        out.append(f"data: {json.dumps(ch)}".encode("utf-8"))
+        out.append(f"data: {json.dumps(ch)}".encode())
         out.append(b"")
     out.append(b"data: [DONE]")
     return out
@@ -1533,7 +1533,9 @@ def test_supports_native_sampler_matrix(monkeypatch) -> None:
 
     # Fireworks-style profile: extensions on -> both are native.
     fw, _ = _make_oc_backend(
-        monkeypatch, routes={}, has_completions=True,
+        monkeypatch,
+        routes={},
+        has_completions=True,
     )
     fw.provider.supports_typical_p_native = True
     fw.provider.supports_mirostat = True
@@ -1674,9 +1676,7 @@ def test_stream_native_emits_one_genstep_per_token(monkeypatch) -> None:
     that step's ``top_logprobs``, and (c) the terminal ``finish_reason``
     propagates as the stop_reason on the *last* GenStep only.
     """
-    backend, mock = _make_oc_backend(
-        monkeypatch, routes={}, has_completions=True, max_top=5
-    )
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True, max_top=5)
     chunks = [
         {
             "choices": [
@@ -1718,9 +1718,7 @@ def test_stream_native_emits_one_genstep_per_token(monkeypatch) -> None:
             ]
         },
     ]
-    _attach_stream_factory(
-        mock, [_MockStreamResponse(200, _sse_lines(chunks))]
-    )
+    _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines(chunks))])
 
     steps = list(
         backend.stream_native(
@@ -1769,9 +1767,7 @@ def test_stream_native_yields_incrementally_not_buffered(monkeypatch) -> None:
     is produced: with the lookahead it must be strictly fewer than the
     total (the old buffered path read all of them before yielding once).
     """
-    backend, mock = _make_oc_backend(
-        monkeypatch, routes={}, has_completions=True, max_top=5
-    )
+    backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True, max_top=5)
     chunks = [
         {
             "choices": [
@@ -2146,9 +2142,7 @@ def test_stream_native_requests_perf_metrics_when_supported(monkeypatch) -> None
     )
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert mock.calls[-1]["kwargs"]["json"]["perf_metrics_in_response"] is True
 
@@ -2157,9 +2151,7 @@ def test_stream_native_omits_perf_metrics_when_unsupported(monkeypatch) -> None:
     backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert "perf_metrics_in_response" not in mock.calls[-1]["kwargs"]["json"]
 
@@ -2205,9 +2197,7 @@ def test_stream_native_records_perf_metrics_from_final_chunk(monkeypatch) -> Non
     sink: dict = {"requests": 0, "notes": [], "perf_metrics": None}
     backend.set_active_usage(sink)
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert isinstance(sink["perf_metrics"], dict)
     assert sink["perf_metrics"]["server-time-to-first-token"] == pytest.approx(0.042)
@@ -2222,9 +2212,7 @@ def test_stream_native_records_perf_metrics_from_response_body(monkeypatch) -> N
     path the inspect page would never see server timings.
     """
     payload = {
-        "choices": [
-            {"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}
-        ],
+        "choices": [{"logprobs": {"top_logprobs": [{" Paris": -0.5}]}}],
         "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
         "perf_metrics": {"server-processing-time": 0.123},
     }
@@ -2254,9 +2242,7 @@ def test_stream_native_requests_raw_output_when_supported(monkeypatch) -> None:
     )
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert mock.calls[-1]["kwargs"]["json"]["raw_output"] is True
 
@@ -2265,9 +2251,7 @@ def test_stream_native_omits_raw_output_when_unsupported(monkeypatch) -> None:
     backend, mock = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
     _attach_stream_factory(mock, [_MockStreamResponse(200, _sse_lines([]))])
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert "raw_output" not in mock.calls[-1]["kwargs"]["json"]
 
@@ -2298,9 +2282,7 @@ def test_stream_native_records_raw_output_from_final_chunk(monkeypatch) -> None:
     sink: dict = {"requests": 0}
     backend.set_active_usage(sink)
     list(
-        backend.stream_native(
-            "p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1
-        )
+        backend.stream_native("p", sampler_name="greedy", sampler_params={}, max_tokens=1, top_k=1)
     )
     assert sink["raw_output"] == raw_payload
 
@@ -2442,19 +2424,25 @@ def test_stream_native_with_echo_splits_prompt_and_generation(monkeypatch) -> No
                                 "token": "The",
                                 "token_id": 100,
                                 "logprob": -2.0,
-                                "top_logprobs": [{"token": "The", "token_id": 100, "logprob": -2.0}],
+                                "top_logprobs": [
+                                    {"token": "The", "token_id": 100, "logprob": -2.0}
+                                ],
                             },
                             {
                                 "token": " cap",
                                 "token_id": 200,
                                 "logprob": -1.0,
-                                "top_logprobs": [{"token": " cap", "token_id": 200, "logprob": -1.0}],
+                                "top_logprobs": [
+                                    {"token": " cap", "token_id": 200, "logprob": -1.0}
+                                ],
                             },
                             {
                                 "token": " of",
                                 "token_id": 300,
                                 "logprob": -0.5,
-                                "top_logprobs": [{"token": " of", "token_id": 300, "logprob": -0.5}],
+                                "top_logprobs": [
+                                    {"token": " of", "token_id": 300, "logprob": -0.5}
+                                ],
                             },
                         ]
                     }
@@ -2561,9 +2549,7 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
                                 "token_id": tid,
                                 "logprob": lp,
                                 "text_offset": offset,
-                                "top_logprobs": [
-                                    {"token": text, "token_id": tid, "logprob": lp}
-                                ],
+                                "top_logprobs": [{"token": text, "token_id": tid, "logprob": lp}],
                             }
                         ]
                     }
@@ -2571,9 +2557,7 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
             ]
         }
 
-    def _emit_entry(
-        text: str, tid: int, lp: float, offset: int, finish: str | None = None
-    ) -> dict:
+    def _emit_entry(text: str, tid: int, lp: float, offset: int, finish: str | None = None) -> dict:
         return {
             "choices": [
                 {
@@ -2586,9 +2570,7 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
                                 "text_offset": offset,
                                 "sampling_logprob": lp,
                                 "sampling_mask_count": 100,
-                                "top_logprobs": [
-                                    {"token": text, "token_id": tid, "logprob": lp}
-                                ],
+                                "top_logprobs": [{"token": text, "token_id": tid, "logprob": lp}],
                             }
                         ]
                     },
@@ -2625,9 +2607,7 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
     assert [g.decision.token_id for g in gen_steps] == [300, 400]
     # Sampling-mask data only on emit positions (Fireworks behavior).
     assert all(s.chosen.sampling_mask_count is None for s in step_results)
-    assert all(
-        g.step_result.chosen.sampling_mask_count == 100 for g in gen_steps
-    )
+    assert all(g.step_result.chosen.sampling_mask_count == 100 for g in gen_steps)
 
 
 def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
@@ -2773,9 +2753,7 @@ def test_stream_native_with_echo_marks_unscored_position_zero_as_nan(monkeypatch
                                 "token": " a",
                                 "token_id": 300,
                                 "logprob": -0.1,
-                                "top_logprobs": [
-                                    {"token": " a", "token_id": 300, "logprob": -0.1}
-                                ],
+                                "top_logprobs": [{"token": " a", "token_id": 300, "logprob": -0.1}],
                             }
                         ]
                     },
@@ -2954,9 +2932,7 @@ def test_request_counts_each_attempt_into_active_usage(monkeypatch) -> None:
     """
     sleeps: list[float] = []
     success_payload = {
-        "choices": [
-            {"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}
-        ]
+        "choices": [{"logprobs": {"top_logprobs": [{" Paris": -0.5, " London": -2.0}]}}]
     }
     backend, _mock = _make_oc_backend(
         monkeypatch,
@@ -2988,9 +2964,7 @@ def test_post_records_provider_reported_token_usage(monkeypatch) -> None:
     of our best-effort local estimate.
     """
     payload = {
-        "choices": [
-            {"logprobs": {"top_logprobs": [{" hi": -0.1}]}}
-        ],
+        "choices": [{"logprobs": {"top_logprobs": [{" hi": -0.1}]}}],
         "usage": {"prompt_tokens": 13, "completion_tokens": 1, "total_tokens": 14},
     }
     backend, _mock = _make_oc_backend(
@@ -3072,9 +3046,7 @@ def test_set_active_usage_clear_stops_accounting(monkeypatch) -> None:
     backend, _mock = _make_oc_backend(
         monkeypatch,
         routes={
-            ("POST", "/completions"): {
-                "choices": [{"logprobs": {"top_logprobs": [{" hi": -0.1}]}}]
-            }
+            ("POST", "/completions"): {"choices": [{"logprobs": {"top_logprobs": [{" hi": -0.1}]}}]}
         },
         has_completions=True,
     )
@@ -3104,7 +3076,7 @@ def _make_llamacpp_backend(
 
 
 def test_llamacpp_constructor_fetches_model_name(monkeypatch) -> None:
-    backend, mock = _make_llamacpp_backend(
+    backend, _mock = _make_llamacpp_backend(
         monkeypatch,
         routes={("GET", "/v1/models"): {"data": [{"id": "qwen3-base"}]}},
     )

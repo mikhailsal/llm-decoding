@@ -288,8 +288,7 @@ def test_info_models_caps_carry_per_model_overrides_before_load(
     by_name = {b["name"]: b for b in r.json()["backends"]}
     fw = by_name["fireworks"]
     assert fw["models_caps"], (
-        "expected models_caps to be pre-populated for curated cloud models, "
-        "got empty map"
+        "expected models_caps to be pre-populated for curated cloud models, got empty map"
     )
     caps_120 = fw["models_caps"]["acct/models/gpt-oss-120b"]
     caps_20 = fw["models_caps"]["acct/models/gpt-oss-20b"]
@@ -318,9 +317,7 @@ def test_info_marks_chat_only_providers_generation_disabled(env_with_secret) -> 
     is the pre-flight UX so the user sees the decision before clicking.
     Fireworks (``has_completions=true``) must stay enabled.
     """
-    backend = FakeBackend(
-        tokens={}, pieces={}, distributions={}, eos_token_ids=(99,)
-    )
+    backend = FakeBackend(tokens={}, pieces={}, distributions={}, eos_token_ids=(99,))
     cfg = make_test_config(providers=["fireworks", "nim"])
     app = build_test_app({"dsbx-host-py": backend}, cfg=cfg)
     with make_authed_client(app) as c:

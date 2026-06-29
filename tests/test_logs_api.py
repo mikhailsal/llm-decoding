@@ -11,6 +11,7 @@ clean focus on the API layer.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os as _os
 import tempfile
 import uuid
@@ -127,14 +128,14 @@ def seeded_app():
     try:
         yield client
     finally:
+
         async def teardown():
             await logdb.dispose_engine()
+
         loop.run_until_complete(teardown())
         loop.close()
-        try:
+        with contextlib.suppress(OSError):
             _os.unlink(db_path)
-        except OSError:
-            pass
 
 
 # --------------------------------------------------------------------------- #

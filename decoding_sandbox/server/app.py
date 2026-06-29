@@ -33,8 +33,9 @@ import json
 import logging
 import random
 import threading
-from contextlib import asynccontextmanager
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -109,12 +110,10 @@ class BackendSlot:
         """Kick a background (re)load of ``model``. Raises if already loading."""
         with self._state_lock:
             if self.state == "loading":
-                raise _AlreadyLoading()
+                raise _AlreadyLoadingError()
             self.state = "loading"
             self.error = None
-        t = threading.Thread(
-            target=self._load, args=(model,), name="dsbx-model-load", daemon=True
-        )
+        t = threading.Thread(target=self._load, args=(model,), name="dsbx-model-load", daemon=True)
         t.start()
 
     def _load(self, model: str | None) -> None:
@@ -128,11 +127,11 @@ class BackendSlot:
         if old is not None:
             try:
                 old.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("dsbx server: error closing previous backend: %s", exc)
         try:
             new_backend = self._builder(model)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("dsbx server: model load failed")
             with self._state_lock:
                 self.state = "error"
@@ -150,7 +149,7 @@ class BackendSlot:
         """Unload the current model, leaving the slot empty."""
         with self._state_lock:
             if self.state == "loading":
-                raise _AlreadyLoading()
+                raise _AlreadyLoadingError()
 
         with self.lock:
             old = self.backend
@@ -158,7 +157,7 @@ class BackendSlot:
         if old is not None:
             try:
                 old.close()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("dsbx server: error closing backend on unload: %s", exc)
 
         with self._state_lock:
@@ -173,10 +172,8 @@ class BackendSlot:
             old = self.backend
             self.backend = None
         if old is not None:
-            try:
+            with suppress(Exception):
                 old.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     # -- introspection --------------------------------------------------- #
     def status(self) -> S.ServerStatus:
@@ -205,16 +202,14 @@ class BackendSlot:
         if self._model_lister is not None:
             try:
                 entries = list(self._model_lister())
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 note = f"model discovery failed: {exc.__class__.__name__}"
         else:
             note = "this server does not advertise a model catalogue"
-        return S.ServerModelList(
-            backend_kind=self.backend_kind, models=entries, note=note
-        )
+        return S.ServerModelList(backend_kind=self.backend_kind, models=entries, note=note)
 
 
-class _AlreadyLoading(RuntimeError):
+class _AlreadyLoadingError(RuntimeError):
     """Internal: raised by ``start_load`` when a load is already in progress."""
 
 
@@ -299,7 +294,7 @@ def make_app(
     def reload(req: S.ReloadRequest) -> S.ServerStatus:
         try:
             slot.start_load(req.model)
-        except _AlreadyLoading as exc:
+        except _AlreadyLoadingError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="a model load is already in progress; poll /v1/status",
@@ -310,7 +305,7 @@ def make_app(
     def unload() -> S.ServerStatus:
         try:
             slot.unload()
-        except _AlreadyLoading as exc:
+        except _AlreadyLoadingError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="a model load is already in progress; poll /v1/status",
@@ -418,16 +413,16 @@ def make_app(
         # accidentally close over a pydantic model that FastAPI might
         # invalidate by the time the body actually runs (it won't in
         # practice, but the snapshot also keeps types tight).
-        params = dict(
-            prompt=req.prompt,
-            max_tokens=int(req.max_tokens),
-            top_k=int(req.top_k),
-            stop_ids=tuple(int(i) for i in req.stop_ids),
-            seed=int(req.seed),
-            respect_eos=bool(req.respect_eos),
-            watch_ids=tuple(int(i) for i in (req.watch_ids or [])),
-            prefix_token_ids=tuple(int(i) for i in (req.prefix_token_ids or [])),
-        )
+        params = {
+            "prompt": req.prompt,
+            "max_tokens": int(req.max_tokens),
+            "top_k": int(req.top_k),
+            "stop_ids": tuple(int(i) for i in req.stop_ids),
+            "seed": int(req.seed),
+            "respect_eos": bool(req.respect_eos),
+            "watch_ids": tuple(int(i) for i in (req.watch_ids or [])),
+            "prefix_token_ids": tuple(int(i) for i in (req.prefix_token_ids or [])),
+        }
 
         def event_stream() -> Iterator[bytes]:
             yield from _run_generate_stream(slot, sampler, **params)
@@ -541,7 +536,7 @@ def _sse(payload: dict) -> bytes:
     embedded newlines after json.dumps with default options), which keeps
     parser logic on the client trivial.
     """
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 def _run_generate_stream(
@@ -586,7 +581,7 @@ def _run_generate_stream(
                 event = S.StepEvent(step=S.genstep_to_wire(gs))
                 yield _sse(event.model_dump())
                 last_reason = gs.stop_reason
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             yield _sse(S.DoneEvent(stop_reason=last_reason, error=str(exc)).model_dump())
             return
     yield _sse(S.DoneEvent(stop_reason=last_reason).model_dump())
@@ -609,4 +604,4 @@ def _require_ready_inline(slot: BackendSlot) -> Backend:
     )
 
 
-__all__ = ["make_app", "BackendSlot"]
+__all__ = ["BackendSlot", "make_app"]

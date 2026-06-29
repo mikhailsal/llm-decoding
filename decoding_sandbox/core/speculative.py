@@ -151,4 +151,4 @@ def speculative_generate(
             break
 
 
-__all__ = ["SpecRound", "Speculator", "HFSpeculator", "speculative_generate"]
+__all__ = ["HFSpeculator", "SpecRound", "Speculator", "speculative_generate"]

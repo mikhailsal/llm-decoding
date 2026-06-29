@@ -121,11 +121,15 @@ class Sampler:
         # caller (a Backend or the inspector UI), and the manual TUI
         # in particular re-uses them across renders.
         adjusted: list[float] = []
-        seen_counts = Counter(ctx.token_ids) if (
-            self.repetition_penalty != 1.0
-            or self.frequency_penalty != 0.0
-            or self.presence_penalty != 0.0
-        ) else None
+        seen_counts = (
+            Counter(ctx.token_ids)
+            if (
+                self.repetition_penalty != 1.0
+                or self.frequency_penalty != 0.0
+                or self.presence_penalty != 0.0
+            )
+            else None
+        )
         if seen_counts is not None:
             for c in cands:
                 lp = c.logprob
@@ -154,7 +158,7 @@ class Sampler:
             adjusted = [c.logprob for c in cands]
         probs = _softmax([lp / temp for lp in adjusted])
         pairs: list[tuple[TokenCandidate, float]] = sorted(
-            zip(cands, probs), key=lambda x: x[1], reverse=True
+            zip(cands, probs, strict=False), key=lambda x: x[1], reverse=True
         )
 
         if self.top_k:
@@ -184,7 +188,11 @@ class Sampler:
         # token actually emitted (in nats, since pairs carry probs).
         if self.mirostat_target is not None and self.mirostat_target > 0:
             chosen_prob = next(
-                (p for c, p in zip(kept_cands, kept_norm) if c.token_id == chosen.token_id),
+                (
+                    p
+                    for c, p in zip(kept_cands, kept_norm, strict=False)
+                    if c.token_id == chosen.token_id
+                ),
                 None,
             )
             if chosen_prob and chosen_prob > 0:
@@ -193,7 +201,7 @@ class Sampler:
         return SamplerDecision(
             token_id=chosen.token_id,
             token_text=chosen.text,
-            kept=list(zip(kept_cands, kept_norm)),
+            kept=list(zip(kept_cands, kept_norm, strict=False)),
             greedy_token_id=greedy_id,
             note=", ".join(notes),
         )

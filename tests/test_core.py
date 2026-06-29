@@ -562,9 +562,9 @@ def test_sampler_repetition_penalty_demotes_seen_tokens() -> None:
     """
     cands = [cand(1, "A", 0.6, 0), cand(2, "B", 0.4, 1)]
     bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 1]))
-    pen = Sampler(
-        "temperature", temperature=1.0, repetition_penalty=1.5
-    ).decide(cands, _ctx_with_history([1, 1, 1]))
+    pen = Sampler("temperature", temperature=1.0, repetition_penalty=1.5).decide(
+        cands, _ctx_with_history([1, 1, 1])
+    )
     bare_p = next(p for c, p in bare.kept if c.token_id == 1)
     pen_p = next(p for c, p in pen.kept if c.token_id == 1)
     assert pen_p < bare_p
@@ -580,9 +580,9 @@ def test_sampler_frequency_penalty_scales_with_count() -> None:
     """
     cands = [cand(1, "A", 0.55, 0), cand(2, "B", 0.45, 1)]
     bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 1, 1, 2]))
-    pen = Sampler(
-        "temperature", temperature=1.0, frequency_penalty=0.5
-    ).decide(cands, _ctx_with_history([1, 1, 1, 1, 2]))
+    pen = Sampler("temperature", temperature=1.0, frequency_penalty=0.5).decide(
+        cands, _ctx_with_history([1, 1, 1, 1, 2])
+    )
     bare_p = next(p for c, p in bare.kept if c.token_id == 1)
     pen_p = next(p for c, p in pen.kept if c.token_id == 1)
     assert pen_p < bare_p
@@ -598,9 +598,9 @@ def test_sampler_presence_penalty_flat_per_unique_token() -> None:
     """
     cands = [cand(1, "A", 0.5, 0), cand(2, "B", 0.3, 1), cand(3, "C", 0.2, 2)]
     bare = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 1, 2]))
-    pen = Sampler(
-        "temperature", temperature=1.0, presence_penalty=1.0
-    ).decide(cands, _ctx_with_history([1, 1, 2]))
+    pen = Sampler("temperature", temperature=1.0, presence_penalty=1.0).decide(
+        cands, _ctx_with_history([1, 1, 2])
+    )
     bare_p3 = next(p for c, p in bare.kept if c.token_id == 3)
     pen_p3 = next(p for c, p in pen.kept if c.token_id == 3)
     # Token 3 (never seen) gets a boost because everybody else got demoted.
@@ -617,9 +617,7 @@ def test_sampler_default_penalties_are_noops() -> None:
     same shape as the historical pre-penalty Sampler.
     """
     cands = [cand(1, "A", 0.55, 0), cand(2, "B", 0.45, 1)]
-    old_style = Sampler("temperature", temperature=1.0).decide(
-        cands, _ctx_with_history([1, 2, 1])
-    )
+    old_style = Sampler("temperature", temperature=1.0).decide(cands, _ctx_with_history([1, 2, 1]))
     same = Sampler(
         "temperature",
         temperature=1.0,

@@ -33,7 +33,7 @@ PROMPT = "The capital of France is"
 
 def load(model_id: str, four_bit: bool, gpu_mem: str = "4500MiB", cpu_mem: str = "13GiB"):
     tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    kwargs = dict(device_map="auto", trust_remote_code=True)
+    kwargs = {"device_map": "auto", "trust_remote_code": True}
     if four_bit:
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -65,7 +65,7 @@ def demo(model_id: str, four_bit: bool) -> bool:
     try:
         dm = getattr(model, "hf_device_map", {})
         print("  layers on:", sorted({str(v) for v in dm.values()}))
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     enc = tok(PROMPT, return_tensors="pt")
@@ -83,7 +83,7 @@ def demo(model_id: str, four_bit: bool) -> bool:
     last = torch.log_softmax(logits[0, -1].float(), dim=-1)
     topv, topi = torch.topk(last, 8)
     print(f"\nFull-vocab next-token after {PROMPT!r} (vocab={vocab}):")
-    for lp, idx in zip(topv.tolist(), topi.tolist()):
+    for lp, idx in zip(topv.tolist(), topi.tolist(), strict=False):
         print(
             f"  {tok.decode([idx])!r:>14}  p={torch.exp(torch.tensor(lp)).item():6.2%}  logprob={lp:7.3f}"
         )
@@ -111,7 +111,7 @@ def main() -> int:
         demo(args.model, four_bit=not args.no_4bit)
         print("\nPRIMARY OK")
         return 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"\nPRIMARY FAILED: {type(exc).__name__}: {exc}")
         traceback.print_exc()
         print(f"\n--- Falling back to dense base {args.fallback} ---")
@@ -119,7 +119,7 @@ def main() -> int:
             demo(args.fallback, four_bit=not args.no_4bit)
             print("\nFALLBACK OK")
             return 0
-        except Exception as exc2:  # noqa: BLE001
+        except Exception as exc2:
             print(f"\nFALLBACK FAILED: {type(exc2).__name__}: {exc2}")
             traceback.print_exc()
             return 1

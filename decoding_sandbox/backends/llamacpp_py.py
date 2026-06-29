@@ -39,12 +39,12 @@ def _discover_model_path(
 ) -> str:
     """Locate the GGUF: explicit path wins, else first match under search_dirs."""
     if explicit:
-        p = Path(os.path.expanduser(os.path.expandvars(explicit)))
+        p = Path(os.path.expandvars(explicit)).expanduser()
         if not p.is_file():
             raise FileNotFoundError(f"GGUF not found at {p}")
         return str(p)
     for raw in search_dirs:
-        d = Path(os.path.expanduser(os.path.expandvars(raw)))
+        d = Path(os.path.expandvars(raw)).expanduser()
         if not d.is_dir():
             continue
         for match in d.glob(glob):
@@ -74,7 +74,7 @@ def discover_gguf_models(
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for raw in search_dirs:
-        d = Path(os.path.expanduser(os.path.expandvars(raw)))
+        d = Path(os.path.expandvars(raw)).expanduser()
         if not d.is_dir():
             continue
         for match in sorted(d.glob(glob)):
@@ -117,9 +117,8 @@ class LlamaCppPyBackend(Backend):
         verbose: bool = False,
         **extra_llama_kwargs: Any,
     ) -> None:
-        from llama_cpp import Llama  # type: ignore
-
         import numpy as np  # noqa: F401  (validate availability early)
+        from llama_cpp import Llama  # type: ignore
 
         self._numpy = __import__("numpy")
         self.model_path = _discover_model_path(model_path, model_search_dirs or [], model_glob)
@@ -188,7 +187,7 @@ class LlamaCppPyBackend(Backend):
                 continue
             try:
                 tid = int(fn())
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S112 -- best-effort EOS/EOT probe; skip ids the build doesn't expose
                 continue
             if tid >= 0 and tid not in out:
                 out.append(tid)
@@ -233,7 +232,7 @@ class LlamaCppPyBackend(Backend):
             return ()
         try:
             tid = int(fn())
-        except Exception:  # noqa: BLE001
+        except Exception:
             return ()
         if tid < 0:
             return ()
@@ -258,9 +257,7 @@ class LlamaCppPyBackend(Backend):
         # control-token id instead of being split into literal ``<``, ``|``,
         # ``im_start`` ... pieces. This is what makes "insert a special
         # token anywhere in the prompt" round-trip to exactly one id.
-        return list(
-            self._llama.tokenize(text.encode("utf-8"), add_bos=False, special=True)
-        )
+        return list(self._llama.tokenize(text.encode("utf-8"), add_bos=False, special=True))
 
     def detokenize(self, token_ids: list[int]) -> str:
         # ``special=True`` so control tokens render as their ``<|...|>``
@@ -278,9 +275,9 @@ class LlamaCppPyBackend(Backend):
             # then renders as the misleading dim ``<empty>``. With the flag it
             # comes back as ``<|endoftext|>`` and reads as the special token it
             # actually is.
-            self._piece_cache[token_id] = self._llama.detokenize(
-                [token_id], special=True
-            ).decode("utf-8", errors="replace")
+            self._piece_cache[token_id] = self._llama.detokenize([token_id], special=True).decode(
+                "utf-8", errors="replace"
+            )
         return self._piece_cache[token_id]
 
     def special_tokens(self) -> list[tuple[int, str]]:
@@ -314,7 +311,7 @@ class LlamaCppPyBackend(Backend):
                         text = self.piece(i)
                         if text:
                             out.append((i, text))
-        except Exception:  # noqa: BLE001
+        except Exception:
             out = []
         self._special_tokens_cache = out
         return out
@@ -348,10 +345,15 @@ class LlamaCppPyBackend(Backend):
         # `len(token_ids)` rows are populated by our eval.
         scores = np.asarray(self._llama.scores[: len(token_ids)], dtype=np.float32)
         overhead_mb = scores.nbytes / (1024 * 1024)
-        if hasattr(self, "_verbose") and self._verbose or True:  # print unconditionally for now, or use rich.print
+        # NOTE: currently prints unconditionally (debug aid for VRAM sizing).
+        if (hasattr(self, "_verbose") and self._verbose) or True:
             import rich
-            rich.print(f"[dim]\\[llamacpp-py] logits matrix shape {scores.shape} allocated {overhead_mb:.2f} MB[/dim]")
-            
+
+            rich.print(
+                f"[dim]\\[llamacpp-py] logits matrix shape {scores.shape} "
+                f"allocated {overhead_mb:.2f} MB[/dim]"
+            )
+
         if scores.shape[0] != len(token_ids):
             raise RuntimeError(
                 f"unexpected scores shape {scores.shape} for {len(token_ids)} tokens"
@@ -391,7 +393,7 @@ class LlamaCppPyBackend(Backend):
                 rank,
                 is_special=self._is_special(int(j)),
             )
-            for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
+            for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist(), strict=False))
         ]
         step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
         # Full-vocab backend: read EXACT logprobs for each watched id
@@ -471,7 +473,7 @@ class LlamaCppPyBackend(Backend):
                     rank,
                     is_special=self._is_special(int(j)),
                 )
-                for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist()))
+                for rank, (j, v) in enumerate(zip(idx.tolist(), vals.tolist(), strict=False))
             ]
             chosen = self._exact_candidate(dist, ids[i + 1]) if i + 1 < len(ids) else None
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}

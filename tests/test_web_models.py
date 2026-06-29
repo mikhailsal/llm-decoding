@@ -121,7 +121,7 @@ def test_cache_serves_repeat_calls_without_refetch(app_with_key, monkeypatch) ->
     """
     calls: list[str] = []
 
-    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:  # noqa: ARG001
+    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:
         calls.append(self.provider.name)
         return ["accounts/fireworks/models/gpt-oss-120b", "accounts/fireworks/models/fresh-model"]
 
@@ -147,7 +147,7 @@ def test_refresh_bypasses_cache(app_with_key, monkeypatch) -> None:
     """``?refresh=true`` always re-fetches."""
     calls: list[str] = []
 
-    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:  # noqa: ARG001
+    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:
         calls.append(self.provider.name)
         return [f"model-{len(calls)}"]
 
@@ -168,7 +168,7 @@ def test_ttl_expiry_triggers_refetch(monkeypatch) -> None:
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key-DSBX-ttl-nim")
     calls: list[int] = []
 
-    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:  # noqa: ARG001
+    def _fake_fetch(self, timeout: float = 15.0) -> list[str]:
         calls.append(1)
         return ["live-model"]
 
@@ -196,7 +196,7 @@ def test_ttl_expiry_triggers_refetch(monkeypatch) -> None:
 def test_live_fetch_failure_does_not_leak_url(app_with_key, monkeypatch) -> None:
     """A failing upstream call must NOT surface a URL in the response."""
 
-    def _boom(self, timeout: float = 15.0):  # noqa: ARG001
+    def _boom(self, timeout: float = 15.0):
         raise RuntimeError(
             "Server error '500 Internal Server Error' for url 'https://api.fireworks.ai/v1/models'"
         )

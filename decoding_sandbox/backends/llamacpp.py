@@ -42,7 +42,7 @@ class LlamaCppBackend(Backend):
             r = self._client.get("/v1/models")
             r.raise_for_status()
             return r.json()["data"][0]["id"]
-        except Exception:  # noqa: BLE001
+        except Exception:
             return "llama.cpp"
 
     @property

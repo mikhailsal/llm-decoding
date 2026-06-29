@@ -56,13 +56,13 @@ def cmd_generate(
             sampler = samplers.load_custom(args.custom_file)
             sampler_name = f"custom({args.custom_file})"
         else:
-            params = dict(
-                temperature=args.temperature,
-                top_k=args.sampler_top_k,
-                top_p=args.top_p,
-                min_p=args.min_p,
-                typical_p=args.typical_p,
-            )
+            params = {
+                "temperature": args.temperature,
+                "top_k": args.sampler_top_k,
+                "top_p": args.top_p,
+                "min_p": args.min_p,
+                "typical_p": args.typical_p,
+            }
             params = {k: v for k, v in params.items() if v is not None}
             sampler = samplers.make_sampler(args.sampler, **params)
             sampler_name = args.sampler

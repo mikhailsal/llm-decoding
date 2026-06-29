@@ -46,7 +46,7 @@ def build_backend(
     cfg: Config,
     model: str | None = None,
     *,
-    transport: "httpx.BaseTransport | None" = None,
+    transport: httpx.BaseTransport | None = None,
 ) -> Backend:
     """Construct one backend instance by name.
 
@@ -177,7 +177,7 @@ def list_available_models(name: str, cfg: Config) -> list[tuple[str, str]]:
             import os as _os
             from pathlib import Path as _Path
 
-            p = _Path(_os.path.expanduser(_os.path.expandvars(str(explicit))))
+            p = _Path(_os.path.expandvars(str(explicit))).expanduser()
             ap = str(p.resolve()) if p.exists() else str(p)
             if all(ap != e[0] for e in entries):
                 entries.insert(0, (ap, p.stem))
@@ -185,7 +185,7 @@ def list_available_models(name: str, cfg: Config) -> list[tuple[str, str]]:
     return []
 
 
-def _build_remote(rc, *, transport: "httpx.BaseTransport | None" = None) -> Backend:
+def _build_remote(rc, *, transport: httpx.BaseTransport | None = None) -> Backend:
     """Build a ``RemoteBackend`` from a :class:`RemoteConfig` entry.
 
     Kept in a helper so the factory has a single import point for the

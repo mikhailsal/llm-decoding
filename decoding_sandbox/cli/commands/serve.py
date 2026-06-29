@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 from decoding_sandbox.cli import app
 from decoding_sandbox.cli._shared import _build_backend_with_load_timing
@@ -55,16 +56,17 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
         return build_backend(args.backend, cfg, model=model)
 
     def model_lister() -> list[S.ServerModelEntry]:
-        import os as _os
+        from pathlib import Path as _Path
 
         def _size(model_id: str) -> int | None:
             # GGUF ids are real file paths -> expose on-disk size for the
             # UI's size-proportional load bar; HF repo ids stay None.
+            p = _Path(model_id)
             try:
-                if _os.path.isfile(model_id):
-                    return _os.path.getsize(model_id)
+                if p.is_file():
+                    return p.stat().st_size
             except OSError:
-                pass
+                return None
             return None
 
         return [
@@ -106,8 +108,6 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
     try:
         uvicorn.run(server_app, host=args.host, port=args.port, log_level=args.log_level)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             backend.close()
-        except Exception:  # noqa: BLE001
-            pass
     return 0

@@ -16,9 +16,8 @@ the registry plumbing, the family guard, and the auth dependency.
 
 from __future__ import annotations
 
-from tests.fakes import FakeBackend
 from decoding_sandbox.web.backends import BackendRegistry
-
+from tests.fakes import FakeBackend
 from tests.web_helpers import build_test_app, make_authed_client, make_test_config
 
 
@@ -88,9 +87,7 @@ def test_remote_reload_forwards_model_and_returns_loading() -> None:
 
 def test_registry_unload_forwards_and_returns_empty() -> None:
     fr = FakeRemote()
-    registry = BackendRegistry(
-        make_test_config(remotes={"dsbx-host-py": "http://192.0.2.42:8000"})
-    )
+    registry = BackendRegistry(make_test_config(remotes={"dsbx-host-py": "http://192.0.2.42:8000"}))
     registry.get("dsbx-host-py").instance = fr
     registry._models_cache["dsbx-host-py"] = object()  # type: ignore[assignment]
 
@@ -130,9 +127,7 @@ def test_reload_404_for_unknown_backend() -> None:
 
 
 def test_registry_unload_unknown_backend_raises_lookup_error() -> None:
-    registry = BackendRegistry(
-        make_test_config(remotes={"dsbx-host-py": "http://192.0.2.42:8000"})
-    )
+    registry = BackendRegistry(make_test_config(remotes={"dsbx-host-py": "http://192.0.2.42:8000"}))
     try:
         registry.unload_remote("nope")
     except LookupError:

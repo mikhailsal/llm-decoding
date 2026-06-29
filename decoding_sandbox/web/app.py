@@ -73,7 +73,7 @@ def make_web_app(
     # Read the [web.logging] table now so the registry knows whether to
     # build LoggingTransports for new backends. The event loop reference
     # gets attached during the lifespan startup hook below.
-    log_cfg = (cfg.get("web", "logging", default={}) or {})
+    log_cfg = cfg.get("web", "logging", default={}) or {}
     logging_enabled = bool(log_cfg.get("enabled", True))
     registry = BackendRegistry(cfg, logging_enabled=logging_enabled)
     sessions = ManualSessionRegistry(ttl_seconds=manual_ttl_seconds)
@@ -101,7 +101,7 @@ def make_web_app(
                 start_logging_service(batch_size=batch_size, flush_interval=flush_interval)
                 registry.attach_loop(asyncio.get_running_loop())
                 log.info("dsbx-web: upstream-request log store online (%s)", db_path)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Logging is a tooling feature; if the DB can't open we
                 # still want the proxied API to keep working. Log the
                 # failure loudly and continue with logging effectively
@@ -116,9 +116,7 @@ def make_web_app(
             # 1. close backends so httpx clients stop emitting requests.
             # 2. stop the flush task so it sees no more enqueues.
             # 3. dispose the engine (closes the SQLite connection).
-            log.info(
-                "dsbx-web: shutting down -- closing %d backends", len(registry.names())
-            )
+            log.info("dsbx-web: shutting down -- closing %d backends", len(registry.names()))
             registry.close_all()
             if logging_enabled:
                 try:
@@ -129,7 +127,7 @@ def make_web_app(
 
                     await stop_logging_service()
                     await dispose_engine()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception("dsbx-web: error during log store shutdown")
 
     app = FastAPI(
@@ -243,7 +241,7 @@ def make_web_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Network hiccup / host down: surface as an error state, not a
             # 502, so the poller shows "error" and keeps the page usable.
             log.warning("dsbx-web: remote status for %r failed: %s", name, exc)
@@ -278,7 +276,7 @@ def make_web_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("dsbx-web: remote reload for %r failed: %s", name, exc)
             raise HTTPException(
                 status_code=502,
@@ -305,7 +303,7 @@ def make_web_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("dsbx-web: remote unload for %r failed: %s", name, exc)
             raise HTTPException(
                 status_code=502,
@@ -809,9 +807,7 @@ def _snapshot(backend: Backend, entry) -> S.ManualSnapshot:
     )
 
 
-def _resolve_watches(
-    backend: Backend, *, texts: list[str], ids: list[int], eos: bool
-) -> list[int]:
+def _resolve_watches(backend: Backend, *, texts: list[str], ids: list[int], eos: bool) -> list[int]:
     """Resolve ``watch_texts`` / ``watch_ids`` / ``watch_eos`` to token ids.
 
     Returns a flat de-duplicated list of token ids that the generate
@@ -898,7 +894,7 @@ def _mount_spa_bundle(app: FastAPI, dist_path: Path) -> None:
         try:
             target.relative_to(candidate_root)
         except ValueError:
-            raise HTTPException(status_code=404, detail="not found")
+            raise HTTPException(status_code=404, detail="not found") from None
 
         if target.is_file():
             return FileResponse(str(target))

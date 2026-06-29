@@ -27,7 +27,7 @@ class HFBackend(Backend):
         gpu_mem: str = "4500MiB",
         cpu_mem: str = "13GiB",
     ) -> None:
-        import torch  # noqa: F401  (validate availability early)
+        import torch
 
         self._torch = torch
         self.model_id = model_id
@@ -35,7 +35,7 @@ class HFBackend(Backend):
         try:
             self._load(model_id, load_in_4bit, gpu_mem, cpu_mem)
             self.loaded_model = model_id
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if not fallback_model or fallback_model == model_id:
                 raise
             print(
@@ -50,7 +50,7 @@ class HFBackend(Backend):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-        kwargs: dict = dict(device_map="auto", trust_remote_code=True)
+        kwargs: dict = {"device_map": "auto", "trust_remote_code": True}
         if four_bit:
             kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -121,7 +121,7 @@ class HFBackend(Backend):
         else:
             ids = list(getattr(self.tokenizer, "all_special_ids", []) or [])
             toks = list(getattr(self.tokenizer, "all_special_tokens", []) or [])
-            for tid, txt in zip(ids, toks):
+            for tid, txt in zip(ids, toks, strict=False):
                 out.append((int(tid), str(txt)))
         out.sort(key=lambda pair: pair[0])
         return out
@@ -152,7 +152,7 @@ class HFBackend(Backend):
                 rank,
                 is_special=self._is_special(int(i)),
             )
-            for rank, (v, i) in enumerate(zip(vals.tolist(), idx.tolist()))
+            for rank, (v, i) in enumerate(zip(vals.tolist(), idx.tolist(), strict=False))
         ]
         step = StepResult(position=len(token_ids), candidates=cands, is_full_vocab=True)
         # Full-vocab backend: read the EXACT logprob of each watched id
@@ -272,7 +272,7 @@ class HFBackend(Backend):
                     rank,
                     is_special=self._is_special(int(j)),
                 )
-                for rank, (v, j) in enumerate(zip(vals.tolist(), idx.tolist()))
+                for rank, (v, j) in enumerate(zip(vals.tolist(), idx.tolist(), strict=False))
             ]
             chosen = self._exact_candidate(dist, ids[i + 1]) if i + 1 < len(ids) else None
             watched = {wid: self._exact_candidate(dist, wid) for wid in watch_ids}

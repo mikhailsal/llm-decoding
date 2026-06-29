@@ -111,9 +111,7 @@ class RequestLog(Base):
     stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    __table_args__ = (
-        Index("ix_request_logs_backend_timestamp", "backend_name", "timestamp"),
-    )
+    __table_args__ = (Index("ix_request_logs_backend_timestamp", "backend_name", "timestamp"),)
 
 
 def _normalize_db_url(db_path_or_url: str) -> str:
@@ -127,7 +125,7 @@ def _normalize_db_url(db_path_or_url: str) -> str:
     """
     if "://" in db_path_or_url:
         return db_path_or_url
-    expanded = Path(os.path.expandvars(os.path.expanduser(db_path_or_url)))
+    expanded = Path(os.path.expandvars(db_path_or_url)).expanduser()
     expanded.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite+aiosqlite:///{expanded}"
 

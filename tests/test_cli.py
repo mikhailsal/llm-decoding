@@ -593,15 +593,15 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
             prefix_token_ids=(),
         ):
             stream_calls.append(
-                dict(
-                    prompt=prompt,
-                    sampler_name=sampler_name,
-                    sampler_params=sampler_params or {},
-                    max_tokens=max_tokens,
-                    top_k=top_k,
-                    stop_ids=list(stop_ids),
-                    seed=seed,
-                )
+                {
+                    "prompt": prompt,
+                    "sampler_name": sampler_name,
+                    "sampler_params": sampler_params or {},
+                    "max_tokens": max_tokens,
+                    "top_k": top_k,
+                    "stop_ids": list(stop_ids),
+                    "seed": seed,
+                }
             )
             sr = StepResult(
                 position=1,
@@ -634,9 +634,7 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
         return real(*a, **kw)
 
     monkeypatch.setattr(engine, "generate", counting_generate)
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
@@ -691,9 +689,7 @@ def test_cmd_generate_custom_sampler_uses_local_engine_even_on_streaming_backend
         raise AssertionError("stream_generate should not run for custom samplers")
 
     backend.stream_generate = boom_stream  # type: ignore[attr-defined]
-    monkeypatch.setattr(
-        "decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend
-    )
+    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
@@ -720,9 +716,7 @@ def test_cmd_generate_custom_sampler_uses_local_engine_even_on_streaming_backend
     assert "in-process" in rendered
 
 
-def test_main_wraps_remote_backend_error_as_clean_exit_4(
-    monkeypatch, captured_console
-) -> None:
+def test_main_wraps_remote_backend_error_as_clean_exit_4(monkeypatch, captured_console) -> None:
     """A RemoteBackendError from anywhere in a command must render as
     one clean red line and exit 4 -- not dump a stack trace. This is
     the bread-and-butter "server is down" case the user will hit most

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 from decoding_sandbox.cli import app
 from decoding_sandbox.cli._shared import (
@@ -48,7 +49,5 @@ def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
     try:
         return run_session(state)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             state.backend.close()  # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001
-            pass

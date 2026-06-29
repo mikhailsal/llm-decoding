@@ -45,10 +45,7 @@ def _iter_sse(resp: httpx.Response):
         if not raw:
             continue
         line = raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
-        if line.startswith("data:"):
-            data = line[5:].strip()
-        else:
-            data = line.strip()
+        data = line[5:].strip() if line.startswith("data:") else line.strip()
         if data == "[DONE]":
             return
         try:
@@ -115,68 +112,63 @@ def main() -> int:
     chunk_no = 0
     prompt_token_chunks: list[int] = []  # chunk indices that carry prompt logprobs
     completion_token_chunks: list[int] = []
-    with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-        with client.stream(
+    with (
+        httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0)) as client,
+        client.stream(
             "POST",
             f"{args.base_url}/completions",
             json=body,
             headers=headers,
-        ) as resp:
-            print(f"<-- {resp.status_code} {resp.reason_phrase}")
-            if resp.status_code >= 400:
-                # Buffer and dump the body so we know if the server
-                # rejected echo+stream with a 400.
-                body_bytes = b"".join(resp.iter_raw())
-                print(body_bytes.decode("utf-8", "replace"))
-                return 1
-            for chunk in _iter_sse(resp):
-                chunk_no += 1
-                choices = chunk.get("choices") or []
-                if not choices:
-                    summary = {
-                        k: v
-                        for k, v in chunk.items()
-                        if k in {"usage", "perf_metrics", "raw_output"}
-                    }
-                    print(f"chunk #{chunk_no:02d} [no choices] keys={list(chunk.keys())}")
-                    for k in ("usage", "perf_metrics", "raw_output"):
-                        if k in chunk:
-                            print(f"  {k}: {json.dumps(chunk[k])[:200]}")
-                    continue
-                ch = choices[0]
-                lp = ch.get("logprobs") or {}
-                content = lp.get("content") or []
-                # ``content`` carries one entry per emitted-or-echoed
-                # position. Each entry has ``token``, optional
-                # ``token_id``, ``logprob``, ``top_logprobs``, and
-                # ``sampling_mask_count`` (when requested).
-                tokens = [str(e.get("token", "")) for e in content]
-                ids = [e.get("token_id") for e in content]
-                # Heuristic: prompt-echo entries (the first N positions
-                # of the first chunk) typically have a non-empty
-                # top_logprobs that includes the actual prompt token at
-                # rank 0; emitted positions do too but they appear
-                # incrementally chunk-by-chunk. Print enough to
-                # reconstruct ordering visually.
-                print(
-                    f"chunk #{chunk_no:02d}  positions={len(content)}  "
-                    f"finish={ch.get('finish_reason')!r}  text={ch.get('text')!r}"
-                )
-                for i, (tok, tid) in enumerate(zip(tokens, ids)):
-                    top = content[i].get("top_logprobs") or []
-                    print(
-                        f"   pos {i:>3}: id={tid!r:>8} token={tok!r:<14} "
-                        f"top_n={len(top)}"
-                    )
-                if ch.get("text"):
-                    # Heuristic to bucket chunks: if the chunk's ``text``
-                    # equals the full prompt + echoed continuation OR
-                    # carries many positions at once, treat as
-                    # prompt-echo; otherwise as completion stream.
-                    if chunk_no == 1 and len(content) > 1:
-                        prompt_token_chunks.append(chunk_no)
-                    else:
-                        completion_token_chunks.append(chunk_no)
+        ) as resp,
+    ):
+        print(f"<-- {resp.status_code} {resp.reason_phrase}")
+        if resp.status_code >= 400:
+            # Buffer and dump the body so we know if the server
+            # rejected echo+stream with a 400.
+            body_bytes = b"".join(resp.iter_raw())
+            print(body_bytes.decode("utf-8", "replace"))
+            return 1
+        for chunk in _iter_sse(resp):
+            chunk_no += 1
+            choices = chunk.get("choices") or []
+            if not choices:
+                {k: v for k, v in chunk.items() if k in {"usage", "perf_metrics", "raw_output"}}
+                print(f"chunk #{chunk_no:02d} [no choices] keys={list(chunk.keys())}")
+                for k in ("usage", "perf_metrics", "raw_output"):
+                    if k in chunk:
+                        print(f"  {k}: {json.dumps(chunk[k])[:200]}")
+                continue
+            ch = choices[0]
+            lp = ch.get("logprobs") or {}
+            content = lp.get("content") or []
+            # ``content`` carries one entry per emitted-or-echoed
+            # position. Each entry has ``token``, optional
+            # ``token_id``, ``logprob``, ``top_logprobs``, and
+            # ``sampling_mask_count`` (when requested).
+            tokens = [str(e.get("token", "")) for e in content]
+            ids = [e.get("token_id") for e in content]
+            # Heuristic: prompt-echo entries (the first N positions
+            # of the first chunk) typically have a non-empty
+            # top_logprobs that includes the actual prompt token at
+            # rank 0; emitted positions do too but they appear
+            # incrementally chunk-by-chunk. Print enough to
+            # reconstruct ordering visually.
+            print(
+                f"chunk #{chunk_no:02d}  positions={len(content)}  "
+                f"finish={ch.get('finish_reason')!r}  text={ch.get('text')!r}"
+            )
+            for i, (tok, tid) in enumerate(zip(tokens, ids, strict=False)):
+                top = content[i].get("top_logprobs") or []
+                print(f"   pos {i:>3}: id={tid!r:>8} token={tok!r:<14} top_n={len(top)}")
+            if ch.get("text"):
+                # Heuristic to bucket chunks: if the chunk's ``text``
+                # equals the full prompt + echoed continuation OR
+                # carries many positions at once, treat as
+                # prompt-echo; otherwise as completion stream.
+                if chunk_no == 1 and len(content) > 1:
+                    prompt_token_chunks.append(chunk_no)
+                else:
+                    completion_token_chunks.append(chunk_no)
     print()
     print("=== summary ===")
     print(f"total chunks: {chunk_no}")

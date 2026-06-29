@@ -46,7 +46,7 @@ def sse_frame(payload: dict) -> bytes:
     here as a free function so the streaming routes don't have to import
     a private symbol from the other server.
     """
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 def stream_generate(
@@ -101,9 +101,7 @@ def stream_generate(
     # chip-input on the same capability, so a properly-synced client
     # will never hit this branch with a non-empty list.
     caps = backend.capabilities
-    if prepend_id_list and not bool(
-        getattr(caps, "supports_prepend_token_ids", False)
-    ):
+    if prepend_id_list and not bool(getattr(caps, "supports_prepend_token_ids", False)):
         prepend_id_list = []
 
     # Per-run usage accounting. Backends implementing
@@ -240,7 +238,7 @@ def stream_generate(
                     yield sse_frame({"event": "step", "step": genstep_to_wire(gs).model_dump()})
                     completion_steps += 1
                     last_reason = gs.stop_reason
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("dsbx-web: generate stream errored")
         error = str(exc)
     finally:
@@ -265,8 +263,8 @@ def stream_generate(
     is_openai_compat = backend.__class__.__name__ == "OpenAICompatBackend"
     if usage.get("prompt_tokens") is None and not is_openai_compat:
         try:
-            usage["prompt_tokens"] = int(len(backend.tokenize(prompt)))
-        except Exception as exc:  # noqa: BLE001
+            usage["prompt_tokens"] = len(backend.tokenize(prompt))
+        except Exception as exc:
             log.debug("dsbx-web: prompt token count fallback failed: %s", exc)
     # Round out total_tokens when both pieces are present and the
     # provider didn't supply its own grand total.
@@ -327,7 +325,7 @@ def _can_use_combined_echo_stream(
         return False
     try:
         return bool(backend.supports_native_sampler(sampler_name, sampler_params))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -463,7 +461,7 @@ def _can_use_native_cloud_stream(
         return False
     try:
         return bool(backend.supports_native_sampler(sampler_name, sampler_params))
-    except Exception:  # noqa: BLE001 -- never trust capability checks to not raise
+    except Exception:
         return False
 
 
@@ -512,7 +510,7 @@ def _emit_prompt_score(
     if prefix_id_list:
         try:
             effective_prompt = prompt + backend.detokenize(prefix_id_list)
-        except Exception:  # noqa: BLE001
+        except Exception:
             effective_prompt = prompt
     try:
         steps = backend.score_prompt(
@@ -523,7 +521,7 @@ def _emit_prompt_score(
         )
         steps_wire = [step_to_wire(s).model_dump() for s in steps]
         note = ""
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("dsbx-web: prompt scoring failed: %s", exc)
         yield sse_frame(
             {
@@ -632,7 +630,7 @@ def stream_spec(
             total_emitted += len(rnd.emitted_ids)
             rounds += 1
             all_ids.extend(rnd.emitted_ids)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("dsbx-web: spec stream errored")
         yield sse_frame(
             {

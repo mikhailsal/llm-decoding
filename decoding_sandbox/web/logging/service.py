@@ -115,10 +115,10 @@ async def _flush_loop(batch_size: int, flush_interval: float) -> None:
             if entries:
                 try:
                     await _write_batch(session_factory, entries)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception("dsbx-web: shutdown log flush failed")
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Don't let one bad batch kill the writer task; SQLite is
             # local so the typical failure is "schema drift after a
             # rename" which fixes itself when the operator deletes
@@ -195,8 +195,9 @@ def start_logging_service(
         _flush_loop(batch_size=batch_size, flush_interval=flush_interval),
         name="dsbx-web-log-flush",
     )
-    log.info("dsbx-web: log flush task started (batch=%d, interval=%.1fs)",
-             batch_size, flush_interval)
+    log.info(
+        "dsbx-web: log flush task started (batch=%d, interval=%.1fs)", batch_size, flush_interval
+    )
     return _flush_task
 
 

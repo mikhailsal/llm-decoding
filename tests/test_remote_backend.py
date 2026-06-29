@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from decoding_sandbox.backends.remote import (
     RemoteBackend,
     RemoteBackendError,
-    RemoteStreamTimeout,
+    RemoteStreamTimeoutError,
 )
 from decoding_sandbox.core.backend import Backend
 from decoding_sandbox.core.types import StepResult, TokenCandidate
@@ -210,9 +210,7 @@ def test_stream_generate_decision_kept_join_with_candidates() -> None:
     ids against the step's ``candidates`` -- verify the join produces
     real ``TokenCandidate`` references, not stubs."""
     remote = _make_remote(_fake())
-    [gs] = list(
-        remote.stream_generate("ab", "greedy", {}, max_tokens=1)
-    )
+    [gs] = list(remote.stream_generate("ab", "greedy", {}, max_tokens=1))
     assert gs.decision.kept
     for cand_obj, prob in gs.decision.kept:
         # Greedy keeps only the top candidate; it must be in the step's
@@ -336,7 +334,7 @@ class _StreamClient:
     The point is to drive ``RemoteBackend.stream_generate`` through its
     happy path AND its ReadTimeout / GeneratorExit paths without
     standing up a server, so we can assert (a) the right timeout knob
-    reaches httpx, (b) ``RemoteStreamTimeout`` is raised on a hang, and
+    reaches httpx, (b) ``RemoteStreamTimeoutError`` is raised on a hang, and
     (c) closing the generator closes the underlying connection.
     """
 
@@ -346,10 +344,10 @@ class _StreamClient:
         self.last_timeout: object | None = None
         self.closed_streams = 0
 
-    def get(self, path: str, **_: object) -> "_StreamResp":
+    def get(self, path: str, **_: object) -> _StreamResp:
         return _StreamResp(200, payload=self._info, owner=self)
 
-    def post(self, path: str, *, json=None, **_: object) -> "_StreamResp":
+    def post(self, path: str, *, json=None, **_: object) -> _StreamResp:
         # Not actually used in these tests; the streaming path uses
         # ``self.stream``. Defined anyway because RemoteBackend's
         # constructor relies on ``post`` for the ``_get_info`` call's
@@ -364,7 +362,7 @@ class _StreamClient:
         json=None,
         timeout=None,
         **_: object,
-    ) -> "_StreamCtx":
+    ) -> _StreamCtx:
         self.last_timeout = timeout
         return _StreamCtx(self._line_factory(), owner=self)
 
@@ -385,7 +383,9 @@ class _StreamResp:
     def raise_for_status(self) -> None:
         if not (200 <= self.status_code < 300):
             raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}", request=None, response=None  # type: ignore[arg-type]
+                f"HTTP {self.status_code}",
+                request=None,
+                response=None,  # type: ignore[arg-type]
             )
 
 
@@ -395,7 +395,7 @@ class _StreamCtx:
         self.status_code = 200
         self._owner = owner
 
-    def __enter__(self) -> "_StreamCtx":
+    def __enter__(self) -> _StreamCtx:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -444,9 +444,7 @@ def test_stream_generate_uses_short_per_frame_read_timeout() -> None:
         yield ""
 
     fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
-    rb = RemoteBackend(
-        "http://test", client=fake, stream_read_timeout=12.5
-    )
+    rb = RemoteBackend("http://test", client=fake, stream_read_timeout=12.5)
     list(rb.stream_generate("hi", "greedy", {}, max_tokens=1))
     timeout = fake.last_timeout
     assert isinstance(timeout, httpx.Timeout)
@@ -457,7 +455,7 @@ def test_stream_generate_uses_short_per_frame_read_timeout() -> None:
 
 
 def test_stream_generate_translates_read_timeout_to_remote_stream_timeout() -> None:
-    """A hung upstream surfaces as ``RemoteStreamTimeout`` (subclass of
+    """A hung upstream surfaces as ``RemoteStreamTimeoutError`` (subclass of
     RemoteBackendError) with a message naming the configured budget --
     matches the user-facing error the SSE done frame now carries."""
 
@@ -470,7 +468,7 @@ def test_stream_generate_translates_read_timeout_to_remote_stream_timeout() -> N
 
     fake = _StreamClient(info_payload=_info_payload(), line_factory=lines)
     rb = RemoteBackend("http://test", client=fake, stream_read_timeout=7.0)
-    with pytest.raises(RemoteStreamTimeout, match=">7s"):
+    with pytest.raises(RemoteStreamTimeoutError, match=">7s"):
         list(rb.stream_generate("hi", "greedy", {}, max_tokens=1))
     # The ``with self._client.stream(...)`` context manager MUST close
     # even on the timeout path -- otherwise the leaked httpx Response
