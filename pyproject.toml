@@ -104,7 +104,7 @@ target-version = "py310"
 # A pragmatic superset of pyflakes/pycodestyle plus the high-signal plugin
 # rule sets we care about (bugbear, pyupgrade, simplify, pathlib, datetimez,
 # naming, comprehensions, type-checking, bandit, ruff-native). Kept lighter
-# than a production proxy gateway (no forced T20/print ban project-wide) to fit a sandbox.
+# than a strict production gate (no forced T20/print ban project-wide).
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings

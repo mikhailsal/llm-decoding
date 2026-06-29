@@ -12,7 +12,7 @@ nudging the codebase toward smaller units over time:
   (streaming loops, argparse wiring, ``make_app`` factories) whose split is a
   follow-up, not a release blocker. Surfacing them keeps the signal visible.
 
-This mirrors the spirit of a production proxy gateway's ``check_code_limits.py`` but with a
+This mirrors the spirit of a strict production code-size gate but with a
 lighter, phased policy appropriate for a learning sandbox.
 """
 
