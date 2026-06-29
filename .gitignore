@@ -16,6 +16,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # Local data / model caches (should live in a bulk cache dir, never committed)
 models/

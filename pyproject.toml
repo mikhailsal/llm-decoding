@@ -77,6 +77,7 @@ web = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=6.0",
     "ruff>=0.6",
     "mypy>=1.13",
     # Tests for the server endpoints + RemoteBackend round-trip need
@@ -153,3 +154,24 @@ ignore_missing_imports = true
 # asyncio land (SQLAlchemy async engine + queue + flush task), so this is
 # the right default.
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["decoding_sandbox"]
+branch = true
+omit = [
+    # Thin process entry points; exercised by integration, not unit tests.
+    "decoding_sandbox/**/__main__.py",
+    "decoding_sandbox/cli/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# No fail_under gate yet -- we *measure* and publish the real number in the
+# README. Raising this to a hard floor is a tracked follow-up.
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

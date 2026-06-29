@@ -4,7 +4,7 @@ DSBX_DEST ?= llm-decoding
 REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
 
 .PHONY: help sync doctor probe doctor-local probe-local serve-py serve-hf fmt \
-        web-dev web-build web-prod web-test
+        web-dev web-build web-prod web-test test coverage lint quality-check
 
 help:
 	@echo "Targets:"
@@ -15,6 +15,12 @@ help:
 	@echo "  probe-local   run 'dsbx probe' on this machine"
 	@echo "  serve-py      sync + start 'dsbx serve --backend llamacpp-py' on dsbx-host (port 8000)"
 	@echo "  serve-hf      sync + start 'dsbx serve --backend hf' on dsbx-host (port 8001)"
+	@echo ""
+	@echo "Quality:"
+	@echo "  test          run the pytest suite"
+	@echo "  coverage      run pytest with coverage (term + htmlcov/ report)"
+	@echo "  lint          ruff check + ruff format --check"
+	@echo "  quality-check lint + code limits + mypy (informational) + tests"
 	@echo ""
 	@echo "Web UI (middleware on this machine + SvelteKit frontend):"
 	@echo "  web-dev       run middleware on :8765 with frontend dev server on :5173"
@@ -49,6 +55,22 @@ serve-hf: sync
 fmt:
 	ruff check --fix . || true
 	ruff format . || true
+
+# Quality gate (run locally before pushing; mirrors CI minus the matrix).
+lint:
+	ruff check .
+	ruff format --check .
+
+test:
+	pytest -q
+
+coverage:
+	pytest --cov=decoding_sandbox --cov-report=term-missing --cov-report=html
+
+quality-check: lint
+	python scripts/check_code_limits.py
+	mypy decoding_sandbox || true
+	pytest -q
 
 # Web UI. The middleware reads its bearer token from $DSBX_WEB_TOKEN; export
 # one before invoking these targets, or put it in [web].api_token of
