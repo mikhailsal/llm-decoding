@@ -35,8 +35,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Installed on `dsbx-host` only (the box with the P40 GPU). Torch is installed
-# separately with the CUDA 12.4 index URL (see README / scripts/setup_wind.sh).
+# Installed on `dsbx-host` only (the box with the GPU). Torch is installed
+# separately with the CUDA 12.4 index URL (see README / scripts/setup_host.sh).
 local = [
     "transformers>=4.57",
     "accelerate>=0.34",

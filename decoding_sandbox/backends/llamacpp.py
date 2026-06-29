@@ -1,7 +1,7 @@
 """llama.cpp backend: talks to a running ``llama-server`` over HTTP.
 
 Gives top-k logprobs per position (set ``top_k`` large to approximate the full
-distribution). Fast on the P40 with partial GPU offload. Used as the day-to-day
+distribution). Fast on the GPU with partial GPU offload. Used as the day-to-day
 engine and for the Qwen3.5-9B-Base GGUF that the HF path can't host on 6 GB.
 """
 

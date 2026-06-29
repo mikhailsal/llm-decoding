@@ -32,7 +32,7 @@ _DEFAULTS: dict[str, Any] = {
         "hf_home": "~/.cache/dsbx/huggingface",
         "pip_cache": "~/.cache/dsbx/pip",
         "min_free_gb": 5.0,
-        "check_paths": ["/", "~/.cache/dsbx", "~"],
+        "check_paths": ["/"],
     },
     "local": {
         "llamacpp": {
@@ -43,7 +43,7 @@ _DEFAULTS: dict[str, Any] = {
             # In-process llama.cpp via llama-cpp-python. Same GGUF as the HTTP
             # backend, but with `logits_all=True` so we expose the FULL [seq,
             # vocab] tensor (true white-box on Qwen3.5-9B, which HF can't load
-            # on the 6 GB Pascal). model_path is auto-discovered from the HF
+            # on a small 6 GB GPU). model_path is auto-discovered from the HF
             # cache if left null.
             "model_path": None,
             "model_glob": "**/Qwen3.5-9B-Base-Q4_K_M.gguf",
@@ -57,7 +57,7 @@ _DEFAULTS: dict[str, Any] = {
             "verbose": False,
         },
         "hf": {
-            # 9B base doesn't load in 4-bit on the 6 GB Pascal (bnb/accelerate
+            # 9B base doesn't load in 4-bit on a small 6 GB GPU (bnb/accelerate
             # meta-tensor bug on the hybrid arch); white-box uses a dense base,
             # 9B base is served by llama.cpp. See config.example.toml.
             "model": "Qwen/Qwen3-1.7B-Base",
@@ -70,7 +70,7 @@ _DEFAULTS: dict[str, Any] = {
             # advertises its catalogue over /v1/models.
             "models": [],
             # Memory caps for `device_map="auto"` (passed as `max_memory`). Tuned
-            # for the 6 GB P40 on dsbx-host; override per machine in config.toml.
+            # for a small 6 GB GPU; override per machine in config.toml.
             "gpu_mem": "4500MiB",
             "cpu_mem": "13GiB",
         },

@@ -10,7 +10,7 @@ We support two wire shapes:
 
 1. **OpenAI-compat ``/chat/completions`` and ``/completions`` SSE.**
    Each frame is ``{"choices": [{"delta": {"content": "Hel"}, ...}], ...}``
-   and the merge logic mirrors ``a production proxy gateway/backend/ai_proxy/api/proxy/streaming.py``
+   and the merge logic mirrors a production proxy gateway
    -- concatenate ``delta.content``, ``delta.reasoning_content``,
    deep-merge ``tool_calls`` list items, capture the trailing ``usage``
    block (some providers emit it on the last data frame, others as a

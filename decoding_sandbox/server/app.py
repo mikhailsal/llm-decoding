@@ -118,7 +118,7 @@ class BackendSlot:
         t.start()
 
     def _load(self, model: str | None) -> None:
-        # Close the old backend BEFORE building the new one: the 6 GB P40
+        # Close the old backend BEFORE building the new one: the small 6 GB GPU
         # can't hold two 9B models at once, so a "build then swap" would
         # OOM. The trade-off is that a failed reload leaves the slot empty
         # (state=error) rather than falling back to the previous model.

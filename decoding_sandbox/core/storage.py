@@ -1,9 +1,9 @@
 """Storage preflight: refuse to start heavy work when a disk is nearly full.
 
-On `dsbx-host` the Linux ext4 disk is a sparse .img living on C: (local SSD, tight
-on space). Downloading models into `/` grows that .img and can exhaust C:.
-This module checks free space on the relevant paths and aborts early with a
-clear message instead of failing mid-download.
+The GPU host's system disk can be tight on space, and downloading multi-GB
+model weights into `/` can exhaust it. This module checks free space on the
+relevant paths and aborts early with a clear message instead of failing
+mid-download.
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ class DiskStatus:
 def check_paths(paths: list[str], min_free_gb: float) -> list[DiskStatus]:
     """Return free-space status for each path that exists.
 
-    Non-existent paths (e.g. ~/.cache/dsbx when running on the client) are reported
-    with ``exists=False`` and treated as OK (skipped), so the same config works
-    on both machines.
+    Non-existent paths (e.g. a host-only cache dir when running on the client)
+    are reported with ``exists=False`` and treated as OK (skipped), so the same
+    config works on both machines.
     """
     results: list[DiskStatus] = []
     for raw in paths:

@@ -2,7 +2,7 @@
 
 This is the white-box engine for GGUF models on hardware where HF transformers
 won't load them. Specifically: the 9B Qwen3.5 base hybrid arch fails on the 6
-GB Pascal P40 under bitsandbytes 4-bit + CPU offload (verified meta-tensor
+GB Pascal-class GPU under bitsandbytes 4-bit + CPU offload (verified meta-tensor
 bug), but its Q4 GGUF runs fine on the same hardware via llama.cpp with
 ``-ngl 20``. ``llama-cpp-python`` exposes the same engine in-process, and with
 ``logits_all=True`` we can grab the full ``[seq, vocab]`` logits tensor -- the
@@ -53,7 +53,7 @@ def _discover_model_path(
     raise FileNotFoundError(
         f"No GGUF matching {glob!r} under {search_dirs}. "
         "Set [local.llamacpp_py].model_path in config.toml, or run "
-        "scripts/setup_wind.sh to download it."
+        "scripts/setup_host.sh to download it."
     )
 
 

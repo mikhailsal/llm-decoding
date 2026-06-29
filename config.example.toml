@@ -22,21 +22,21 @@ secrets_env_file = "~/.config/dsbx/secrets.env"
 backend = "llamacpp"
 
 [storage]
-# Where bulk caches go. On dsbx-host this is the large local SSD (L:), which has room
-# and is NOT R: (unreliable) or S: (HDD). On the client these are ignored
-# unless the paths exist.
+# Where bulk caches go. Point these at a roomy local disk on the GPU host.
+# On the client these are ignored unless the paths exist.
 hf_home = "~/.cache/dsbx/huggingface"
 pip_cache = "~/.cache/dsbx/pip"
 # Preflight aborts before heavy work if free space on any check path drops
-# below this many GB (protects C: where the Linux .img lives).
+# below this many GB (protects the disk that holds the model weights).
 min_free_gb = 5.0
-# Paths whose free space is checked by `dsbx doctor` / preflight.
-check_paths = ["/", "~/.cache/dsbx", "~"]
+# Paths whose free space is checked by `dsbx doctor` / preflight. Add your
+# cache-disk mount point here if it differs from `/`.
+check_paths = ["/"]
 
 # ---- Local engines (run on dsbx-host) -------------------------------------------
 
 [local.llamacpp]
-# llama-server endpoint (built with CUDA on dsbx-host, see scripts/setup_wind.sh).
+# llama-server endpoint (built with CUDA on dsbx-host, see scripts/setup_host.sh).
 base_url = "http://127.0.0.1:8080"
 # Label only; the actual model is whatever llama-server was launched with.
 model = "Qwen3.5-9B-Base-Q4_K_M"
@@ -45,8 +45,8 @@ model = "Qwen3.5-9B-Base-Q4_K_M"
 # IN-PROCESS llama.cpp via the `llama-cpp-python` binding. Same GGUF as the
 # HTTP backend, but with `logits_all=true` we expose the FULL [seq, vocab]
 # tensor -- the true white-box engine for the 9B base, which the HF backend
-# can't load on the 6 GB Pascal (bitsandbytes/accelerate meta-tensor bug on
-# the hybrid arch). Build with CUDA on dsbx-host:
+# can't load on a small 6 GB GPU (bitsandbytes/accelerate meta-tensor bug on
+# the hybrid arch). Build with CUDA on dsbx-host (adjust the arch for your GPU):
 #   CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=61 \
 #               -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12" \
 #       pip install llama-cpp-python --no-binary=:all:
@@ -64,8 +64,8 @@ verbose = false
 [local.hf]
 # HuggingFace transformers white-box engine (full-vocab logits).
 #
-# NOTE: the 9B base (Qwen/Qwen3.5-9B-Base) does NOT load cleanly in 4-bit on the
-# 6 GB Pascal P40 -- its hybrid/multimodal arch + bitsandbytes CPU offload hits
+# NOTE: the 9B base (Qwen/Qwen3.5-9B-Base) does NOT load cleanly in 4-bit on a
+# small 6 GB GPU -- its hybrid/multimodal arch + bitsandbytes CPU offload hits
 # accelerate meta-tensor bugs (verified). So the white-box engine defaults to a
 # dense base that fits fully in VRAM, and the 9B base is served by llama.cpp.
 # You can still try the 9B here with --model Qwen/Qwen3.5-9B-Base (slow, may fail).
@@ -77,8 +77,8 @@ fallback_model = "Qwen/Qwen3-1.7B-Base"
 # Extra model ids the web UI offers when reloading an `hf` dsbx-serve host
 # (Status page model control). Unioned with `model` + `fallback_model`.
 # models = ["Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-0.6B-Base"]
-# `device_map="auto"` memory caps passed as `max_memory`. Tuned for the 6 GB
-# P40 on dsbx-host (4500MiB GPU + 13 GiB CPU offload). Bump GPU if you have more
+# `device_map="auto"` memory caps passed as `max_memory`. Tuned for a small
+# 6 GB GPU (4500MiB GPU + 13 GiB CPU offload). Bump GPU if you have more
 # VRAM and want to avoid CPU offload.
 gpu_mem = "4500MiB"
 cpu_mem = "13GiB"
@@ -248,7 +248,7 @@ require_parameters = true
 has_completions = false
 
 [providers.lmstudio]
-# LM Studio's local OpenAI-compatible server (Windows). Start it in LM Studio.
+# LM Studio's local OpenAI-compatible server. Start it in LM Studio.
 base_url = "http://127.0.0.1:1234/v1"
 api_key_env = "LMSTUDIO_API_KEY"
 default_model = "local-model"

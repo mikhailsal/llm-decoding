@@ -17,7 +17,7 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# Local data / model caches (should live on ~/.cache/dsbx on dsbx-host, never committed)
+# Local data / model caches (should live in a bulk cache dir, never committed)
 models/
 cache/
 *.gguf
@@ -33,6 +33,10 @@ scratch/
 .idea/
 .vscode/
 .DS_Store
+
+# Local agent / planning scratch (never committed)
+.cursor/
+plans/
 
 # Frontend (SvelteKit) build artifacts -- the build/ directory is the
 # adapter-static output we serve from `dsbx web --frontend-dist`. It's

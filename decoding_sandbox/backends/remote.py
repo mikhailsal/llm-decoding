@@ -2,7 +2,7 @@
 
 The client lives wherever the TUI runs (the client today, a future
 browser tomorrow) and the server lives wherever the model is loaded
-(``dsbx-host`` with the P40). This module is the dsbx-host <-> client bridge.
+(``dsbx-host`` with the GPU). This module is the dsbx-host <-> client bridge.
 
 Design notes:
 
@@ -65,7 +65,7 @@ class RemoteBackend(Backend):
     # /v1/info or /v1/score_prompt) because for a stream the meaningful
     # liveness signal is "the next SSE frame arrives within N seconds",
     # not "the whole response finishes within N seconds". Defaults to
-    # 45 s, which is generous enough for a single P40 generate step on
+    # 45 s, which is generous enough for a single GPU generate step on
     # a long prompt but tight enough that a fully hung server surfaces
     # as ``RemoteStreamTimeout`` before the user gives up and reloads.
     # Bumped via ``stream_read_timeout=`` if a slow deployment trips it.

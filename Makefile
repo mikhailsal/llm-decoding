@@ -23,7 +23,7 @@ help:
 	@echo "  web-test      run pytest -k web and pnpm test (frontend unit tests)"
 
 sync:
-	scripts/sync_to_wind.sh $(DSBX_DEST)
+	scripts/sync_to_host.sh $(DSBX_DEST)
 
 doctor: sync
 	$(REMOTE) dsbx doctor'
@@ -41,10 +41,10 @@ probe-local:
 # dsbx-host and launch a long-lived `dsbx serve`. Keep them in separate ports so
 # both backends can run simultaneously.
 serve-py: sync
-	$(REMOTE) bash scripts/run_dsbx_server_wind.sh llamacpp-py 8000'
+	$(REMOTE) bash scripts/run_dsbx_server_host.sh llamacpp-py 8000'
 
 serve-hf: sync
-	$(REMOTE) bash scripts/run_dsbx_server_wind.sh hf 8001'
+	$(REMOTE) bash scripts/run_dsbx_server_host.sh hf 8001'
 
 fmt:
 	ruff check --fix . || true

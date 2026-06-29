@@ -40,10 +40,10 @@ chosen token id, step again), and speculative decoding (assisted generation).
 ### `llamacpp-py`, briefly
 
 The in-process `llama-cpp-python` binding compiled against the same
-sm_61 CUDA build as `llama-server`. Initialized with `logits_all=True`, it
+CUDA build as `llama-server`. Initialized with `logits_all=True`, it
 exposes the equivalent of HF's `outputs.logits` -- a `[seq, vocab]`
 matrix via `Llama.scores` -- for **GGUF models that HF can't load** (e.g.
-Qwen3.5-9B-Base on the 6 GB P40 due to the bitsandbytes + accelerate
+Qwen3.5-9B-Base on a small 6 GB GPU due to the bitsandbytes + accelerate
 meta-tensor bug on its hybrid arch). Same Q4 GGUF on disk as `llamacpp`
 (HTTP) -- no extra download -- and the same partial GPU offload via
 `n_gpu_layers`. KV-cache is reused when subsequent calls extend the
@@ -75,24 +75,25 @@ previous context (manual stepping stays cheap).
 
 ## Where things run
 
-- **All model compute runs on `dsbx-host`** (Ubuntu Linux on the Windows main PC,
-  NVIDIA P40 6 GB).
-- The **client runs the TUI** (and any cloud-backend traffic, since it
-  has the VPN). It connects to `dsbx-host` over HTTP via the long-lived
+- **All model compute runs on `dsbx-host`** (a Linux box with a small
+  6 GB NVIDIA GPU).
+- The **client runs the TUI** (and any cloud-backend traffic). It
+  connects to `dsbx-host` over HTTP via the long-lived
   `dsbx serve` process -- so the 9B GGUF / HF model load happens once on
   `dsbx-host` and stays warm across every command. See
   [Running the server on `dsbx-host`](#running-the-server-on-dsbx-host) below.
 - Edit here, then `make sync` (rsync over SSH) and (re)start the server
   on `dsbx-host` only when its source changed.
 
-## Storage (important)
+## Storage
 
-The Linux ext4 disk is a sparse `.img` on `C:` (local SSD, tight on space), so
-"911 GB free" inside Linux is misleading. Strategy:
+Model weights are large (multi-GB GGUFs and 4-bit safetensors), so keep the
+system disk clear:
 
-- Active model files (GGUF, 4-bit weights): ext4 inside Linux `/`.
-- Bulk caches (`HF_HOME`, pip): `~/.cache/dsbx` (large local SSD).
-- **Never use `R:`** (unreliable) or `S:` (HDD).
+- Active model files (GGUF, 4-bit weights): wherever the host has fast local
+  storage.
+- Bulk caches (`HF_HOME`, pip): point them at a roomy cache dir (default
+  `~/.cache/dsbx`) via `config.toml` or `scripts/env_host.sh`.
 - `dsbx doctor` runs a free-space preflight before any heavy work.
 
 ## Quickstart
@@ -121,10 +122,10 @@ provider from the client -- they don't go through the server.
 make sync                       # push source from the client
 ssh dsbx-host
 cd llm-decoding
-bash scripts/setup_wind.sh      # venv on ext4, caches on ~/.cache/dsbx, torch+transformers
+bash scripts/setup_host.sh      # venv, bulk caches, torch+transformers
 source .venv/bin/activate
 pip install -e ".[server]"      # adds fastapi + uvicorn
-dsbx doctor                     # should now show torch cuda=True on the P40
+dsbx doctor                     # should now show torch cuda=True on the GPU
 ```
 
 ### Running the server on `dsbx-host`
@@ -148,7 +149,7 @@ dsbx serve --backend hf --host 0.0.0.0 --port 8001
 `--host 0.0.0.0` is opt-in (a warning is printed) -- the default
 `127.0.0.1` is loopback-only. The server has no auth, so keep this box
 on a trusted LAN. A convenience launcher with the same defaults lives at
-[scripts/run_dsbx_server_wind.sh](scripts/run_dsbx_server_wind.sh).
+[scripts/run_dsbx_server_host.sh](scripts/run_dsbx_server_host.sh).
 
 #### Swappable model slot (load / reload without a restart)
 
@@ -178,7 +179,7 @@ directly):
   `<id>` on a background thread (a 9B GGUF takes ~30 s). Returns
   immediately with `state: loading`; poll `/v1/status` until terminal.
 
-Because the 6 GB P40 can't hold two 9B models at once, a reload closes
+Because a small 6 GB GPU can't hold two 9B models at once, a reload closes
 the old model *before* building the new one; a failed reload therefore
 leaves the slot `empty`/`error` rather than falling back to the previous
 model. Inference requests during `loading`/`empty`/`error` return HTTP
@@ -488,8 +489,8 @@ decoding_sandbox/
                (loads ONE backend per process and serves the Backend
                protocol over /v1/* + SSE for generate)
   cli/         argparse front-end, rich rendering, manual TUI, session REPL
-scripts/       sync_to_wind.sh, setup_wind.sh, build_llamacpp_wind.sh,
-               run_llama_server_wind.sh, run_dsbx_server_wind.sh,
+scripts/       sync_to_host.sh, setup_host.sh, build_llamacpp_host.sh,
+               run_llama_server_host.sh, run_dsbx_server_host.sh,
                hf_smoke.py, test_manual.py
 examples/      custom_sampler.py
 ```
@@ -517,15 +518,16 @@ supports it.
 
 ## What was verified on the hardware (Wave 0)
 
-- **llama.cpp + CUDA** built for the P40 (sm_61, g++-12 host compiler). The
-  Qwen3.5-9B-Base Q4_K_M GGUF loads (hybrid Gated DeltaNet), `-ngl 20`/ctx 4096
-  uses ~3.6 GB VRAM at ~11 tok/s, and `/completion n_probs` returns top-k logprobs.
+- **llama.cpp + CUDA** built for a small 6 GB Pascal-class GPU (g++-12 host
+  compiler). The Qwen3.5-9B-Base Q4_K_M GGUF loads (hybrid Gated DeltaNet),
+  `-ngl 20`/ctx 4096 uses ~3.6 GB VRAM at ~11 tok/s, and `/completion n_probs`
+  returns top-k logprobs.
 - **HF transformers** white-box engine works with a dense base (full vocab
   151936, whole-context teacher forcing). The 9B base does **not** load in 4-bit
-  on the 6 GB Pascal (bitsandbytes+accelerate meta-tensor bug on the hybrid arch),
+  on a small 6 GB GPU (bitsandbytes+accelerate meta-tensor bug on the hybrid arch),
   so the 9B base is served by `llamacpp`/`llamacpp-py` and HF uses a dense base.
 - **`llamacpp-py`** (in-process `llama-cpp-python` with `logits_all=True`)
-  closes the gap: the 9B Q4 GGUF runs on the same sm_61 build and exposes the
+  closes the gap: the 9B Q4 GGUF runs on the same CUDA build and exposes the
   FULL `[seq, vocab]` logits tensor, so `inspect`/`generate`/`manual`/`spec`
   get the same white-box features HF gives for smaller models.
 - **Cloud**: Fireworks chat top_logprobs + whole-context echo (frontier models);

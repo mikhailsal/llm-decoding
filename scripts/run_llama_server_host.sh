@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Launch llama-server on `dsbx-host` with the Qwen3.5-9B-Base GGUF.
 #
-# The P40 has only 6 GB VRAM and the Q4_K_M model is ~5.3 GB, so we offload a
+# The GPU has only 6 GB VRAM and the Q4_K_M model is ~5.3 GB, so we offload a
 # partial number of layers (-ngl) and keep the context modest. Tune NGL/CTX to
 # fit; check `nvidia-smi` while it runs.
 #
-# Usage on dsbx-host:  bash scripts/run_llama_server_wind.sh [NGL] [CTX]
+# Usage on dsbx-host:  bash scripts/run_llama_server_host.sh [NGL] [CTX]
 set -euo pipefail
 
 LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp}"

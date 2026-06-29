@@ -1,6 +1,6 @@
 """Async queue + batched flush task for the upstream-request log store.
 
-This is the analogue of ``a production proxy gateway/backend/ai_proxy/logging/service.py``:
+This is the analogue of a production proxy gateway:
 the request hot path drops a :class:`LogEntry` onto an asyncio queue and
 returns immediately; a single background task drains the queue in
 batches and writes them to the SQLite store.

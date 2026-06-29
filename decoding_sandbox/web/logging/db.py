@@ -7,7 +7,7 @@ single-process, the write rate is human-scale (a few rows per minute at
 most), and the on-disk format makes "blow away my history" a one-liner
 (``rm logs.db``).
 
-This module is the analogue of ``a production proxy gateway/backend/ai_proxy/db/engine.py``
+This module is the analogue of a production proxy gateway
 plus the ``ProxyRequest`` half of ``ai_proxy/db/models.py``, trimmed for
 SQLite (no JSONB, no TSVECTOR, no GIN -- ``JSON``-as-text columns and a
 handful of plain b-tree indexes are enough at our scale).

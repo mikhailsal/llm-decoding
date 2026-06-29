@@ -6,7 +6,7 @@ Local (in-process) backends:
 - ``llamacpp``    : HTTP client to a running ``llama-server`` (top-k only).
 - ``llamacpp-py`` : In-process ``llama-cpp-python`` (full vocab via
                     ``logits_all=True``) -- the white-box engine for GGUFs
-                    that HF can't host (e.g. Qwen3.5-9B on the 6 GB Pascal).
+                    that HF can't host (e.g. Qwen3.5-9B on a small 6 GB GPU).
 
 Remote backends:
 - ``remote``      : HTTP client to a ``dsbx serve`` instance. Reads

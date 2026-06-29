@@ -7,7 +7,7 @@ against a local ``llama-server``), every outgoing call is captured at the
 enqueued onto an asyncio queue. A background task drains the queue into a
 SQLite database via SQLAlchemy. Streamed responses are tee'd and merged so
 each upstream call lands as a single fat row, mirroring the design in
-``a production proxy gateway/backend/ai_proxy/logging`` (see the plan file).
+a production proxy gateway.
 
 Public surface:
 

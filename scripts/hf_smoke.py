@@ -9,11 +9,11 @@ the two things the transformers backend uniquely gives us:
    which is exactly what "inspect" mode will visualize later.
 
 If the primary (Qwen3.5-9B-Base hybrid/multimodal) model fails to load or run on
-the Pascal P40, we fall back to a small dense base model so the white-box path
+the Pascal-class GPU, we fall back to a small dense base model so the white-box path
 is still usable.
 
 Run on dsbx-host:
-  source .venv/bin/activate && source scripts/env_wind.sh
+  source .venv/bin/activate && source scripts/env_host.sh
   python scripts/hf_smoke.py
 """
 
@@ -42,7 +42,7 @@ def load(model_id: str, four_bit: bool, gpu_mem: str = "4500MiB", cpu_mem: str =
             # Double-quant + CPU offload triggers a bnb/accelerate meta-tensor
             # bug (offset.item() on meta) on this box, so keep it off.
             bnb_4bit_use_double_quant=False,
-            # Required on the 6 GB P40: the 9B 4-bit weights don't fully fit in
+            # Required on the small 6 GB GPU: the 9B 4-bit weights don't fully fit in
             # VRAM, so accelerate spills overflow modules to CPU. Without this
             # flag bnb refuses any CPU/disk dispatch.
             llm_int8_enable_fp32_cpu_offload=True,

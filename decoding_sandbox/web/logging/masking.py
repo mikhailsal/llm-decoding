@@ -1,6 +1,6 @@
 """Sensitive-field masking for log payloads.
 
-Ported almost verbatim from ``a production proxy gateway/backend/ai_proxy/logging/masking.py``.
+Ported almost verbatim from a production proxy gateway.
 The two helpers are intentionally narrow so the regex used to spot a
 "secret-looking" header/key is in exactly one place and the test suite can
 pin it down.
