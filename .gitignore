@@ -1,8 +1,11 @@
-# Secrets / local config -- NEVER commit API keys
+# Secrets / local config -- NEVER commit API keys, hostnames, or LAN IPs.
+# The *.example counterparts ARE committed and document the schema.
 config.toml
+config.local.toml
 .env
 .env.local
 *.secret
+Makefile.local
 
 # Python
 __pycache__/

@@ -1,22 +1,33 @@
 # Convenience targets. Edit on the client, run on `dsbx-host`.
+#
+# `dsbx-host` is a cosmetic placeholder. Your real GPU box almost certainly
+# has a different SSH alias / IP. Drop your local overrides into Makefile.local
+# (gitignored) -- see Makefile.local.example for the recipe.
 DSBX_HOST ?= dsbx-host
 DSBX_DEST ?= dsbx
 REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
 
+-include Makefile.local
+
 .PHONY: help sync doctor probe doctor-local probe-local serve-py serve-hf fmt \
         web-dev web-build web-prod web-test test coverage lint quality-check \
-        install-hooks
+        install-hooks _check_dsbx_host
 
 help:
-	@echo "Targets:"
+	@echo "Local override (gitignored):"
+	@echo "  cp Makefile.local.example Makefile.local         # then edit DSBX_HOST"
+	@echo "  cp config.local.example.toml >> config.toml      # for the [remote.*] block"
+	@echo "  Current DSBX_HOST = $(DSBX_HOST)"
+	@echo ""
+	@echo "Remote (run on dsbx-host, code edited here):"
 	@echo "  install-hooks Install git pre-commit hook"
-	@echo "  sync          rsync source to dsbx-host"
-	@echo "  doctor        sync + run 'dsbx doctor' on dsbx-host"
-	@echo "  probe         sync + run 'dsbx probe' on dsbx-host"
+	@echo "  sync          rsync source to \$$(DSBX_HOST)"
+	@echo "  doctor        sync + run 'dsbx doctor' on \$$(DSBX_HOST)"
+	@echo "  probe         sync + run 'dsbx probe' on \$$(DSBX_HOST)"
 	@echo "  doctor-local  run 'dsbx doctor' on this machine (probes remotes too)"
 	@echo "  probe-local   run 'dsbx probe' on this machine"
-	@echo "  serve-py      sync + start 'dsbx serve --backend llamacpp-py' on dsbx-host (port 8000)"
-	@echo "  serve-hf      sync + start 'dsbx serve --backend hf' on dsbx-host (port 8001)"
+	@echo "  serve-py      sync + start 'dsbx serve --backend llamacpp-py' on \$$(DSBX_HOST) (:8000)"
+	@echo "  serve-hf      sync + start 'dsbx serve --backend hf'         on \$$(DSBX_HOST) (:8001)"
 	@echo ""
 	@echo "Quality:"
 	@echo "  test          run the pytest suite"
@@ -30,8 +41,25 @@ help:
 	@echo "  web-prod      run middleware on :8765 serving pre-built frontend from build/"
 	@echo "  web-test      run pytest -k web and pnpm test (frontend unit tests)"
 
-sync:
-	scripts/sync_to_host.sh $(DSBX_DEST)
+# Guard the SSH-bound targets. The sanitization pass replaced the real host
+# alias with the cosmetic `dsbx-host`; if the user hasn't supplied an override,
+# fail loudly with a one-screen explanation instead of a cryptic rsync error.
+_check_dsbx_host:
+	@if [ "$(DSBX_HOST)" = "dsbx-host" ]; then \
+	  echo "ERROR: DSBX_HOST is still the placeholder 'dsbx-host'."; \
+	  echo ""; \
+	  echo "  Pick one of:"; \
+	  echo "    * cp Makefile.local.example Makefile.local  # then edit DSBX_HOST"; \
+	  echo "    * make DSBX_HOST=<your-ssh-alias> $(MAKECMDGOALS)"; \
+	  echo "    * export DSBX_HOST=<your-ssh-alias>"; \
+	  echo ""; \
+	  echo "  The Makefile.local file is gitignored so your real host name"; \
+	  echo "  never enters the repo."; \
+	  exit 1; \
+	fi
+
+sync: _check_dsbx_host
+	DSBX_HOST=$(DSBX_HOST) scripts/sync_to_host.sh $(DSBX_DEST)
 
 doctor: sync
 	$(REMOTE) dsbx doctor'

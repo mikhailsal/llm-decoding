@@ -1,0 +1,53 @@
+# Local overlay for config.toml.
+#
+# `config.example.toml` is a comprehensive *reference* covering every provider
+# and every flag. This file is the opposite: the minimum 30-line snippet you
+# need to point a fresh checkout at your own `dsbx serve` instance and run
+# the middleware + browser UI against it.
+#
+# Bring-up in three copies:
+#
+#   1. cp config.example.toml config.toml          # gitignored, full reference
+#   2. Append (or merge) the blocks below into config.toml, with your real
+#      IP/port substituted for 192.0.2.42:8000. RFC 5737 makes the example
+#      address unroutable, so the snippet itself is safe in git.
+#   3. cp Makefile.local.example Makefile.local    # set DSBX_HOST = <ssh alias>
+#
+# Then `make serve-py` brings the remote up and `make web-prod` exposes the
+# whole stack at http://127.0.0.1:8765 . First-time setup also wants:
+#
+#   * scripts/setup_host.sh   -- venv + CUDA torch + GGUF download on the GPU
+#                                 box (one-shot)
+#   * DSBX_WEB_TOKEN env var  -- the bearer token the browser will send; or
+#                                 leave [web].api_token below set to your
+#                                 random secret and skip the env var.
+
+# ----------------------------------------------------------------------------
+
+# Use the remote backend by default. The name must match the [remote.NAME]
+# block below.
+[run]
+backend = "dsbx-host-py"
+
+# ----------------------------------------------------------------------------
+
+# One [remote.NAME] block per `dsbx serve` instance. The middleware reads this
+# table to find the upstream model server; the browser only ever talks to the
+# middleware, so the LAN address below never leaves your machine.
+[remote.dsbx-host-py]
+base_url = "http://192.0.2.42:8000"
+timeout  = 180.0
+
+# Uncomment if you also run `make serve-hf` on port 8001 (HuggingFace backend):
+# [remote.dsbx-host-hf]
+# base_url = "http://192.0.2.42:8001"
+# timeout  = 180.0
+
+# ----------------------------------------------------------------------------
+
+# Web middleware. Browsers must send this token as `Authorization: Bearer ...`
+# Generate one with:  openssl rand -hex 32
+[web]
+api_token        = "REPLACE-ME-with-openssl-rand-hex-32"
+cors_origins     = ["http://localhost:5173"]
+manual_session_ttl = 3600

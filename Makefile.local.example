@@ -1,0 +1,39 @@
+# Local overrides for the Makefile.
+#
+# Copy this file to `Makefile.local` (gitignored) and edit. The main Makefile
+# auto-includes it via `-include Makefile.local`, so any `VAR = value` you
+# put here wins over the placeholder defaults at the top of Makefile.
+#
+#   cp Makefile.local.example Makefile.local
+#   $EDITOR Makefile.local        # set DSBX_HOST at minimum
+#
+# The committed Makefile keeps the cosmetic name `dsbx-host` so the repo
+# stays portable. Your real SSH alias / IP belongs here, never in git.
+
+# --- Remote GPU host -------------------------------------------------------
+# DSBX_HOST is whatever name resolves on your machine to the box that runs
+# `dsbx serve`. Two equally good options:
+#
+#   1. An SSH alias defined in ~/.ssh/config, e.g.:
+#         Host gpu-box
+#             HostName 10.0.0.42
+#             User mikhail
+#      Then:  DSBX_HOST = gpu-box
+#
+#   2. A bare hostname / IP that your DNS or /etc/hosts already resolves:
+#         DSBX_HOST = 10.0.0.42
+#
+# Whatever you pick must already work for `ssh $(DSBX_HOST) hostname`.
+DSBX_HOST = your-ssh-alias-here
+
+# Remote directory (relative to dsbx-host's home) where rsync drops the synced
+# source tree. The default `dsbx` is fine for most setups.
+DSBX_DEST = dsbx
+
+# --- Optional: pass extra env to remote ssh sessions ----------------------
+# Uncomment and edit if your remote needs e.g. a non-default CUDA_VISIBLE_DEVICES
+# or a CACHE_ROOT pointing at a bulk disk.
+#
+# REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && \
+#            export CUDA_VISIBLE_DEVICES=0 CACHE_ROOT=/mnt/bulk/dsbx && \
+#            source .venv/bin/activate &&

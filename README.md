@@ -124,6 +124,29 @@ dsbx spec "The capital of France is" --gamma 4
 make web-prod
 ```
 
+### Running compute on a separate GPU machine
+
+Edit the code on a thin client, run `dsbx serve` on a beefier box, drive both
+from the same browser tab:
+
+```bash
+# One-time, on the client (this checkout):
+cp Makefile.local.example      Makefile.local        # set DSBX_HOST = your-ssh-alias
+cat config.local.example.toml >> config.toml         # add the [remote.dsbx-host-py] block,
+                                                     # then edit the base_url IP
+# One-time, on the GPU host:
+bash scripts/setup_host.sh                           # venv + CUDA torch + model download
+
+# Day-to-day from the client:
+make serve-py                                        # rsync + launch dsbx serve over ssh
+make web-prod                                        # browser UI -> middleware -> remote
+```
+
+Both `Makefile.local` and `config.toml` are gitignored, so the real SSH alias,
+LAN IP, and bearer token never enter the repo. Only the `*.example` templates
+(safe placeholders only) are committed. See [`docs/architecture.md`](docs/architecture.md)
+for the full client ↔ middleware ↔ remote flow.
+
 ## Project structure
 
 ```
