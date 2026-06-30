@@ -277,3 +277,55 @@ def test_build_backend_unknown_lists_remotes_in_available_message() -> None:
     cfg.remotes = {"dsbx-host-py": RemoteConfig("dsbx-host-py", "http://x:1")}
     with pytest.raises(ValueError, match="dsbx-host-py"):
         factory_mod.build_backend("nope", cfg)
+
+
+# --------------------------------------------------------------------------- #
+# list_available_models
+# --------------------------------------------------------------------------- #
+def test_list_available_models_hf_collects_models_and_fallback() -> None:
+    cfg = load_config(load_secrets=False)
+    cfg.raw["local"]["hf"] = {
+        "model": "Q/Q1",
+        "fallback_model": "Q/Q2",
+        "models": ["Q/Q3", "Q/Q1"],  # duplicate should be deduped
+    }
+    out = factory_mod.list_available_models("hf", cfg)
+    assert out == [("Q/Q3", "Q/Q3"), ("Q/Q1", "Q/Q1"), ("Q/Q2", "Q/Q2")]
+
+
+def test_list_available_models_llamacpp_py_discovers_gguf(monkeypatch) -> None:
+    cfg = load_config(load_secrets=False)
+    cfg.raw["local"]["llamacpp_py"] = {
+        "model_search_dirs": ["/tmp/ggufs"],
+        "model_path": "/tmp/explicit.gguf",
+    }
+
+    def fake_discover(dirs):
+        return [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
+
+    monkeypatch.setattr("decoding_sandbox.backends.llamacpp_py.discover_gguf_models", fake_discover)
+    out = factory_mod.list_available_models("llamacpp-py", cfg)
+    # explicit model_path is prepended when not already present
+    assert out[0] == ("/tmp/explicit.gguf", "explicit")
+    assert out[1:] == [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
+
+
+def test_list_available_models_llamacpp_py_skips_duplicate_explicit(monkeypatch) -> None:
+    cfg = load_config(load_secrets=False)
+    cfg.raw["local"]["llamacpp_py"] = {
+        "model_search_dirs": ["/tmp/ggufs"],
+        "model_path": "/tmp/a.gguf",  # already returned by discover
+    }
+
+    def fake_discover(dirs):
+        return [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
+
+    monkeypatch.setattr("decoding_sandbox.backends.llamacpp_py.discover_gguf_models", fake_discover)
+    out = factory_mod.list_available_models("llamacpp-py", cfg)
+    # explicit path not duplicated
+    assert out == [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
+
+
+def test_list_available_models_unknown_backend_returns_empty() -> None:
+    cfg = load_config(load_secrets=False)
+    assert factory_mod.list_available_models("nope", cfg) == []
