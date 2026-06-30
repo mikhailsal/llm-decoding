@@ -95,11 +95,8 @@ async def _flush_loop(batch_size: int, flush_interval: float) -> None:
     while True:
         entries: list[LogEntry] = []
         try:
-            try:
-                first = await asyncio.wait_for(_queue.get(), timeout=flush_interval)
-                entries.append(first)
-            except asyncio.TimeoutError:
-                continue
+            first = await _queue.get()
+            entries.append(first)
             while len(entries) < batch_size:
                 try:
                     entries.append(_queue.get_nowait())
@@ -114,7 +111,7 @@ async def _flush_loop(batch_size: int, flush_interval: float) -> None:
                     break
             if entries:
                 try:
-                    await _write_batch(session_factory, entries)
+                    await asyncio.shield(_write_batch(session_factory, entries))
                 except Exception:
                     log.exception("dsbx-web: shutdown log flush failed")
             raise

@@ -1027,3 +1027,28 @@ def test_inspect_watch_eos_renders_column_with_per_position_prob(
     assert rc == 0
     assert "EOS:250" in rendered  # the new column header
     assert "5.00%" in rendered  # the per-position probability we faked
+
+
+def test_cmd_probe(monkeypatch):
+    cfg = load_config(load_secrets=False)
+
+    # Mock provider_probe.run_probe to assert it's called with correct parameters
+    run_probe_called = False
+
+    def mock_run_probe(config, providers, model, console):
+        nonlocal run_probe_called
+        run_probe_called = True
+        assert config is cfg
+        assert providers == ["openai"]
+        assert model == "gpt-4o"
+        return 42
+
+    monkeypatch.setattr("dsbx.core.provider_probe.run_probe", mock_run_probe)
+
+    args = argparse.Namespace(
+        providers=["openai"],
+        model="gpt-4o",
+    )
+    rc = app.cmd_probe(args, cfg)
+    assert rc == 42
+    assert run_probe_called is True
