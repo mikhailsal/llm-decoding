@@ -27,7 +27,16 @@
 DSBX_HOST = your-ssh-alias-here
 
 # Remote directory (relative to dsbx-host's home) where rsync drops the synced
-# source tree. The default `dsbx` is fine for most setups.
+# source tree. The default `dsbx` is fine for fresh GPU boxes.
+#
+# Heads-up if your remote was set up before the `decoding_sandbox` -> `dsbx`
+# package rename: your 6 GB-ish .venv lives in the OLD directory (e.g.
+# ~/llm-decoding/.venv). Don't waste a re-download -- point DSBX_DEST at the
+# old directory and let `make sync` overwrite the source while keeping the
+# venv in place. The REMOTE wrapper auto-runs `pip install -e .` on the next
+# command to refresh the entry point.
+#
+#   DSBX_DEST = llm-decoding
 DSBX_DEST = dsbx
 
 # --- Optional: pass extra env to remote ssh sessions ----------------------

@@ -142,10 +142,17 @@ make serve-py                                        # rsync + launch dsbx serve
 make web-prod                                        # browser UI -> middleware -> remote
 ```
 
-Both `Makefile.local` and `config.toml` are gitignored, so the real SSH alias,
-LAN IP, and bearer token never enter the repo. Only the `*.example` templates
+Both `Makefile.local` and `config.toml` are gitignored and excluded from
+`scripts/sync_to_host.sh`, so the real SSH alias, LAN IP, and bearer token
+never enter the repo *or* the remote tree. Only the `*.example` templates
 (safe placeholders only) are committed. See [`docs/architecture.md`](docs/architecture.md)
 for the full client ↔ middleware ↔ remote flow.
+
+The remote-bound make targets (`sync`/`doctor`/`probe`/`serve-py`/`serve-hf`)
+auto-run `pip install -e .` on the GPU host the first time you invoke them
+after either a fresh `setup_host.sh` or a package rename — so a stale `.venv`
+left over from an earlier checkout doesn't strand you with a broken `dsbx`
+entry-point. The check costs ~50 ms when the install is already healthy.
 
 ## Project structure
 

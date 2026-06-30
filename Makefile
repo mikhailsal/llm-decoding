@@ -5,7 +5,18 @@
 # (gitignored) -- see Makefile.local.example for the recipe.
 DSBX_HOST ?= dsbx-host
 DSBX_DEST ?= dsbx
-REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
+# Auto-heal the editable install on the remote. Background: the package was
+# renamed `decoding_sandbox` -> `dsbx`; a stale .venv on the host still has
+# an entry-point script importing the old name. We test the installed binary
+# (NOT `import dsbx`, which would spuriously succeed via cwd on sys.path) and
+# rerun `pip install -e .` if it fails. ~50 ms when healthy.
+REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate && \
+           dsbx --version >/dev/null 2>&1 || pip install -e . >/dev/null &&
+
+# Prefer the local editable install if one exists, so `make web-prod` works
+# without the user remembering `source .venv/bin/activate`. Falls back to
+# whatever `dsbx` is first on $$PATH.
+DSBX_BIN := $(shell [ -x .venv/bin/dsbx ] && echo .venv/bin/dsbx || echo dsbx)
 
 -include Makefile.local
 
@@ -68,10 +79,10 @@ probe: sync
 	$(REMOTE) dsbx probe'
 
 doctor-local:
-	python -m dsbx.cli doctor
+	$(DSBX_BIN) doctor
 
 probe-local:
-	python -m dsbx.cli probe
+	$(DSBX_BIN) probe
 
 # `make serve-py` / `make serve-hf` are convenience wrappers that ssh into
 # dsbx-host and launch a long-lived `dsbx serve`. Keep them in separate ports so
@@ -114,12 +125,12 @@ web-dev:
 	  cd frontend && pnpm dev --host 127.0.0.1 --port 5173 & \
 	  trap "kill $$!" INT TERM EXIT; \
 	  cd .. ; \
-	  dsbx web --host 127.0.0.1 --port 8765'
+	  $(DSBX_BIN) web --host 127.0.0.1 --port 8765'
 
 web-prod:
 	@bash -c 'set -eo pipefail; \
 	  test -d frontend/build || (cd frontend && pnpm install && pnpm build); \
-	  dsbx web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build'
+	  $(DSBX_BIN) web --host 127.0.0.1 --port 8765 --frontend-dist frontend/build'
 
 web-test:
 	pytest tests -k web

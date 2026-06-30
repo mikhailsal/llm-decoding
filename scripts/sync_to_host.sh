@@ -21,9 +21,21 @@ rsync -az --delete \
   --exclude 'cache/' \
   --exclude 'sessions/' \
   --exclude 'out/' \
+  --exclude 'htmlcov/' \
+  --exclude '.coverage' \
+  --exclude '.mypy_cache/' \
+  --exclude '.pytest_cache/' \
+  --exclude '.ruff_cache/' \
   --exclude 'config.toml' \
+  --exclude 'config.local.toml' \
   --exclude '.env' \
+  --exclude '.env.local' \
+  --exclude '*.secret' \
+  --exclude 'Makefile.local' \
   --exclude 'scripts/env_host.sh' \
+  --exclude 'frontend/node_modules/' \
+  --exclude 'frontend/build/' \
+  --exclude 'frontend/.svelte-kit/' \
   "${SRC}" "${DSBX_HOST}:${DEST}/"
 
 echo "Done. On dsbx-host: cd ${DEST} && source .venv/bin/activate && dsbx doctor"

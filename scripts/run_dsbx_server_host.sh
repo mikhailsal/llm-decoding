@@ -36,8 +36,13 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-if ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
-  echo "==> installing [server] extra (fastapi + uvicorn)"
+# Heal both (a) first-run on a venv that hasn't seen the [server] extra and
+# (b) a venv that was set up before the `decoding_sandbox` -> `dsbx` rename
+# and whose entry-point script still imports the old module. We check the
+# installed binary directly (not `import dsbx`), because the synced source
+# directory is on sys.path via cwd and would mask a stale install.
+if ! dsbx --version >/dev/null 2>&1 || ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+  echo "==> (re)installing dsbx[server]"
   pip install -e ".[server]"
 fi
 
