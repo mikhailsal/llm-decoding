@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.web.auth import AuthConfig
+from dsbx.web.auth import AuthConfig
 from tests.fakes import FakeBackend, cand
 from tests.web_helpers import DEFAULT_TOKEN, build_test_app
 

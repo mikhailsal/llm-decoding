@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from decoding_sandbox.core import config as cfg_mod
+from dsbx.core import config as cfg_mod
 
 
 def test_deep_merge_overrides_scalar_and_recurses_into_dicts() -> None:

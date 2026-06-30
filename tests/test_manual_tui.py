@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from decoding_sandbox.cli.manual_tui import CommandResult, dispatch_command
-from decoding_sandbox.core.manual import ManualSession
+from dsbx.cli.manual_tui import CommandResult, dispatch_command
+from dsbx.core.manual import ManualSession
 from tests.fakes import FakeBackend, cand
 
 

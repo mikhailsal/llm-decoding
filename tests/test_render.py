@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 
-from decoding_sandbox.cli import render
-from decoding_sandbox.cli.render import (
+from dsbx.cli import render
+from dsbx.cli.render import (
     EMPTY_MARK,
     NEWLINE_MARK,
     SPACE_MARK,
@@ -13,7 +13,7 @@ from decoding_sandbox.cli.render import (
     TAB_MARK,
     is_special_text,
 )
-from decoding_sandbox.core.types import TokenCandidate
+from dsbx.core.types import TokenCandidate
 
 
 # --------------------------------------------------------------------------- #

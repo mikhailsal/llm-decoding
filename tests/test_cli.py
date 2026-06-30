@@ -9,11 +9,11 @@ import math
 import pytest
 from rich.console import Console
 
-from decoding_sandbox.cli import app
-from decoding_sandbox.core import storage as storage_mod
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.config import Config, StorageConfig, load_config
-from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
+from dsbx.cli import app
+from dsbx.core import storage as storage_mod
+from dsbx.core.backend import Backend
+from dsbx.core.config import Config, StorageConfig, load_config
+from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 from tests.fakes import FakeBackend, cand
 
 
@@ -104,7 +104,7 @@ def test_inspect_generated_only_provider_shows_next_token_distribution(
         assert name == "nim"
         return backend
 
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", fake_build_backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", fake_build_backend)
     rc = app.cmd_inspect(
         argparse.Namespace(
             backend="nim",
@@ -131,7 +131,7 @@ def test_inspect_propagates_invalid_custom_backend(monkeypatch) -> None:
     def fake_build_backend(name, cfg, model=None):
         raise ValueError("bad backend")
 
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", fake_build_backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", fake_build_backend)
     with pytest.raises(ValueError, match="bad backend"):
         app.cmd_inspect(
             argparse.Namespace(
@@ -149,7 +149,7 @@ def test_inspect_propagates_invalid_custom_backend(monkeypatch) -> None:
 
 def test_inspect_renders_watch_columns_in_chat_only_path(monkeypatch, captured_console) -> None:
     backend = OpenAICompatBackend()
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(
@@ -213,7 +213,7 @@ def test_cmd_inspect_aborts_when_preflight_fails(monkeypatch) -> None:
         builder_called = True
         raise AssertionError("backend should never be built")
 
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", fake_build_backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", fake_build_backend)
     cfg = load_config(load_secrets=False)
     cfg.storage = StorageConfig(
         hf_home="", pip_cache="", min_free_gb=1.0, check_paths=["/anywhere"]
@@ -258,7 +258,7 @@ def test_cmd_generate_stops_on_resolved_stop_token(monkeypatch, captured_console
     )
 
     # Spy on generate() to count yielded steps.
-    from decoding_sandbox.core import engine
+    from dsbx.core import engine
 
     real_generate = engine.generate
     step_count = {"n": 0}
@@ -268,8 +268,8 @@ def test_cmd_generate_stops_on_resolved_stop_token(monkeypatch, captured_console
             step_count["n"] += 1
             yield step
 
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
-    monkeypatch.setattr("decoding_sandbox.cli.app.generate", counting_generate, raising=False)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.cli.app.generate", counting_generate, raising=False)
     # ^ generate is imported *inside* cmd_generate, so we patch the engine module too.
     monkeypatch.setattr(engine, "generate", counting_generate)
 
@@ -308,7 +308,7 @@ def test_cmd_generate_warns_on_multi_token_stop(monkeypatch, captured_console) -
         pieces={1: "P", 2: "A", 3: "B"},
         distributions={(1,): [cand(2, "A", 0.9, 0)]},
     )
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
@@ -545,8 +545,8 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
 ) -> None:
     """A backend exposing ``stream_generate`` should drive the CLI's
     generate loop without re-entering ``core.engine.generate``."""
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
 
     stream_calls: list[dict] = []
     engine_called = {"n": 0}
@@ -557,7 +557,7 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
         # tokenize, detokenize, piece).
         @property
         def capabilities(self):
-            from decoding_sandbox.core.types import Capabilities
+            from dsbx.core.types import Capabilities
 
             return Capabilities(
                 name="stream-fake",
@@ -625,7 +625,7 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
 
     backend = _Streaming()
 
-    from decoding_sandbox.core import engine
+    from dsbx.core import engine
 
     real = engine.generate
 
@@ -634,7 +634,7 @@ def test_cmd_generate_uses_stream_generate_when_backend_supports_it(
         return real(*a, **kw)
 
     monkeypatch.setattr(engine, "generate", counting_generate)
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
@@ -689,7 +689,7 @@ def test_cmd_generate_custom_sampler_uses_local_engine_even_on_streaming_backend
         raise AssertionError("stream_generate should not run for custom samplers")
 
     backend.stream_generate = boom_stream  # type: ignore[attr-defined]
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_generate(
         argparse.Namespace(
@@ -721,7 +721,7 @@ def test_main_wraps_remote_backend_error_as_clean_exit_4(monkeypatch, captured_c
     one clean red line and exit 4 -- not dump a stack trace. This is
     the bread-and-butter "server is down" case the user will hit most
     often, so the message should also tell them what to try next."""
-    from decoding_sandbox.backends.remote import RemoteBackendError
+    from dsbx.backends.remote import RemoteBackendError
 
     def _exploding(args, cfg):
         raise RemoteBackendError("GET /v1/info: Connection refused")
@@ -952,7 +952,7 @@ def test_inspect_renders_trailing_predict_next_row(monkeypatch, captured_console
         return results
 
     backend.score_prompt = patched  # type: ignore[method-assign]
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(
@@ -1006,7 +1006,7 @@ def test_inspect_watch_eos_renders_column_with_per_position_prob(
         ]
 
     backend.score_prompt = fake_score  # type: ignore[method-assign]
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", lambda *a, **kw: backend)
 
     rc = app.cmd_inspect(
         argparse.Namespace(

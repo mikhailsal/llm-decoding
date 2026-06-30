@@ -8,9 +8,9 @@ import random
 
 import pytest
 
-from decoding_sandbox.core.engine import generate
-from decoding_sandbox.core.manual import ManualSession
-from decoding_sandbox.core.samplers import Sampler, SamplerContext
+from dsbx.core.engine import generate
+from dsbx.core.manual import ManualSession
+from dsbx.core.samplers import Sampler, SamplerContext
 from tests.fakes import FakeBackend, cand
 
 
@@ -161,7 +161,7 @@ def test_score_prompt_trailing_step_has_chosen_none() -> None:
 def test_lookup_watch_returns_nan_candidate_for_missing_token() -> None:
     """The public lookup_watch helper marks unseen tokens as <top-k."""
     backend = FakeBackend(pieces={42: "x"})
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.types import StepResult
 
     empty_step = StepResult(position=0, candidates=[], is_full_vocab=False)
     watch = backend.lookup_watch(empty_step, 42)
@@ -265,7 +265,7 @@ def test_generate_stops_after_stop_id() -> None:
 
 def test_generate_records_changed_greedy_marker_for_runner_up_picker() -> None:
     """When a sampler picks a non-greedy candidate, decision.changed_greedy is True."""
-    from decoding_sandbox.core.samplers import SamplerDecision
+    from dsbx.core.samplers import SamplerDecision
 
     backend = FakeBackend(
         tokens={"P": [1]},
@@ -683,7 +683,7 @@ def test_mirostat_fallback_returns_top_candidate_when_filter_empties_set() -> No
 
 def test_mirostat_builder_creates_correct_sampler() -> None:
     """make_sampler('mirostat', ...) carries through to Sampler fields."""
-    from decoding_sandbox.core.samplers import make_sampler
+    from dsbx.core.samplers import make_sampler
 
     s = make_sampler("mirostat", mirostat_target=4.0, mirostat_lr=0.25, temperature=0.8)
     assert s.name == "mirostat"
@@ -693,14 +693,14 @@ def test_mirostat_builder_creates_correct_sampler() -> None:
 
 
 def test_make_sampler_unknown_raises_keyerror() -> None:
-    from decoding_sandbox.core.samplers import make_sampler
+    from dsbx.core.samplers import make_sampler
 
     with pytest.raises(KeyError, match="Unknown sampler"):
         make_sampler("does-not-exist")
 
 
 def test_make_sampler_passes_through_parameters() -> None:
-    from decoding_sandbox.core.samplers import make_sampler
+    from dsbx.core.samplers import make_sampler
 
     s = make_sampler("top_p", top_p=0.5, temperature=0.7)
     assert s.top_p == 0.5
@@ -711,7 +711,7 @@ def test_load_custom_with_int_return_wraps_decision(tmp_path) -> None:
     plug = tmp_path / "custom.py"
     plug.write_text("def decode(cands, ctx):\n    return cands[-1].token_id\n")
 
-    from decoding_sandbox.core.samplers import load_custom
+    from dsbx.core.samplers import load_custom
 
     fn = load_custom(str(plug))
     cands = [cand(1, "A", 0.7, 0), cand(2, "B", 0.3, 1)]
@@ -727,7 +727,7 @@ def test_load_custom_with_int_return_wraps_decision(tmp_path) -> None:
 def test_load_custom_with_decision_return_is_passed_through(tmp_path) -> None:
     plug = tmp_path / "custom.py"
     plug.write_text(
-        "from decoding_sandbox.core.samplers import SamplerDecision\n"
+        "from dsbx.core.samplers import SamplerDecision\n"
         "def my_decode(cands, ctx):\n"
         "    return SamplerDecision(\n"
         "        token_id=cands[0].token_id,\n"
@@ -738,7 +738,7 @@ def test_load_custom_with_decision_return_is_passed_through(tmp_path) -> None:
         "    )\n"
     )
 
-    from decoding_sandbox.core.samplers import load_custom
+    from dsbx.core.samplers import load_custom
 
     fn = load_custom(f"{plug}:my_decode")
     cands = [cand(1, "A", 0.7, 0)]
@@ -752,14 +752,14 @@ def test_load_custom_missing_function_raises(tmp_path) -> None:
     plug = tmp_path / "custom.py"
     plug.write_text("def other(cands, ctx): return cands[0].token_id\n")
 
-    from decoding_sandbox.core.samplers import load_custom
+    from dsbx.core.samplers import load_custom
 
     with pytest.raises(AttributeError):
         load_custom(str(plug))  # default :decode does not exist
 
 
 def test_load_custom_unloadable_path_raises() -> None:
-    from decoding_sandbox.core.samplers import load_custom
+    from dsbx.core.samplers import load_custom
 
     with pytest.raises((ImportError, FileNotFoundError)):
         load_custom("/this/path/definitely/does/not/exist.py")

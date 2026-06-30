@@ -1,6 +1,6 @@
 # Architecture
 
-This document covers the moving parts behind `llm-decoding`: the
+This document covers the moving parts behind `dsbx`: the
 client/server split, the HTTP server's swappable model slot, the browser
 middleware, and what was verified end-to-end on real hardware.
 

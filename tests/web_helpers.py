@@ -1,6 +1,6 @@
 """Shared test helpers for the dsbx web middleware.
 
-The web middleware reaches into :mod:`decoding_sandbox.core.factory` to build
+The web middleware reaches into :mod:`dsbx.core.factory` to build
 backends, but a test wants to short-circuit that and inject a pre-canned
 :class:`FakeBackend`. We do it via :func:`build_test_app`: it constructs a
 real ``FastAPI`` app from :func:`make_web_app` and then monkeypatches the
@@ -19,15 +19,15 @@ from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.config import (
+from dsbx.core.backend import Backend
+from dsbx.core.config import (
     Config,
     ProviderConfig,
     RemoteConfig,
     StorageConfig,
 )
-from decoding_sandbox.web.app import make_web_app
-from decoding_sandbox.web.backends import BackendRegistry, _BackendEntry
+from dsbx.web.app import make_web_app
+from dsbx.web.backends import BackendRegistry, _BackendEntry
 
 DEFAULT_TOKEN = "test-token-please-rotate-1234567890"
 

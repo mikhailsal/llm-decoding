@@ -48,7 +48,7 @@
   }
 }
 
-/* Visible-whitespace markers (mirrors decoding_sandbox/cli/render.py).
+/* Visible-whitespace markers (mirrors dsbx/cli/render.py).
  * The renderer wraps each "space" glyph in a tiny dim span so it stands
  * out without being noisy. ``ws`` for ␣ / ↵ / →, ``special`` for the
  * magenta highlight on EOS/BOS/PAD/<|...|> token text.

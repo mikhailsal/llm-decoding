@@ -1,4 +1,4 @@
-"""Lightweight code-size guardrails for the decoding-sandbox codebase.
+"""Lightweight code-size guardrails for the dsbx codebase.
 
 Two checks, deliberately phased so the gate is green *today* while still
 nudging the codebase toward smaller units over time:
@@ -48,11 +48,11 @@ FILE_EXCLUDES = {
 # size: touching them must not make them larger. TODO: split each below
 # FILE_LINE_LIMIT (tracked as a follow-up issue).
 LEGACY_FILE_BUDGETS = {
-    "decoding_sandbox/web/app.py": 918,
-    "decoding_sandbox/web/backends.py": 840,
-    "decoding_sandbox/web/streaming.py": 662,
-    "decoding_sandbox/web/schemas.py": 629,
-    "decoding_sandbox/server/app.py": 612,
+    "dsbx/web/app.py": 918,
+    "dsbx/web/backends.py": 840,
+    "dsbx/web/streaming.py": 662,
+    "dsbx/web/schemas.py": 629,
+    "dsbx/server/app.py": 612,
 }
 
 

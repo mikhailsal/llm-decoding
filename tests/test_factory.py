@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from decoding_sandbox.core import factory as factory_mod
-from decoding_sandbox.core.config import load_config
+from dsbx.core import factory as factory_mod
+from dsbx.core.config import load_config
 
 
 def test_build_backend_unknown_name_raises_value_error() -> None:
@@ -24,7 +24,7 @@ def test_build_backend_lowercases_name() -> None:
     cfg = load_config(load_secrets=False)
     # We can't actually instantiate Fireworks without httpx hitting the wire,
     # so monkey-test the wiring by stubbing the OpenAICompatBackend constructor.
-    import decoding_sandbox.backends.openai_compat as oc
+    import dsbx.backends.openai_compat as oc
 
     called: dict = {}
 
@@ -46,7 +46,7 @@ def test_build_backend_lowercases_name() -> None:
 
 def test_build_backend_llamacpp_alias() -> None:
     cfg = load_config(load_secrets=False)
-    import decoding_sandbox.backends.llamacpp as lc
+    import dsbx.backends.llamacpp as lc
 
     constructed: dict = {}
 
@@ -73,7 +73,7 @@ def test_build_backend_hf_forwards_memory_caps() -> None:
     assert hf["gpu_mem"] == "4500MiB"
     assert hf["cpu_mem"] == "13GiB"
 
-    import decoding_sandbox.backends.hf as hf_mod
+    import dsbx.backends.hf as hf_mod
 
     captured: dict = {}
 
@@ -111,7 +111,7 @@ def test_build_backend_hf_respects_overrides_from_config(monkeypatch) -> None:
     cfg.raw["local"]["hf"]["gpu_mem"] = "9000MiB"
     cfg.raw["local"]["hf"]["cpu_mem"] = "30GiB"
 
-    import decoding_sandbox.backends.hf as hf_mod
+    import dsbx.backends.hf as hf_mod
 
     captured: dict = {}
 
@@ -143,7 +143,7 @@ def test_build_backend_llamacpp_py_routes_with_normalized_name(monkeypatch) -> N
     cfg.raw["local"]["llamacpp_py"]["n_ctx"] = 2048
     cfg.raw["local"]["llamacpp_py"]["logits_all"] = True
 
-    import decoding_sandbox.backends.llamacpp_py as lp_mod
+    import dsbx.backends.llamacpp_py as lp_mod
 
     captured: dict = {}
 
@@ -188,7 +188,7 @@ def test_build_backend_llamacpp_py_routes_with_normalized_name(monkeypatch) -> N
 def test_build_backend_routes_provider_to_openai_compat(monkeypatch) -> None:
     """Any name matching a provider should construct OpenAICompatBackend."""
     cfg = load_config(load_secrets=False)
-    import decoding_sandbox.backends.openai_compat as oc
+    import dsbx.backends.openai_compat as oc
 
     seen: dict = {}
 
@@ -208,13 +208,13 @@ def test_build_backend_routes_provider_to_openai_compat(monkeypatch) -> None:
 def test_build_backend_routes_remote_alias(monkeypatch) -> None:
     """A name matching ``[remote.NAME]`` builds a RemoteBackend with the
     block's base_url + timeout."""
-    from decoding_sandbox.core.config import RemoteConfig
+    from dsbx.core.config import RemoteConfig
 
     cfg = load_config(load_secrets=False)
     cfg.remotes = {
         "dsbx-host-py": RemoteConfig("dsbx-host-py", "http://dsbx-host:8000", timeout=42.0),
     }
-    import decoding_sandbox.backends.remote as rmod
+    import dsbx.backends.remote as rmod
 
     captured: dict = {}
 
@@ -231,11 +231,11 @@ def test_build_backend_routes_remote_alias(monkeypatch) -> None:
 
 def test_build_backend_bare_remote_picks_single_alias(monkeypatch) -> None:
     """``--backend remote`` with exactly one [remote.NAME] entry picks it."""
-    from decoding_sandbox.core.config import RemoteConfig
+    from dsbx.core.config import RemoteConfig
 
     cfg = load_config(load_secrets=False)
     cfg.remotes = {"only": RemoteConfig("only", "http://x:1")}
-    import decoding_sandbox.backends.remote as rmod
+    import dsbx.backends.remote as rmod
 
     captured: dict = {}
     monkeypatch.setattr(
@@ -257,7 +257,7 @@ def test_build_backend_bare_remote_errors_when_no_entries() -> None:
 
 def test_build_backend_bare_remote_errors_when_ambiguous() -> None:
     """``--backend remote`` with multiple aliases asks the user to pick one."""
-    from decoding_sandbox.core.config import RemoteConfig
+    from dsbx.core.config import RemoteConfig
 
     cfg = load_config(load_secrets=False)
     cfg.remotes = {
@@ -271,7 +271,7 @@ def test_build_backend_bare_remote_errors_when_ambiguous() -> None:
 def test_build_backend_unknown_lists_remotes_in_available_message() -> None:
     """The 'Backend not available' error should list configured remotes
     so users discover the right name without grepping config files."""
-    from decoding_sandbox.core.config import RemoteConfig
+    from dsbx.core.config import RemoteConfig
 
     cfg = load_config(load_secrets=False)
     cfg.remotes = {"dsbx-host-py": RemoteConfig("dsbx-host-py", "http://x:1")}
@@ -303,7 +303,7 @@ def test_list_available_models_llamacpp_py_discovers_gguf(monkeypatch) -> None:
     def fake_discover(dirs):
         return [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
 
-    monkeypatch.setattr("decoding_sandbox.backends.llamacpp_py.discover_gguf_models", fake_discover)
+    monkeypatch.setattr("dsbx.backends.llamacpp_py.discover_gguf_models", fake_discover)
     out = factory_mod.list_available_models("llamacpp-py", cfg)
     # explicit model_path is prepended when not already present
     assert out[0] == ("/tmp/explicit.gguf", "explicit")
@@ -320,7 +320,7 @@ def test_list_available_models_llamacpp_py_skips_duplicate_explicit(monkeypatch)
     def fake_discover(dirs):
         return [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]
 
-    monkeypatch.setattr("decoding_sandbox.backends.llamacpp_py.discover_gguf_models", fake_discover)
+    monkeypatch.setattr("dsbx.backends.llamacpp_py.discover_gguf_models", fake_discover)
     out = factory_mod.list_available_models("llamacpp-py", cfg)
     # explicit path not duplicated
     assert out == [("/tmp/a.gguf", "a"), ("/tmp/b.gguf", "b")]

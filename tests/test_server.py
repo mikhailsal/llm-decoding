@@ -18,10 +18,10 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.types import StepResult, TokenCandidate
-from decoding_sandbox.server import schemas as S
-from decoding_sandbox.server.app import BackendSlot, make_app
+from dsbx.core.backend import Backend
+from dsbx.core.types import StepResult, TokenCandidate
+from dsbx.server import schemas as S
+from dsbx.server.app import BackendSlot, make_app
 from tests.fakes import FakeBackend, cand
 
 
@@ -173,7 +173,7 @@ def test_score_prompt_maps_notimplemented_to_400() -> None:
     class _ChatOnly(Backend):
         @property
         def capabilities(self):
-            from decoding_sandbox.core.types import Capabilities
+            from dsbx.core.types import Capabilities
 
             return Capabilities(
                 name="chat-only",
@@ -219,7 +219,7 @@ def test_score_prompt_forwards_prepend_token_ids_to_backend() -> None:
     class _Capturing(Backend):
         @property
         def capabilities(self):
-            from decoding_sandbox.core.types import Capabilities
+            from dsbx.core.types import Capabilities
 
             return Capabilities(
                 name="capture",
@@ -269,7 +269,7 @@ def test_verify_greedy_endpoint() -> None:
     class _WithVerify(Backend):
         @property
         def capabilities(self):
-            from decoding_sandbox.core.types import Capabilities
+            from dsbx.core.types import Capabilities
 
             return Capabilities(
                 name="vg",
@@ -392,7 +392,7 @@ def test_generate_stream_runtime_error_lands_in_done_event() -> None:
     class _ExplodingBackend(Backend):
         @property
         def capabilities(self):
-            from decoding_sandbox.core.types import Capabilities
+            from dsbx.core.types import Capabilities
 
             return Capabilities(
                 name="boom",

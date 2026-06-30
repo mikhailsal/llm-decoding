@@ -14,11 +14,11 @@ from contextlib import contextmanager
 
 import pytest
 
-from decoding_sandbox.backends import llamacpp as llamacpp_mod
-from decoding_sandbox.backends import openai_compat as oc_mod
-from decoding_sandbox.backends.llamacpp import LlamaCppBackend
-from decoding_sandbox.backends.openai_compat import OpenAICompatBackend
-from decoding_sandbox.core.config import ProviderConfig
+from dsbx.backends import llamacpp as llamacpp_mod
+from dsbx.backends import openai_compat as oc_mod
+from dsbx.backends.llamacpp import LlamaCppBackend
+from dsbx.backends.openai_compat import OpenAICompatBackend
+from dsbx.core.config import ProviderConfig
 from tests.fakes import MockHTTPClient, MockResponse
 
 
@@ -964,7 +964,7 @@ def test_stream_native_with_echo_renders_empty_bos_via_piece(monkeypatch) -> Non
     tokenizer's piece so it matches the live preview instead of the dim
     ``<empty>`` placeholder.
     """
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.types import StepResult
 
     backend, mock = _make_oc_backend(
         monkeypatch,
@@ -1515,7 +1515,7 @@ def test_supports_native_sampler_matrix(monkeypatch) -> None:
     Fireworks-extensions so they only count as native when the provider
     explicitly opts in -- otherwise the per-step fallback runs the
     local implementation (mirostat v2 + typical filters in
-    :mod:`decoding_sandbox.core.samplers`).
+    :mod:`dsbx.core.samplers`).
     """
     comp, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=True)
     chat, _ = _make_oc_backend(monkeypatch, routes={}, has_completions=False)
@@ -1909,7 +1909,7 @@ def test_stream_native_refuses_when_no_completions(monkeypatch) -> None:
     """Chat-only providers raise rather than silently picking a wrong path.
 
     The wire decision lives in
-    :func:`decoding_sandbox.web.streaming._can_use_native_cloud_stream`;
+    :func:`dsbx.web.streaming._can_use_native_cloud_stream`;
     this test makes sure that even if someone calls the method directly
     with a chat-only provider, they get a loud :class:`NotImplementedError`
     they can branch on.
@@ -2402,8 +2402,8 @@ def test_stream_native_with_echo_splits_prompt_and_generation(monkeypatch) -> No
     UI table would render as confusing extra rows -- exactly the kind
     of regression a wire-shape test catches cheaply.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.engine import GenStep
+    from dsbx.core.types import StepResult
 
     backend, mock = _make_oc_backend(
         monkeypatch,
@@ -2527,8 +2527,8 @@ def test_stream_native_with_echo_splits_by_text_offset(monkeypatch) -> None:
     sampling_logprob on emit positions only) so any future drift in
     the split heuristic fails loudly.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.engine import GenStep
+    from dsbx.core.types import StepResult
 
     backend, mock = _make_oc_backend(
         monkeypatch,
@@ -2620,8 +2620,8 @@ def test_stream_native_with_echo_splits_by_sampling_signal(monkeypatch) -> None:
     block". Pinned here so the secondary signal can't silently
     regress.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.engine import GenStep
+    from dsbx.core.types import StepResult
 
     backend, mock = _make_oc_backend(
         monkeypatch,
@@ -2706,7 +2706,7 @@ def test_stream_native_with_echo_marks_unscored_position_zero_as_nan(monkeypatch
     Position 1+ are unaffected: they carry real top_logprobs and a real
     logprob the model actually computed against the prior context.
     """
-    from decoding_sandbox.core.types import StepResult
+    from dsbx.core.types import StepResult
 
     backend, mock = _make_oc_backend(
         monkeypatch,

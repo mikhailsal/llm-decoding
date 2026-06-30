@@ -7,8 +7,8 @@ from typing import Any
 import httpx
 import pytest
 
-from decoding_sandbox.core import provider_probe
-from decoding_sandbox.core.config import ProviderConfig
+from dsbx.core import provider_probe
+from dsbx.core.config import ProviderConfig
 
 
 def _prov(
@@ -216,7 +216,7 @@ def test_probe_provider_short_circuits_without_api_key(monkeypatch) -> None:
 
 
 def test_run_probe_renders_table_and_returns_zero_on_success(monkeypatch) -> None:
-    from decoding_sandbox.core.config import Config, StorageConfig
+    from dsbx.core.config import Config, StorageConfig
 
     prov = _prov()
     cfg = Config(
@@ -254,7 +254,7 @@ def test_run_probe_renders_table_and_returns_zero_on_success(monkeypatch) -> Non
 
 
 def test_run_probe_returns_one_when_any_chat_errors(monkeypatch) -> None:
-    from decoding_sandbox.core.config import Config, StorageConfig
+    from dsbx.core.config import Config, StorageConfig
 
     prov = _prov()
     cfg = Config(
@@ -277,7 +277,7 @@ def test_run_probe_returns_one_when_any_chat_errors(monkeypatch) -> None:
 
 
 def test_run_probe_returns_two_when_provider_unknown(monkeypatch) -> None:
-    from decoding_sandbox.core.config import Config, StorageConfig
+    from dsbx.core.config import Config, StorageConfig
 
     cfg = Config(
         raw={},

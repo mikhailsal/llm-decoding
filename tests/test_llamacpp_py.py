@@ -128,7 +128,7 @@ def _backend(monkeypatch, tmp_path, *, logits_all=True):
     _install_fake_llama_cpp(monkeypatch)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     return LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -143,7 +143,7 @@ def _backend(monkeypatch, tmp_path, *, logits_all=True):
 # Discovery
 # --------------------------------------------------------------------------- #
 def test_discover_model_path_uses_explicit_path(monkeypatch, tmp_path) -> None:
-    from decoding_sandbox.backends import llamacpp_py as mod
+    from dsbx.backends import llamacpp_py as mod
 
     target = tmp_path / "explicit.gguf"
     target.write_bytes(b"")
@@ -152,14 +152,14 @@ def test_discover_model_path_uses_explicit_path(monkeypatch, tmp_path) -> None:
 
 
 def test_discover_model_path_raises_when_explicit_missing(tmp_path) -> None:
-    from decoding_sandbox.backends import llamacpp_py as mod
+    from dsbx.backends import llamacpp_py as mod
 
     with pytest.raises(FileNotFoundError):
         mod._discover_model_path(str(tmp_path / "nope.gguf"), [], "**/*.gguf")
 
 
 def test_discover_model_path_globs_under_search_dirs(monkeypatch, tmp_path) -> None:
-    from decoding_sandbox.backends import llamacpp_py as mod
+    from dsbx.backends import llamacpp_py as mod
 
     nested = tmp_path / "hub" / "models--x" / "snap"
     nested.mkdir(parents=True)
@@ -173,14 +173,14 @@ def test_discover_model_path_globs_under_search_dirs(monkeypatch, tmp_path) -> N
 def test_discover_model_path_raises_with_helpful_message_when_nothing_matches(
     tmp_path,
 ) -> None:
-    from decoding_sandbox.backends import llamacpp_py as mod
+    from dsbx.backends import llamacpp_py as mod
 
     with pytest.raises(FileNotFoundError, match="No GGUF matching"):
         mod._discover_model_path(None, [str(tmp_path)], "**/*.gguf")
 
 
 def test_discover_model_path_ignores_missing_search_dirs(tmp_path) -> None:
-    from decoding_sandbox.backends import llamacpp_py as mod
+    from dsbx.backends import llamacpp_py as mod
 
     real = tmp_path / "a"
     real.mkdir()
@@ -300,7 +300,7 @@ def test_score_prompt_raises_when_logits_all_false(monkeypatch, tmp_path) -> Non
 def test_log_softmax_helper_normalizes_rows() -> None:
     import numpy as np
 
-    from decoding_sandbox.backends.llamacpp_py import _log_softmax
+    from dsbx.backends.llamacpp_py import _log_softmax
 
     arr = np.array([[1.0, 2.0, 3.0], [10.0, 0.0, 0.0]], dtype=np.float32)
     out = _log_softmax(arr, np)
@@ -421,7 +421,7 @@ def test_capabilities_include_token_eot_when_binding_exposes_it(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -445,7 +445,7 @@ def test_negative_eos_id_is_dropped(monkeypatch, tmp_path) -> None:
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -480,7 +480,7 @@ def test_capabilities_drop_bos_when_metadata_says_add_bos_token_false(
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -510,7 +510,7 @@ def test_capabilities_drop_bos_when_metadata_omits_bos_token_id(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -542,7 +542,7 @@ def test_capabilities_expose_bos_when_metadata_declares_real_one(monkeypatch, tm
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -577,7 +577,7 @@ def test_is_special_true_for_braced_tokens(monkeypatch, tmp_path) -> None:
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(
         model_path=str(fake_gguf),
@@ -614,7 +614,7 @@ def test_piece_renders_special_token_name(monkeypatch, tmp_path) -> None:
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     assert b.piece(42) == "<|endoftext|>"
@@ -646,7 +646,7 @@ def test_special_tokens_scans_control_and_user_defined(monkeypatch, tmp_path) ->
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     specials = b.special_tokens()
@@ -663,7 +663,7 @@ def test_special_tokens_empty_when_attr_api_missing(monkeypatch, tmp_path) -> No
     monkeypatch.setitem(sys.modules, "llama_cpp", mod)
     fake_gguf = tmp_path / "fake.gguf"
     fake_gguf.write_bytes(b"")
-    from decoding_sandbox.backends.llamacpp_py import LlamaCppPyBackend
+    from dsbx.backends.llamacpp_py import LlamaCppPyBackend
 
     b = LlamaCppPyBackend(model_path=str(fake_gguf), n_gpu_layers=20, n_ctx=64, logits_all=True)
     assert b.special_tokens() == []

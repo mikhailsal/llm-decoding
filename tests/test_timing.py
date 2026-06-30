@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from decoding_sandbox.cli.timing import Phase, Timing, _fmt_seconds
+from dsbx.cli.timing import Phase, Timing, _fmt_seconds
 
 
 # --------------------------------------------------------------------------- #

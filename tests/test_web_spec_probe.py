@@ -13,8 +13,8 @@ import math
 
 import pytest
 
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
+from dsbx.core.backend import Backend
+from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 from tests.fakes import FakeBackend
 from tests.web_helpers import build_test_app, make_authed_client
 
@@ -173,7 +173,7 @@ def probe_app(monkeypatch):
     counter = {"n": 0}
 
     def fake_probe(prov, model):
-        from decoding_sandbox.core.provider_probe import ProbeResult
+        from dsbx.core.provider_probe import ProbeResult
 
         counter["n"] += 1
         return ProbeResult(
@@ -183,7 +183,7 @@ def probe_app(monkeypatch):
             prompt_logprobs="n/a",
         )
 
-    monkeypatch.setattr("decoding_sandbox.core.provider_probe.probe_provider", fake_probe)
+    monkeypatch.setattr("dsbx.core.provider_probe.probe_provider", fake_probe)
     app = build_test_app({"dsbx-host-py": backend})
     return app, counter
 

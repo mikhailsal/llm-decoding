@@ -16,8 +16,8 @@ import json
 
 import pytest
 
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.types import Capabilities
+from dsbx.core.backend import Backend
+from dsbx.core.types import Capabilities
 from tests.fakes import FakeBackend, cand
 from tests.web_helpers import build_test_app, make_authed_client
 
@@ -326,9 +326,9 @@ def test_generate_stream_uses_native_path_when_backend_opts_in() -> None:
     ``next_distribution`` once per generated token. If this regresses,
     we're back to spamming providers with N requests per generate.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import StepResult, TokenCandidate
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import StepResult, TokenCandidate
 
     next_dist_calls = {"n": 0}
 
@@ -524,9 +524,9 @@ def test_generate_stream_usage_event_records_native_backend_requests() -> None:
     sees real provider RPS pressure instead of "0 requests" for what
     might be a 20-token storm of per-step calls.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import StepResult, TokenCandidate
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import StepResult, TokenCandidate
 
     class _AwareFake(FakeBackend):
         def __init__(self):
@@ -619,9 +619,9 @@ def test_generate_stream_emits_perf_event_before_usage() -> None:
     client ignore ``perf`` entirely without having to learn the
     provider's metric schema.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import StepResult, TokenCandidate
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import StepResult, TokenCandidate
 
     class _PerfFake(FakeBackend):
         def __init__(self):
@@ -719,9 +719,9 @@ def test_generate_stream_uses_combined_echo_path_when_supported() -> None:
     3. The SSE wire order is unchanged
        (prompt_score -> step* -> usage -> done).
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import (
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import (
         Capabilities,
         StepResult,
         TokenCandidate,
@@ -847,9 +847,9 @@ def test_generate_stream_combined_echo_path_forwards_prefix_and_watch() -> None:
     along so per-step watched columns light up. We assert both arrive at
     the fake backend verbatim.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import (
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import (
         Capabilities,
         StepResult,
         TokenCandidate,
@@ -952,9 +952,9 @@ def test_generate_stream_emits_raw_output_event_and_forwards_logit_bias() -> Non
        JSON keys), so a follow-up backend test for the wire shape has
        something real to assert against.
     """
-    from decoding_sandbox.core.engine import GenStep
-    from decoding_sandbox.core.samplers import SamplerDecision
-    from decoding_sandbox.core.types import StepResult, TokenCandidate
+    from dsbx.core.engine import GenStep
+    from dsbx.core.samplers import SamplerDecision
+    from dsbx.core.types import StepResult, TokenCandidate
 
     raw_payload = {
         "prompt_fragments": ["<|system|>", "be useful", "<|user|>", "hi"],

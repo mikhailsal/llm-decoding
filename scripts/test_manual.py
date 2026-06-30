@@ -14,9 +14,9 @@ import argparse
 import tempfile
 from pathlib import Path
 
-from decoding_sandbox.core.config import load_config
-from decoding_sandbox.core.factory import build_backend
-from decoding_sandbox.core.manual import ManualSession
+from dsbx.core.config import load_config
+from dsbx.core.factory import build_backend
+from dsbx.core.manual import ManualSession
 
 
 def main() -> int:

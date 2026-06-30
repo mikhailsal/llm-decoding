@@ -1,8 +1,8 @@
-# llm-decoding
+# dsbx (Decoding Sandbox)
 
 **A white-box laboratory for inspecting how LLMs assign probabilities to tokens — and how decoders turn those probabilities into text — across local models and logprob-capable cloud providers.**
 
-[![CI](https://github.com/mikhailsal/llm-decoding/actions/workflows/ci.yml/badge.svg)](https://github.com/mikhailsal/llm-decoding/actions/workflows/ci.yml)
+[![CI](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml/badge.svg)](https://github.com/mikhailsal/dsbx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-520%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-80%25-yellowgreen)
@@ -15,7 +15,7 @@
 
 ## What it does
 
-Large language models don't "write" text directly. At every position, they produce a score (logit) for every token in their vocabulary; a softmax turns those scores into a probability distribution, and a *decoder* repeatedly picks the next token from that distribution. `llm-decoding` makes that hidden process visible, interactive, and pokeable.
+Large language models don't "write" text directly. At every position, they produce a score (logit) for every token in their vocabulary; a softmax turns those scores into a probability distribution, and a *decoder* repeatedly picks the next token from that distribution. `dsbx` (Decoding Sandbox) makes that hidden process visible, interactive, and pokeable.
 
 ## 🚀 Key Technical Highlights
 
@@ -95,8 +95,8 @@ A single `Backend` protocol unifies in-process backends and the HTTP `RemoteBack
 ## Quick start
 
 ```bash
-git clone https://github.com/mikhailsal/llm-decoding.git
-cd llm-decoding
+git clone https://github.com/mikhailsal/dsbx.git
+cd dsbx
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .                      # lightweight core: rich, httpx, openai, ...
 cp config.example.toml config.toml    # then add a [remote.NAME] or cloud key
@@ -127,7 +127,7 @@ make web-prod
 ## Project structure
 
 ```
-decoding_sandbox/
+dsbx/
   core/        config, storage, types, backend protocol, factory, samplers, engine
   backends/    hf / llamacpp / llamacpp_py / openai_compat / remote
   server/      FastAPI app + wire schemas; the `dsbx serve` swappable slot

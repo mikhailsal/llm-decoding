@@ -121,7 +121,7 @@ has_completions = true
 # ALL on for Fireworks because the educational sandbox UX is "show me
 # everything the model knows about this step" -- and the cost of an
 # unused field is negligible. Each flag gates one bit of behaviour in
-# decoding_sandbox/backends/openai_compat.py + the matching UI panel.
+# dsbx/backends/openai_compat.py + the matching UI panel.
 supports_ignore_eos = true             # respect_eos = false actually works
 supports_perf_metrics = true           # server-side timings panel (TTFT, prefill, ...)
 supports_raw_output = true             # prompt_fragments, real token_ids, grammar

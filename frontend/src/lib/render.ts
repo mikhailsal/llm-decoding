@@ -1,7 +1,7 @@
 /**
  * Visible-whitespace token rendering.
  *
- * Mirrors :mod:`decoding_sandbox.cli.render` so the browser shows the same
+ * Mirrors :mod:`dsbx.cli.render` so the browser shows the same
  * markers the TUI does:
  *
  *   - leading / trailing space ->  ``␣``  (one per character)

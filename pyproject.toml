@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "decoding-sandbox"
+name = "dsbx"
 version = "0.1.0"
 description = "A console sandbox to study LLM token probabilities and decoding (local models + logprob-capable providers)."
 readme = "README.md"
@@ -93,10 +93,10 @@ dev = [
 ]
 
 [project.scripts]
-dsbx = "decoding_sandbox.cli.__main__:main"
+dsbx = "dsbx.cli.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["decoding_sandbox*"]
+include = ["dsbx*"]
 
 [tool.ruff]
 line-length = 100
@@ -140,7 +140,7 @@ ignore = [
 "scripts/**/*.py" = ["T20", "S603", "S607", "S110", "E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["decoding_sandbox"]
+known-first-party = ["dsbx"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -158,12 +158,12 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["decoding_sandbox"]
+source = ["dsbx"]
 branch = true
 omit = [
     # Thin process entry points; exercised by integration, not unit tests.
-    "decoding_sandbox/**/__main__.py",
-    "decoding_sandbox/cli/__main__.py",
+    "dsbx/**/__main__.py",
+    "dsbx/cli/__main__.py",
 ]
 
 [tool.coverage.report]

@@ -1,7 +1,7 @@
 /**
  * Vitest parity tests for the visible-whitespace token renderer.
  *
- * The Python rendering rules live in :mod:`decoding_sandbox.cli.render`;
+ * The Python rendering rules live in :mod:`dsbx.cli.render`;
  * the same logic in TypeScript must produce the same visible markers so
  * the browser table reads identically to the TUI table.
  */

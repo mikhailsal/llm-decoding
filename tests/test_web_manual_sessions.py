@@ -21,8 +21,8 @@ import threading
 
 import pytest
 
-from decoding_sandbox.core.types import Capabilities
-from decoding_sandbox.web.sessions import ManualSessionRegistry
+from dsbx.core.types import Capabilities
+from dsbx.web.sessions import ManualSessionRegistry
 from tests.fakes import FakeBackend, cand
 from tests.web_helpers import build_test_app, make_authed_client
 

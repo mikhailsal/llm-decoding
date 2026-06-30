@@ -1,4 +1,4 @@
-"""Tests for :class:`decoding_sandbox.web.logging.transport.LoggingTransport`.
+"""Tests for :class:`dsbx.web.logging.transport.LoggingTransport`.
 
 We feed canned responses through ``httpx.MockTransport`` and drain the
 asyncio queue to assert that exactly the right :class:`LogEntry` shapes
@@ -17,10 +17,10 @@ import json
 import httpx
 import pytest
 
-from decoding_sandbox.web.logging import service as logsvc
-from decoding_sandbox.web.logging.aggregator import aggregate_stream
-from decoding_sandbox.web.logging.models import LogEntry
-from decoding_sandbox.web.logging.transport import LoggingTransport
+from dsbx.web.logging import service as logsvc
+from dsbx.web.logging.aggregator import aggregate_stream
+from dsbx.web.logging.models import LogEntry
+from dsbx.web.logging.transport import LoggingTransport
 
 
 # --------------------------------------------------------------------------- #

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from decoding_sandbox.core import storage
+from dsbx.core import storage
 
 
 class _FakeUsage:

@@ -16,14 +16,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.backends.remote import (
+from dsbx.backends.remote import (
     RemoteBackend,
     RemoteBackendError,
     RemoteStreamTimeoutError,
 )
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.types import StepResult, TokenCandidate
-from decoding_sandbox.server.app import make_app
+from dsbx.core.backend import Backend
+from dsbx.core.types import StepResult, TokenCandidate
+from dsbx.server.app import make_app
 from tests.fakes import FakeBackend, cand
 
 

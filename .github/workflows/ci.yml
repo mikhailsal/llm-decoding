@@ -48,10 +48,10 @@ jobs:
       - name: mypy (informational)
         # Typing is informational for now (not strict); don't fail the build.
         continue-on-error: true
-        run: mypy decoding_sandbox
+        run: mypy dsbx
 
       - name: Tests + coverage
-        run: pytest -q --cov=decoding_sandbox --cov-report=xml --cov-report=term-missing
+        run: pytest -q --cov=dsbx --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12'

@@ -1,8 +1,8 @@
 /**
  * Wire shapes returned by the dsbx web middleware.
  *
- * These mirror the Pydantic models in ``decoding_sandbox/web/schemas.py``
- * and ``decoding_sandbox/server/schemas.py``. Keeping them in TypeScript
+ * These mirror the Pydantic models in ``dsbx/web/schemas.py``
+ * and ``dsbx/server/schemas.py``. Keeping them in TypeScript
  * (rather than codegen) is intentional -- the API surface is small and the
  * types stay close to the components that consume them.
  */
@@ -362,7 +362,7 @@ export interface ProbeResponse {
 }
 
 /**
- * Upstream-request log shapes -- mirror ``decoding_sandbox.web.logs_api``.
+ * Upstream-request log shapes -- mirror ``dsbx.web.logs_api``.
  *
  * Every outgoing HTTP call the middleware makes to a real backend (dsbx-host dsbx
  * server, Fireworks/NIM/OpenRouter, local llama-server) lands as one row.

@@ -17,8 +17,8 @@ import time
 
 import pytest
 
-from decoding_sandbox.web import backends as web_backends
-from decoding_sandbox.web.backends import BackendRegistry, ModelListEntry
+from dsbx.web import backends as web_backends
+from dsbx.web.backends import BackendRegistry, ModelListEntry
 from tests.fakes import FakeBackend
 from tests.web_helpers import build_test_app, make_authed_client, make_test_config
 
@@ -125,7 +125,7 @@ def test_cache_serves_repeat_calls_without_refetch(app_with_key, monkeypatch) ->
         calls.append(self.provider.name)
         return ["accounts/fireworks/models/gpt-oss-120b", "accounts/fireworks/models/fresh-model"]
 
-    from decoding_sandbox.backends import openai_compat as oa
+    from dsbx.backends import openai_compat as oa
 
     monkeypatch.setattr(oa.OpenAICompatBackend, "fetch_available_models", _fake_fetch)
     with make_authed_client(app_with_key) as c:
@@ -151,7 +151,7 @@ def test_refresh_bypasses_cache(app_with_key, monkeypatch) -> None:
         calls.append(self.provider.name)
         return [f"model-{len(calls)}"]
 
-    from decoding_sandbox.backends import openai_compat as oa
+    from dsbx.backends import openai_compat as oa
 
     monkeypatch.setattr(oa.OpenAICompatBackend, "fetch_available_models", _fake_fetch)
     with make_authed_client(app_with_key) as c:
@@ -172,7 +172,7 @@ def test_ttl_expiry_triggers_refetch(monkeypatch) -> None:
         calls.append(1)
         return ["live-model"]
 
-    from decoding_sandbox.backends import openai_compat as oa
+    from dsbx.backends import openai_compat as oa
 
     monkeypatch.setattr(oa.OpenAICompatBackend, "fetch_available_models", _fake_fetch)
     cfg = make_test_config(providers=["fireworks"])
@@ -201,7 +201,7 @@ def test_live_fetch_failure_does_not_leak_url(app_with_key, monkeypatch) -> None
             "Server error '500 Internal Server Error' for url 'https://api.fireworks.ai/v1/models'"
         )
 
-    from decoding_sandbox.backends import openai_compat as oa
+    from dsbx.backends import openai_compat as oa
 
     monkeypatch.setattr(oa.OpenAICompatBackend, "fetch_available_models", _boom)
     with make_authed_client(app_with_key) as c:

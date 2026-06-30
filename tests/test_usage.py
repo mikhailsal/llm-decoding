@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decoding_sandbox.core.usage import (
+from dsbx.core.usage import (
     UsageSink,
     add_note,
     make_sink,
@@ -65,7 +65,7 @@ def test_add_note_appends_and_dedupes() -> None:
 
 
 def test_record_perf_metrics_merges_and_overwrites() -> None:
-    from decoding_sandbox.core.usage import record_perf_metrics
+    from dsbx.core.usage import record_perf_metrics
 
     sink: UsageSink = {}
     record_perf_metrics(sink, {"a": 1})
@@ -81,7 +81,7 @@ def test_record_perf_metrics_merges_and_overwrites() -> None:
 
 
 def test_record_raw_output_last_write_wins() -> None:
-    from decoding_sandbox.core.usage import record_raw_output
+    from dsbx.core.usage import record_raw_output
 
     sink: UsageSink = {}
     record_raw_output(sink, {"k": "v1"})

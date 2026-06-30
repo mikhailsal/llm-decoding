@@ -1,4 +1,4 @@
-"""Tests for ``decoding_sandbox.web.logs_api`` against a seeded SQLite DB.
+"""Tests for ``dsbx.web.logs_api`` against a seeded SQLite DB.
 
 We bring up an in-memory SQLite engine, seed a handful of ``RequestLog``
 rows directly, then drive the FastAPI router through ``TestClient`` to
@@ -21,9 +21,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from decoding_sandbox.web.logging import db as logdb
-from decoding_sandbox.web.logging.db import RequestLog
-from decoding_sandbox.web.logs_api import make_logs_router
+from dsbx.web.logging import db as logdb
+from dsbx.web.logging.db import RequestLog
+from dsbx.web.logs_api import make_logs_router
 
 
 # --------------------------------------------------------------------------- #

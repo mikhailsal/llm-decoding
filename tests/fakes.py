@@ -13,8 +13,8 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from decoding_sandbox.core.backend import Backend
-from decoding_sandbox.core.types import Capabilities, StepResult, TokenCandidate
+from dsbx.core.backend import Backend
+from dsbx.core.types import Capabilities, StepResult, TokenCandidate
 
 
 class FakeBackend(Backend):

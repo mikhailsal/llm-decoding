@@ -8,7 +8,7 @@
  * feed each chunk into this parser.
  *
  * The shape mirrors the Python parser in
- * ``decoding_sandbox/backends/remote.py`` (``_iter_sse_events``):
+ * ``dsbx/backends/remote.py`` (``_iter_sse_events``):
  * comments (lines starting with ``:``) are dropped, unknown SSE fields
  * (``event:`` / ``id:`` / ``retry:``) are ignored, only the ``data:``
  * field is JSON-decoded.

@@ -1,6 +1,6 @@
 # EOS, stopping, and watch tokens
 
-This document covers how `llm-decoding` renders tokens, how it detects and
+This document covers how `dsbx` renders tokens, how it detects and
 honours end-of-text (EOS), and the `--watch` family of flags for tracing the
 probability of specific tokens across a fixed context.
 

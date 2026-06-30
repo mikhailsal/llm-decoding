@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from decoding_sandbox.web.app import make_web_app
+from dsbx.web.app import make_web_app
 from tests.fakes import FakeBackend
 from tests.web_helpers import (
     DEFAULT_TOKEN,
@@ -119,7 +119,7 @@ def test_info_static_caps_mirror_all_provider_supports_flags(env_with_secret) ->
     back to ``False``. This pin makes sure the stub stays in sync with
     any future addition to ``ProviderConfig``.
     """
-    from decoding_sandbox.core.config import (
+    from dsbx.core.config import (
         Config,
         ProviderConfig,
         RemoteConfig,
@@ -213,7 +213,7 @@ def test_info_models_caps_carry_per_model_overrides_before_load(
     are not permitted"). With it, the eligible-after-filters column
     and the ``sampling_mask`` knob are gated correctly from page load.
     """
-    from decoding_sandbox.core.config import (
+    from dsbx.core.config import (
         Config,
         ProviderConfig,
         RemoteConfig,

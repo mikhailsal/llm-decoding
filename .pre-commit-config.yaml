@@ -1,4 +1,4 @@
-# Lightweight pre-commit gate for the decoding-sandbox.
+# Lightweight pre-commit gate for the dsbx.
 #
 # Deliberately lighter than a production service: we run the fast, high-signal
 # checks (hygiene + ruff lint/format + a file-size guard) on every commit, but

@@ -12,8 +12,8 @@ from io import StringIO
 
 from rich.console import Console
 
-from decoding_sandbox.cli import session as session_mod
-from decoding_sandbox.cli.session import (
+from dsbx.cli import session as session_mod
+from dsbx.cli.session import (
     DispatchResult,
     SessionState,
     dispatch_session_line,
@@ -118,7 +118,7 @@ def test_switch_backend_closes_old_and_replaces(monkeypatch) -> None:
         assert name == "new"
         return new
 
-    monkeypatch.setattr("decoding_sandbox.core.factory.build_backend", _fake_build_backend)
+    monkeypatch.setattr("dsbx.core.factory.build_backend", _fake_build_backend)
 
     s = _state(backend=old)
     r = dispatch_session_line(s, ":backend new")
@@ -144,7 +144,7 @@ def test_switch_backend_failure_keeps_old_marker() -> None:
     def _explodes(name, cfg, model=None):
         raise RuntimeError("nope")
 
-    import decoding_sandbox.core.factory as fac
+    import dsbx.core.factory as fac
 
     orig = fac.build_backend
     fac.build_backend = _explodes
@@ -191,7 +191,7 @@ def test_inspect_dispatch_calls_cmd_inspect_with_session_backend(monkeypatch) ->
     # ``_build_session_parser`` lazily imports cmd_inspect; patch the source
     # symbol first and then rebuild the parser so the patched callable is
     # bound to the inspect subcommand.
-    monkeypatch.setattr("decoding_sandbox.cli.app.cmd_inspect", _fake_cmd_inspect)
+    monkeypatch.setattr("dsbx.cli.app.cmd_inspect", _fake_cmd_inspect)
     parser = session_mod._build_session_parser()
 
     r = dispatch_session_line(s, "inspect 'The weather' --watch ' dry' --top-k 5", parser=parser)
@@ -212,7 +212,7 @@ def test_inspect_dispatch_with_timing_off_passes_no_timing_true(monkeypatch) -> 
         captured["no_timing"] = args.no_timing
         return 0
 
-    monkeypatch.setattr("decoding_sandbox.cli.app.cmd_inspect", _fake_cmd_inspect)
+    monkeypatch.setattr("dsbx.cli.app.cmd_inspect", _fake_cmd_inspect)
     parser = session_mod._build_session_parser()
     dispatch_session_line(s, "inspect 'hi'", parser=parser)
     assert captured["no_timing"] is True
@@ -231,7 +231,7 @@ def test_generate_dispatch_threads_sampler_and_max_tokens(monkeypatch) -> None:
         )
         return 0
 
-    monkeypatch.setattr("decoding_sandbox.cli.app.cmd_generate", _fake_cmd_generate)
+    monkeypatch.setattr("dsbx.cli.app.cmd_generate", _fake_cmd_generate)
     parser = session_mod._build_session_parser()
     dispatch_session_line(
         s,

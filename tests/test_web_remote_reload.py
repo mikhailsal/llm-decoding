@@ -16,7 +16,7 @@ the registry plumbing, the family guard, and the auth dependency.
 
 from __future__ import annotations
 
-from decoding_sandbox.web.backends import BackendRegistry
+from dsbx.web.backends import BackendRegistry
 from tests.fakes import FakeBackend
 from tests.web_helpers import build_test_app, make_authed_client, make_test_config
 

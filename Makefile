@@ -1,6 +1,6 @@
 # Convenience targets. Edit on the client, run on `dsbx-host`.
 DSBX_HOST ?= dsbx-host
-DSBX_DEST ?= llm-decoding
+DSBX_DEST ?= dsbx
 REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
 
 .PHONY: help sync doctor probe doctor-local probe-local serve-py serve-hf fmt \
@@ -40,10 +40,10 @@ probe: sync
 	$(REMOTE) dsbx probe'
 
 doctor-local:
-	python -m decoding_sandbox.cli doctor
+	python -m dsbx.cli doctor
 
 probe-local:
-	python -m decoding_sandbox.cli probe
+	python -m dsbx.cli probe
 
 # `make serve-py` / `make serve-hf` are convenience wrappers that ssh into
 # dsbx-host and launch a long-lived `dsbx serve`. Keep them in separate ports so
@@ -67,11 +67,11 @@ test:
 	pytest -q
 
 coverage:
-	pytest --cov=decoding_sandbox --cov-report=term-missing --cov-report=html
+	pytest --cov=dsbx --cov-report=term-missing --cov-report=html
 
 quality-check: lint
 	python scripts/check_code_limits.py
-	mypy decoding_sandbox || true
+	mypy dsbx || true
 	pytest -q
 
 # Web UI. The middleware reads its bearer token from $DSBX_WEB_TOKEN; export

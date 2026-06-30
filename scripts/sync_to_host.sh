@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DSBX_HOST="${DSBX_HOST:-dsbx-host}"
-DEST="${1:-${DSBX_DEST:-llm-decoding}}"   # relative to dsbx-host's home
+DEST="${1:-${DSBX_DEST:-dsbx}}"   # relative to dsbx-host's home
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/"
 
 echo "Syncing ${SRC} -> ${DSBX_HOST}:${DEST}"
