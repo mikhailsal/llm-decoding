@@ -1,13 +1,11 @@
 # llm-decoding
 
-**A white-box laboratory for inspecting how LLMs assign probabilities to tokens
-— and how decoders turn those probabilities into text — across local models and
-logprob-capable cloud providers.**
+**A white-box laboratory for inspecting how LLMs assign probabilities to tokens — and how decoders turn those probabilities into text — across local models and logprob-capable cloud providers.**
 
 [![CI](https://github.com/mikhailsal/llm-decoding/actions/workflows/ci.yml/badge.svg)](https://github.com/mikhailsal/llm-decoding/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-78%25-yellowgreen)
+![Tests](https://img.shields.io/badge/tests-520%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-80%25-yellowgreen)
 [![Ruff](https://img.shields.io/badge/lint-ruff-261230)](https://github.com/astral-sh/ruff)
 ![mypy](https://img.shields.io/badge/types-mypy-informational)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-success)](.pre-commit-config.yaml)
@@ -17,42 +15,49 @@ logprob-capable cloud providers.**
 
 ## What it does
 
-Large language models don't "write" text directly. At every position they
-produce a score (logit) for every token in their vocabulary; a softmax turns
-those scores into a probability distribution, and a *decoder* repeatedly picks
-the next token from that distribution. `llm-decoding` makes that hidden process
-visible and pokeable.
+Large language models don't "write" text directly. At every position, they produce a score (logit) for every token in their vocabulary; a softmax turns those scores into a probability distribution, and a *decoder* repeatedly picks the next token from that distribution. `llm-decoding` makes that hidden process visible, interactive, and pokeable.
 
-It is a console- and browser-driven tool to **inspect** the full distribution
-at any position, **decode** with a range of samplers while watching how each
-choice diverges from greedy, step through generation **one token at a time by
-hand**, and run **speculative decoding** with an accept/reject view — against
-local HuggingFace and llama.cpp models *and* cloud providers that expose
-logprobs (Fireworks, NVIDIA NIM, OpenRouter, LM Studio). It started as a
-personal learning project for understanding model internals and grew into a
-small, tested, multi-backend system with a SvelteKit web UI.
+## 🚀 Key Technical Highlights
 
-## Core capabilities
+This project was built to study model internals deeply, rather than just wrapping chat APIs.
 
-**Per-token confidence + watch tokens.** `inspect` shows, for every position in
-a prompt, what the model actually predicted next, how confident it was, and the
-top alternatives. The `--watch` family adds a dedicated column tracing the
-exact probability of any token (including unprintable EOS/control tokens) across
-the whole context.
+* **Interactive Manual Decoding:** A flagship feature that breaks the black-box nature of LLMs. You can step through generation one token at a time, see the exact distribution, pick a token by rank, force *any* arbitrary token into the context, step backwards, and watch how your choices diverge from the greedy path. 
+* **Dual Interfaces (Web UI & CLI/TUI):** Every core feature is accessible through two distinct interfaces. You can use the interactive terminal TUI for quick hacking, or the modern SvelteKit + TypeScript browser Web UI for a comprehensive visual workbench.
+* **Multi-Backend Polymorphism:** A unified `Backend` protocol seamlessly abstracts local in-process models (HuggingFace, llama.cpp) and remote API endpoints (Fireworks, LM Studio). Every command works identically regardless of where the inference runs.
+* **Automatic Tokenizer Sync:** Automatically detects and downloads the correct tokenizer (via HuggingFace Hub) even for cloud backends. This exposes the model's true vocabulary, allowing you to view, insert, and trace probabilities for unprintable special/control tokens (like `EOS`) natively.
+* **Decoupled Architecture:** Features a heavy GPU-host FastAPI server and a lightweight middleware layer. This setup allows for secure, dynamic hot-swapping of models on the remote host without restarting the server, keeping secrets safe from the client.
+* **Deep LLM Internals:** Handles raw logits, custom sampling algorithms (drop in your own decode function), per-token confidence tracking, and speculative decoding experiments.
+
+## Features & Capabilities
+
+**Per-token confidence + watch tokens.** `inspect` shows, for every position in a prompt, what the model actually predicted next, how confident it was, and the top alternatives. The `--watch` family adds a dedicated column tracing the exact probability of any token (including unprintable EOS/control tokens) across the whole context.
 
 ![Inspect with watch column](docs/images/inspect_watch.png)
 
-**Multi-backend, swappable at runtime.** A long-lived server keeps one heavy
-model warm on a GPU host; the browser's Status page can load or swap models on
-that host without a restart, and shows the live capability envelope of every
-configured backend.
+**Interactive token-by-token TUI.** Dive into the exact probability tree at any step. `dsbx manual` lets you guide the model manually.
+
+**Multi-backend, swappable at runtime.** The browser's Status page can load or swap models on the GPU host without a restart, and shows the live capability envelope of every configured backend.
 
 ![Status page with remote model control](docs/images/status_remote_control.png)
 
-Beyond these: **manual token-by-token decoding** (pick by rank, force any token,
-undo, save/load a transcript), **custom samplers** (drop in your own decode
-function), and **speculative decoding** (HF draft + target with a
-tokens-per-target-pass speedup metric).
+## 💼 Real-World Use Cases
+
+Why build a white-box decoder? This tool solves practical problems for ML engineers and AI product teams:
+
+* **Debugging Hallucinations:** Understand *why* a model derailed by inspecting the exact probability distribution and competing tokens at the point of failure.
+* **Prompt Engineering Analytics:** Quantify how different prompt formulations shift the probability mass of your target desired answers.
+* **Model Evaluation & Quantization:** Compare the raw logits and distributions between a full-precision model and its quantized (e.g., GGUF) counterpart to assess degradation.
+* **Custom Sampler Tuning:** Visually tune hyper-parameters (temperature, top-p, top-k) or develop entirely new sampling algorithms by watching their real-time impact on the generated token stream.
+
+## Engineering Standards & CI/CD
+
+The project ships with the quality signals you'd expect of a production-ready, maintained codebase:
+
+* **Testing:** 520 tests written with `pytest` and `pytest-asyncio`, covering 80% of the codebase (line+branch).
+* **Advanced Linting:** `ruff` is configured with an extended, strict rule set including `bugbear` (design), `bandit` (security), and `simplify`.
+* **Async & Storage:** Uses `FastAPI`, `SQLAlchemy 2.0`, and `aiosqlite` for high-performance asynchronous upstream request logging.
+* **Future Work:** AST-based code-size limits (`scripts/check_code_limits.py`) to enforce file-size ceilings and function-length advisories automatically.
+* **CI/CD:** GitHub Actions runs all checks across Python 3.10 and 3.12, plus the frontend's vitest and builds. `pre-commit` enforces hygiene locally.
 
 ## Provider logprob support (live-verified, June 2026)
 
@@ -65,12 +70,6 @@ tokens-per-target-pass speedup metric).
 | **Local HF transformers** | n/a | **yes** (full `[seq, vocab]`) | full vocabulary, every position |
 | **Local llama.cpp (in-process)** | n/a | **yes** (full `[seq, vocab]`) | full vocab for GGUFs HF can't load |
 | **Local llama.cpp (HTTP)** | n/a | top-k only | top-k candidates per position |
-
-Chat-only providers (NIM, OpenRouter) stay *registered* — `/api/v1/info` lists
-them and the picker shows them disabled with a tooltip — but the decode verbs
-refuse to start a session against them with an explanatory 400, because a
-per-step "continuation" over `/chat/completions` is not a real continuation.
-Re-enabling them behind a proper chat-mode UI is tracked in the issues.
 
 ## Architecture
 
@@ -91,11 +90,7 @@ flowchart LR
     WEB -- "HTTPS (keys)" --> CLOUD
 ```
 
-A single `Backend` protocol unifies in-process backends (HF, llama.cpp) and the
-HTTP `RemoteBackend`, so every command works identically whether the model runs
-locally or on a remote GPU host. The full design — swappable model slot, SSE
-wire protocol, the browser middleware's secret-scrubbing, and what was verified
-on real hardware — is in [docs/architecture.md](docs/architecture.md).
+A single `Backend` protocol unifies in-process backends and the HTTP `RemoteBackend`. The full design is in [docs/architecture.md](docs/architecture.md).
 
 ## Quick start
 
@@ -110,22 +105,17 @@ dsbx doctor                           # checks keys, remote servers, and disk
 dsbx inspect "The capital of France is" --backend fireworks
 ```
 
-API keys are read from the environment; `config.toml` can point
-`secrets_env_file` at a file holding `FIREWORKS_API_KEY`, `NVIDIA_API_KEY`,
-etc. To run local models on a GPU host and the browser UI, see
-[docs/architecture.md](docs/architecture.md).
-
 A few representative commands:
 
 ```bash
+# Interactive token-by-token TUI
+dsbx manual "The capital of" --backend hf
+
 # Per-token confidence with a watch column
 dsbx inspect "The capital of France is Paris" --backend hf --watch " London"
 
 # Decode with a sampler, see per-step divergence from greedy
 dsbx generate "Once upon a time" --backend llamacpp --sampler top_p --top-p 0.9
-
-# Interactive token-by-token TUI
-dsbx manual "The capital of" --backend hf
 
 # Speculative decoding (HF draft + target)
 dsbx spec "The capital of France is" --gamma 4
@@ -134,48 +124,14 @@ dsbx spec "The capital of France is" --gamma 4
 make web-prod
 ```
 
-The CLI verbs are `doctor`, `probe`, `inspect`, `generate`, `manual`, `spec`,
-`serve`, `web`, and `session`; run `dsbx <verb> --help` for the flags. Deeper
-guides live in [docs/](docs/): the [EOS & watch-token cookbook](docs/eos-and-watch-tokens.md)
-and the [Fireworks extension fields](docs/fireworks-extensions.md).
-
-## Code quality
-
-The project ships the quality signals you'd expect of a maintained codebase,
-runnable in one shot:
-
-```bash
-make quality-check    # ruff lint + format check, code-size limits, mypy, tests
-make coverage         # pytest with an HTML coverage report
-pre-commit install    # hygiene + ruff + code-size gate on every commit
-```
-
-- **Ruff** for linting and formatting (an extended rule set: bugbear,
-  pyupgrade, simplify, pathlib, bandit, ...).
-- **mypy** runs informationally (CI doesn't yet gate on it; incremental typing
-  is a tracked follow-up).
-- **pytest** — 508 tests, 78% line+branch coverage.
-- **Code-size limits** (`scripts/check_code_limits.py`) — a phased file-size
-  gate (700-line ceiling, large legacy modules grandfathered at their current
-  size) plus non-blocking function-length advisories.
-- **GitHub Actions** runs all of the above across Python 3.10 and 3.12, plus the
-  frontend's vitest + build.
-
-Known issues are tracked in
-[GitHub Issues](https://github.com/mikhailsal/llm-decoding/issues).
-
 ## Project structure
 
 ```
 decoding_sandbox/
-  core/        config, storage, types, backend protocol, factory, samplers,
-               engine, manual stepping, speculative  (no UI deps)
-  backends/    hf (full vocab, PyTorch) / llamacpp (top-k via HTTP) /
-               llamacpp_py (full vocab, in-process llama.cpp) /
-               openai_compat/ (cloud providers) / remote (HTTP+SSE client)
+  core/        config, storage, types, backend protocol, factory, samplers, engine
+  backends/    hf / llamacpp / llamacpp_py / openai_compat / remote
   server/      FastAPI app + wire schemas; the `dsbx serve` swappable slot
   cli/         argparse front-end, rich rendering, manual TUI, session REPL
-               commands/ (one module per subcommand)
   web/         FastAPI middleware: auth, sessions, streaming, request logging
 frontend/      SvelteKit + TypeScript single-page app (the browser UI)
 docs/          architecture, EOS/watch tokens, Fireworks extensions, images
