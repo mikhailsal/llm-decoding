@@ -15,6 +15,8 @@ import types
 
 import pytest
 
+pytest.importorskip("numpy")
+
 
 # --------------------------------------------------------------------------- #
 # Minimal fake of the llama_cpp surface our backend touches.
