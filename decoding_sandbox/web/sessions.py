@@ -30,7 +30,7 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -121,7 +121,7 @@ class ManualSessionRegistry:
         *,
         ttl_seconds: float = 3600.0,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
-        now: callable | None = None,  # type: ignore[type-arg]
+        now: Callable[[], float] | None = None,
     ) -> None:
         self._ttl = float(ttl_seconds)
         self._max = int(max_sessions)

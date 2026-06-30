@@ -45,6 +45,10 @@ def cmd_inspect(
         if own_backend:
             name = args.backend or cfg.default_backend
             backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=timing)
+        # ``backend`` is supplied by the session REPL or built above; in
+        # either case it is set by this point. The assert lets mypy
+        # narrow the Optional for every subsequent ``backend.*`` access.
+        assert backend is not None
         if show_banner:
             _print_backend_banner(backend)
 
@@ -92,11 +96,11 @@ def cmd_inspect(
 
         for st in steps:
             ctx = render.token_repr(st.context_text or "", 14)
-            is_trailing = st.chosen is None
-            if not is_trailing:
-                nxt = render.token_repr(st.chosen.text, 14, is_special=st.chosen.is_special)
-                p_next = render.fmt_prob(st.chosen.prob)
-                rank = f"#{st.chosen.rank}" if st.chosen.rank >= 0 else "[dim]?[/dim]"
+            chosen = st.chosen
+            if chosen is not None:
+                nxt = render.token_repr(chosen.text, 14, is_special=chosen.is_special)
+                p_next = render.fmt_prob(chosen.prob)
+                rank = f"#{chosen.rank}" if chosen.rank >= 0 else "[dim]?[/dim]"
                 pos_cell = str(st.position)
             else:
                 # The trailing "predict next" row: there is no actual next

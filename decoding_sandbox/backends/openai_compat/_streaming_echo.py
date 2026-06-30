@@ -4,16 +4,62 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from decoding_sandbox.core import usage as usage_mod
 from decoding_sandbox.core.engine import GenStep
 from decoding_sandbox.core.types import StepResult
 
+if TYPE_CHECKING:
+    from tokenizers import Tokenizer
+
+    from decoding_sandbox.core.config import ProviderConfig
+
 log = logging.getLogger(__name__)
 
 
 class _EchoStreamingMixin:
+    # Composite-class attributes / cross-mixin methods set in
+    # ``OpenAICompatBackend.__init__`` and sibling mixins. Declared
+    # under TYPE_CHECKING so mypy sees the surface this mixin reaches
+    # into without touching runtime behaviour.
+    if TYPE_CHECKING:
+        provider: ProviderConfig
+        model: str
+        _active_usage: usage_mod.UsageSink | None
+
+        def _provider_flag(self, name: str) -> bool: ...
+        def _ensure_tokenizer(self) -> Tokenizer | None: ...
+        def _attach_logprobs_request(self, body: dict[str, Any], *, top_k: int) -> None: ...
+        def _sampler_to_api_params(self, name: str, params: dict[str, Any]) -> dict[str, Any]: ...
+        def _genstep_from_emit_record(
+            self,
+            record: tuple[int | None, str, float, Any, int | None],
+            *,
+            tokens_before: list[int],
+            step_idx: int,
+            is_last: bool,
+            last_finish_reason: str | None,
+            watch_ids: Sequence[int],
+            note: str,
+        ) -> GenStep: ...
+        def _stepresult_from_echo_record(
+            self,
+            record: tuple[int | None, str, float, Any, int | None, int | None, bool],
+            *,
+            pos_idx: int,
+            watch_ids: Sequence[int],
+        ) -> StepResult: ...
+        def _iter_completions_stream(
+            self,
+            body: dict[str, Any],
+            *,
+            extra_headers: dict[str, str] | None = None,
+        ) -> Iterator[dict[str, Any]]: ...
+        def tokenize(self, text: str) -> list[int]: ...
+        def detokenize(self, token_ids: list[int]) -> str: ...
+        def piece(self, token_id: int) -> str: ...
+
     def stream_native_with_echo(
         self,
         prompt: str,
@@ -95,13 +141,15 @@ class _EchoStreamingMixin:
         # the full ``[prepend, prompt, picks]`` block in one continuous
         # stream of per-position logprobs, which is the whole point of
         # the combined path.
+        prompt_payload: str | list[int]
         if prepend_token_ids:
             tok = self._ensure_tokenizer()
             assert tok is not None  # guarded above
-            prompt_payload: str | list[int] = [int(t) for t in prepend_token_ids]
-            prompt_payload.extend(tok.encode(prompt, add_special_tokens=False).ids)
+            payload_ids: list[int] = [int(t) for t in prepend_token_ids]
+            payload_ids.extend(tok.encode(prompt, add_special_tokens=False).ids)
             if prefix_token_ids:
-                prompt_payload.extend(int(t) for t in prefix_token_ids)
+                payload_ids.extend(int(t) for t in prefix_token_ids)
+            prompt_payload = payload_ids
         else:
             if prefix_token_ids:
                 prompt = prompt + self.detokenize([int(t) for t in prefix_token_ids])
@@ -144,13 +192,13 @@ class _EchoStreamingMixin:
             cleaned: dict[str, float] = {}
             for k, v in logit_bias.items():
                 try:
-                    tid = int(k)
+                    bias_tid = int(k)
                     bias = float(v)
                 except (TypeError, ValueError):
                     continue
                 if bias != bias or bias < -100.0 or bias > 100.0:
                     continue
-                cleaned[str(tid)] = bias
+                cleaned[str(bias_tid)] = bias
             if cleaned:
                 body["logit_bias"] = cleaned
         body.update(self._sampler_to_api_params(sampler_name, sampler_params))
@@ -170,9 +218,9 @@ class _EchoStreamingMixin:
             extra_headers["x-multi-turn-session-id"] = str(session_id)
 
         note_parts = [f"{sampler_name} (server-side, combined echo+stream)"]
-        for k in ("temperature", "top_p", "top_k", "min_p"):
-            if k in body and body[k] is not None:
-                note_parts.append(f"{k}={body[k]:g}")
+        for knob in ("temperature", "top_p", "top_k", "min_p"):
+            if knob in body and body[knob] is not None:
+                note_parts.append(f"{knob}={body[knob]:g}")
         note = ", ".join(note_parts)
 
         # Incremental echo+stream. The provider sends ONE position per SSE

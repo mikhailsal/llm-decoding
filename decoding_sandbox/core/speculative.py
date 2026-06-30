@@ -120,6 +120,7 @@ def speculative_generate(
     The second form is preserved for the existing CLI / tests; internally it
     constructs an :class:`HFSpeculator`.
     """
+    spec: Speculator
     if isinstance(target_or_spec, Speculator) and draft is None:
         spec = target_or_spec
     else:
@@ -128,8 +129,15 @@ def speculative_generate(
                 "speculative_generate requires either a Speculator or both "
                 "(target, draft) Backends."
             )
-        # Default wrapper around verify_greedy-capable target.
-        spec = HFSpeculator(target=target_or_spec, draft=draft)
+        # Default wrapper around verify_greedy-capable target. The
+        # ``isinstance(..., Speculator)`` check above only narrows when
+        # ``draft is None`` -- in this branch ``target_or_spec`` is the
+        # raw ``Backend`` to wrap (a Speculator passed alongside a
+        # draft is treated as a Backend, mirroring the old behaviour).
+        target_backend: Backend = (
+            target_or_spec.target if isinstance(target_or_spec, Speculator) else target_or_spec
+        )
+        spec = HFSpeculator(target=target_backend, draft=draft)
 
     target = spec.target
     tokens = target.tokenize(prompt)

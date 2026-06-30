@@ -96,11 +96,14 @@ class HFBackend(Backend):
         return self.tokenizer(text, return_tensors=None)["input_ids"]
 
     def detokenize(self, token_ids: list[int]) -> str:
-        return self.tokenizer.decode(token_ids)
+        # ``PreTrainedTokenizerBase.decode`` is typed as ``str | list[str]``
+        # because some subclasses can return a batched form; for a single
+        # ``list[int]`` input every backend we use returns a plain string.
+        return str(self.tokenizer.decode(token_ids))
 
     def piece(self, token_id: int) -> str:
         if token_id not in self._piece_cache:
-            self._piece_cache[token_id] = self.tokenizer.decode([token_id])
+            self._piece_cache[token_id] = str(self.tokenizer.decode([token_id]))
         return self._piece_cache[token_id]
 
     def special_tokens(self) -> list[tuple[int, str]]:

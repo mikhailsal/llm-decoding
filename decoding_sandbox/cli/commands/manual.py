@@ -27,4 +27,5 @@ def cmd_manual(
             return rc
         name = args.backend or cfg.default_backend
         backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=None)
+    assert backend is not None  # set above when ``own_backend`` was True
     return run_manual(backend, args.prompt, top_k=args.top_k, own_backend=own_backend)

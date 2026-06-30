@@ -24,8 +24,13 @@ import shlex
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from decoding_sandbox.core.backend import Backend
+    from decoding_sandbox.core.config import Config
 
 
 @dataclass
@@ -38,8 +43,8 @@ class SessionState:
     flag would do; flip it inline with ``:timing on|off``.
     """
 
-    cfg: object  # decoding_sandbox.core.config.Config, kept opaque to avoid cycles
-    backend: object  # decoding_sandbox.core.backend.Backend
+    cfg: Config
+    backend: Backend | None
     backend_name: str
     backend_model: str | None
     console: Console
@@ -258,7 +263,8 @@ def _switch_backend(state: SessionState, rest: str) -> DispatchResult:
     old = state.backend
     state.console.print("[dim]closing previous backend...[/dim]")
     try:
-        old.close()  # type: ignore[union-attr]
+        if old is not None:
+            old.close()
     except Exception as exc:
         state.console.print(f"[yellow]close warning: {exc}[/yellow]")
 

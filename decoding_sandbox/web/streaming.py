@@ -324,7 +324,8 @@ def _can_use_combined_echo_stream(
     if caps is None or not getattr(caps, "supports_combined_echo_stream", False):
         return False
     try:
-        return bool(backend.supports_native_sampler(sampler_name, sampler_params))
+        sns = backend.supports_native_sampler  # type: ignore[attr-defined]
+        return bool(sns(sampler_name, sampler_params))
     except Exception:
         return False
 

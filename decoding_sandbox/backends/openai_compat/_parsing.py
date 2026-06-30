@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from decoding_sandbox.core.backend import candidates_from_logprobs
 from decoding_sandbox.core.engine import GenStep
@@ -15,6 +15,23 @@ log = logging.getLogger(__name__)
 
 
 class _ParsingMixin:
+    # Composite-class attributes set in ``OpenAICompatBackend.__init__``;
+    # declared here under TYPE_CHECKING so mypy sees the surface this
+    # mixin reaches into (``_id_to_text`` / ``_text_to_id`` / ``_intern``
+    # live across mixins, ``_provider_flag`` / ``_surface_text`` /
+    # ``lookup_watch`` come from sibling mixins). Runtime semantics are
+    # unchanged -- all real definitions live in
+    # :mod:`decoding_sandbox.backends.openai_compat.backend` and
+    # ``_tokenizer.py``.
+    if TYPE_CHECKING:
+        _id_to_text: dict[int, str]
+        _text_to_id: dict[str, int]
+        _INTERN_ID_BASE: int
+
+        def _provider_flag(self, name: str) -> bool: ...
+        def _surface_text(self, token_id: int | None, provider_text: str) -> str: ...
+        def lookup_watch(self, step: StepResult, token_id: int) -> TokenCandidate: ...
+
     def _intern(self, text: str) -> int:
         if text not in self._text_to_id:
             tid = self._INTERN_ID_BASE + len(self._text_to_id)

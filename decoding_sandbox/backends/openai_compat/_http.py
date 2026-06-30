@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from decoding_sandbox.backends.openai_compat._constants import _RETRIABLE_STATUSES
 from decoding_sandbox.core import usage as usage_mod
+
+if TYPE_CHECKING:
+    import httpx
+
+    from decoding_sandbox.core.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +37,20 @@ def _parse_retry_after(value: str | None) -> float | None:
 
 
 class _HttpMixin:
+    # Composite-class attributes set in ``OpenAICompatBackend.__init__``;
+    # declared here under TYPE_CHECKING so mypy sees the surface this
+    # mixin reaches into without changing runtime semantics.
+    if TYPE_CHECKING:
+        provider: ProviderConfig
+        model: str
+        _client: httpx.Client
+        _max_retries: int
+        _base_backoff_s: float
+        _sleep: Any
+        _active_usage: usage_mod.UsageSink | None
+
+        def _provider_flag(self, name: str) -> bool: ...
+
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         if self.provider.require_parameters:
             body.setdefault("provider", {})["require_parameters"] = True

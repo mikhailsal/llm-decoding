@@ -40,6 +40,10 @@ def cmd_generate(
         if own_backend:
             name = args.backend or cfg.default_backend
             backend = _build_backend_with_load_timing(name, cfg, model=args.model, timing=timing)
+        # ``backend`` is supplied by the session REPL or built above; in
+        # either case it is set by this point. The assert lets mypy
+        # narrow the Optional for every subsequent ``backend.*`` access.
+        assert backend is not None
         if show_banner:
             app.console.print(f"backend: [cyan]{backend.capabilities.name}[/cyan]")
 

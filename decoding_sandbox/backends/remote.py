@@ -252,10 +252,28 @@ class RemoteBackend(Backend):
         self._special_tokens_cache = out
         return out
 
-    def next_distribution(self, token_ids: list[int], top_k: int) -> StepResult:
-        body = {"ids": [int(i) for i in token_ids], "top_k": int(top_k)}
+    def next_distribution(
+        self,
+        token_ids: list[int],
+        top_k: int,
+        *,
+        watch_ids: Sequence[int] = (),
+    ) -> StepResult:
+        body: dict[str, Any] = {"ids": [int(i) for i in token_ids], "top_k": int(top_k)}
+        if watch_ids:
+            # Forward the field so a future dsbx-serve that exposes
+            # ``watch_ids`` on ``/v1/next_distribution`` can populate
+            # ``StepResult.watched`` with exact logprobs. Older servers
+            # silently drop the unknown field; we then fall back to the
+            # generic top-k-only lookup below so callers always see a
+            # populated ``watched`` map.
+            body["watch_ids"] = [int(i) for i in watch_ids]
         data = self._post("/v1/next_distribution", body)
-        return _step_from_dict(data)
+        step = _step_from_dict(data)
+        for wid in watch_ids:
+            if int(wid) not in step.watched:
+                step.watched[int(wid)] = self.lookup_watch(step, int(wid))
+        return step
 
     def score_prompt(
         self,

@@ -186,7 +186,8 @@ class Sampler:
         chosen = ctx.rng.choices(kept_cands, weights=kept_norm, k=1)[0]
         # Mirostat post-update: shift μ towards the surprise the chosen
         # token actually emitted (in nats, since pairs carry probs).
-        if self.mirostat_target is not None and self.mirostat_target > 0:
+        mirostat_target = self.mirostat_target
+        if mirostat_target is not None and mirostat_target > 0:
             chosen_prob = next(
                 (
                     p
@@ -195,9 +196,9 @@ class Sampler:
                 ),
                 None,
             )
-            if chosen_prob and chosen_prob > 0:
+            if chosen_prob and chosen_prob > 0 and self._mirostat_mu is not None:
                 surprise = -math.log(chosen_prob)
-                self._mirostat_mu -= self.mirostat_lr * (surprise - self.mirostat_target)
+                self._mirostat_mu -= self.mirostat_lr * (surprise - mirostat_target)
         return SamplerDecision(
             token_id=chosen.token_id,
             token_text=chosen.text,

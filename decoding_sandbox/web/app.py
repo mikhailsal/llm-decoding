@@ -556,6 +556,7 @@ def make_web_app(
             if req.text is not None:
                 entry.force_text(req.text)
             else:
+                assert req.id is not None  # 400 above guarantees one is set
                 entry.force_id(int(req.id))
             return _snapshot(backend, entry)
 
@@ -671,7 +672,9 @@ def make_web_app(
         )
 
     # ------------------------------------------------------------- probe
-    _probe_cache: dict[str, object] = {"rows": None, "at": None}
+    # Cache for /api/v1/probe responses. Typed concretely so mypy can
+    # see the two fields' types instead of staring at ``dict[str, object]``.
+    _probe_cache: dict[str, list[S.ProbeRow] | float | None] = {"rows": None, "at": None}
 
     @app.get(
         "/api/v1/probe",
@@ -682,12 +685,10 @@ def make_web_app(
     def probe(refresh: bool = Query(default=False)) -> S.ProbeResponse:
         from decoding_sandbox.core import provider_probe
 
-        if not refresh and _probe_cache["rows"] is not None:
-            return S.ProbeResponse(
-                rows=list(_probe_cache["rows"]),  # type: ignore[arg-type]
-                fresh=False,
-                cached_at=float(_probe_cache["at"]),  # type: ignore[arg-type]
-            )
+        cached_rows = _probe_cache["rows"]
+        cached_at = _probe_cache["at"]
+        if not refresh and isinstance(cached_rows, list) and isinstance(cached_at, float):
+            return S.ProbeResponse(rows=list(cached_rows), fresh=False, cached_at=cached_at)
         rows: list[S.ProbeRow] = []
         for name in sorted(cfg.providers):
             r = provider_probe.probe_provider(cfg.provider(name), None)
@@ -699,9 +700,10 @@ def make_web_app(
                     prompt_logprobs=r.prompt_logprobs,
                 )
             )
+        now = time.time()
         _probe_cache["rows"] = rows
-        _probe_cache["at"] = time.time()
-        return S.ProbeResponse(rows=rows, fresh=True, cached_at=float(_probe_cache["at"]))
+        _probe_cache["at"] = now
+        return S.ProbeResponse(rows=rows, fresh=True, cached_at=now)
 
     # ----------------------------------------------------- global errors
     @app.exception_handler(LookupError)

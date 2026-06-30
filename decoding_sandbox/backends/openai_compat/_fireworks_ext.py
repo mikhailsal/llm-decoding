@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from decoding_sandbox.core.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
 
 class _FireworksExtMixin:
+    # Composite-class attributes set in ``OpenAICompatBackend.__init__``;
+    # declared here under TYPE_CHECKING so mypy sees the surface this
+    # mixin reaches into without changing runtime semantics.
+    if TYPE_CHECKING:
+        provider: ProviderConfig
+        _client: httpx.Client
+        _transport: httpx.BaseTransport | None
+
+        def _provider_flag(self, name: str) -> bool: ...
+
     def _attach_logprobs_request(self, body: dict[str, Any], *, top_k: int) -> None:
         """Add the logprobs-related fields to ``body`` in the right shape.
 

@@ -50,4 +50,5 @@ def cmd_session(args: argparse.Namespace, cfg: Config) -> int:
         return run_session(state)
     finally:
         with contextlib.suppress(Exception):
-            state.backend.close()  # type: ignore[union-attr]
+            if state.backend is not None:
+                state.backend.close()

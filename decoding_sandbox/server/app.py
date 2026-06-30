@@ -412,8 +412,10 @@ def make_app(
         # Snapshot the request now so the streaming generator doesn't
         # accidentally close over a pydantic model that FastAPI might
         # invalidate by the time the body actually runs (it won't in
-        # practice, but the snapshot also keeps types tight).
-        params = {
+        # practice, but the snapshot also keeps types tight). ``Any``-
+        # typed so the ``**params`` splat below satisfies the per-
+        # parameter type signature of ``_run_generate_stream``.
+        params: dict[str, Any] = {
             "prompt": req.prompt,
             "max_tokens": int(req.max_tokens),
             "top_k": int(req.top_k),

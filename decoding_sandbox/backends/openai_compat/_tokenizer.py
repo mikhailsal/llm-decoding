@@ -6,12 +6,35 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import threading
+
     from tokenizers import Tokenizer
+
+    from decoding_sandbox.core.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
 
 class _TokenizerMixin:
+    # Composite-class attributes set in ``OpenAICompatBackend.__init__``;
+    # declared here under TYPE_CHECKING so the mypy run sees a consistent
+    # surface for cross-mixin access. The real definitions and lifetimes
+    # live in :mod:`decoding_sandbox.backends.openai_compat.backend`.
+    if TYPE_CHECKING:
+        provider: ProviderConfig
+        model: str
+        _tokenizer: Tokenizer | None
+        _tokenizer_load_attempted: bool
+        _tokenizer_load_error: str
+        _tokenizer_load_lock: threading.Lock
+        _bos_ids: tuple[int, ...]
+        _id_to_text: dict[int, str]
+        _text_to_id: dict[str, int]
+        _BOS_TOKEN_CANDIDATES: tuple[str, ...]
+        _INTERN_ID_BASE: int
+
+        def _intern(self, text: str) -> int: ...
+
     def _ensure_tokenizer(self) -> Tokenizer | None:
         """Lazy-load the HF tokenizer for ``self.model``; cache the result.
 
