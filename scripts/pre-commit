@@ -1,0 +1,26 @@
+#!/bin/bash
+# Pre-commit hook to verify code quality and run tests.
+
+# Get the root of the git repository
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+# Activate virtual environment if it exists
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+fi
+
+# Run the quality check
+echo "Running pre-commit quality checks (make quality-check)..."
+make quality-check
+RESULT=$?
+
+if [ $RESULT -ne 0 ]; then
+    echo ""
+    echo "❌ [PRE-COMMIT ERROR] Code quality rules or tests failed."
+    echo "Please fix the issues above before committing, or commit with --no-verify if absolutely necessary."
+    exit 1
+fi
+
+echo "✅ [PRE-COMMIT PASSED] All tests and quality checks passed."
+exit 0

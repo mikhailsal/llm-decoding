@@ -4,10 +4,12 @@ DSBX_DEST ?= llm-decoding
 REMOTE = ssh $(DSBX_HOST) 'cd $(DSBX_DEST) && source .venv/bin/activate &&
 
 .PHONY: help sync doctor probe doctor-local probe-local serve-py serve-hf fmt \
-        web-dev web-build web-prod web-test test coverage lint quality-check
+        web-dev web-build web-prod web-test test coverage lint quality-check \
+        install-hooks
 
 help:
 	@echo "Targets:"
+	@echo "  install-hooks Install git pre-commit hook"
 	@echo "  sync          rsync source to dsbx-host"
 	@echo "  doctor        sync + run 'dsbx doctor' on dsbx-host"
 	@echo "  probe         sync + run 'dsbx probe' on dsbx-host"
@@ -94,3 +96,11 @@ web-prod:
 web-test:
 	pytest tests -k web
 	cd frontend && pnpm test --run
+
+install-hooks:
+	@echo "Installing pre-commit hook..."
+	@mkdir -p .git/hooks
+	@ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Pre-commit hook installed successfully (symlinked to scripts/pre-commit)."
+
