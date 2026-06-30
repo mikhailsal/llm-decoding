@@ -88,6 +88,8 @@ dev = [
     # against an in-memory aiosqlite DB.
     "sqlalchemy>=2.0",
     "aiosqlite>=0.20",
+    # Required to run test_llamacpp_py which mocks the real GPU deps but uses numpy
+    "numpy>=1.26",
 ]
 
 [project.scripts]
